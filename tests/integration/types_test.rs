@@ -4,8 +4,6 @@
 mod common;
 use common::*;
 
-use db2_proto::types::Db2Value;
-
 #[tokio::test]
 async fn test_null_handling() {
     let client = connect().await;
@@ -30,11 +28,9 @@ async fn test_null_handling() {
         .await
         .expect("select null");
     assert_eq!(result.rows.len(), 1);
-    let val = result.rows[0].get(0);
-    assert!(
-        matches!(val, Some(&Db2Value::Null) | None),
-        "NULL column should return Db2Value::Null or None"
-    );
+    // NULL column should return None when accessed via get
+    let val: Option<String> = result.rows[0].get("VAL");
+    assert!(val.is_none(), "NULL column should return None");
 
     drop_table(&client, &table).await;
     client.close().await.expect("close");

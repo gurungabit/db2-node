@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use db2_client::{Client, Config, Pool, PoolConfig};
 use std::env;
 use std::sync::Once;

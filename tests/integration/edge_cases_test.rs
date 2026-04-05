@@ -4,8 +4,6 @@
 mod common;
 use common::*;
 
-use db2_proto::types::Db2Value;
-
 #[tokio::test]
 async fn test_empty_string_vs_null() {
     let client = connect().await;
@@ -34,36 +32,20 @@ async fn test_empty_string_vs_null() {
         .expect("select");
     assert_eq!(result.rows.len(), 2);
 
-    // Row 1 should have empty string (not null)
-    let row1_val = result.rows[0].get(1);
-    match row1_val {
-        Some(Db2Value::VarChar(s)) | Some(Db2Value::Char(s)) => {
-            assert!(
-                s.is_empty() || s.trim().is_empty(),
-                "should be empty string, got: '{}'",
-                s
-            );
-        }
-        other => {
-            // Some DB2 configs may return empty string as null; just verify it is not an error
-            assert!(
-                matches!(
-                    other,
-                    Some(&Db2Value::Null) | None | Some(&Db2Value::VarChar(_))
-                ),
-                "unexpected value for empty string: {:?}",
-                other
-            );
-        }
+    // Row 1 should have empty string (not null) — or in some DB2 configs, null
+    let row1_val: Option<String> = result.rows[0].get("VAL");
+    // Acceptable: Some("") or None (some DB2 configs treat empty string as null)
+    if let Some(ref s) = row1_val {
+        assert!(
+            s.is_empty() || s.trim().is_empty(),
+            "should be empty string, got: '{}'",
+            s
+        );
     }
 
     // Row 2 should be null
-    let row2_val = result.rows[1].get(1);
-    assert!(
-        matches!(row2_val, Some(&Db2Value::Null) | None),
-        "NULL row should be null, got: {:?}",
-        row2_val
-    );
+    let row2_val: Option<String> = result.rows[1].get("VAL");
+    assert!(row2_val.is_none(), "NULL row should be None");
 
     drop_table(&client, &table).await;
     client.close().await.expect("close");
@@ -74,7 +56,6 @@ async fn test_very_long_sql() {
     let client = connect().await;
 
     // Build a ~40KB SQL statement using string concatenation
-    // VALUES ('aaa...') where the string is ~40,000 characters
     let long_string: String = "x".repeat(39_000);
     let sql = format!("VALUES ('{}')", long_string);
     assert!(sql.len() > 39_000, "SQL should be > 39KB");
@@ -112,7 +93,7 @@ async fn test_special_characters_in_data() {
         client
             .query(&format!("INSERT INTO {} VALUES ('{}')", table, val), &[])
             .await
-            .expect(&format!("insert special chars: {}", val));
+            .unwrap_or_else(|_| panic!("insert special chars: {}", val));
     }
 
     let result = client
@@ -134,8 +115,10 @@ async fn test_rapid_prepare_close() {
         let stmt = client
             .prepare(&format!("VALUES {}", i))
             .await
-            .expect(&format!("prepare #{}", i));
-        stmt.close().await.expect(&format!("close stmt #{}", i));
+            .unwrap_or_else(|_| panic!("prepare #{}", i));
+        stmt.close()
+            .await
+            .unwrap_or_else(|_| panic!("close stmt #{}", i));
     }
 
     // Verify the connection is still healthy after all that churn
@@ -157,7 +140,7 @@ async fn test_multiple_result_sets_sequentially() {
         let result = client
             .query(&format!("VALUES {}", i), &[])
             .await
-            .expect(&format!("query #{}", i));
+            .unwrap_or_else(|_| panic!("query #{}", i));
         assert_eq!(result.row_count, 1);
     }
 

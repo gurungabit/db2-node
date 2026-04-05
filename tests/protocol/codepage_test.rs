@@ -62,11 +62,11 @@ fn test_rdbnam_padding() {
     );
 
     // Remaining 12 bytes should be EBCDIC space (0x40)
-    for i in 6..18 {
+    for (i, &byte) in padded.iter().enumerate().take(18).skip(6) {
         assert_eq!(
-            padded[i], 0x40,
+            byte, 0x40,
             "byte {} should be EBCDIC space (0x40), got 0x{:02X}",
-            i, padded[i]
+            i, byte
         );
     }
 }
@@ -97,8 +97,8 @@ fn test_pad_ebcdic_custom_length() {
     assert_eq!(padded.len(), 8);
     let prefix = utf8_to_ebcdic037("AB");
     assert_eq!(&padded[..2], &prefix[..]);
-    for i in 2..8 {
-        assert_eq!(padded[i], 0x40);
+    for &byte in &padded[2..8] {
+        assert_eq!(byte, 0x40);
     }
 }
 

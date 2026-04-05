@@ -75,7 +75,7 @@ async fn test_prepared_insert_with_params() {
             &name_param as &dyn db2_client::ToSql,
         ])
         .await
-        .expect(&format!("execute insert #{}", i));
+        .unwrap_or_else(|_| panic!("execute insert #{}", i));
     }
 
     stmt.close().await.expect("close stmt");
@@ -125,11 +125,8 @@ async fn test_prepared_null_param() {
         .await
         .expect("select");
     assert_eq!(result.rows.len(), 1);
-    let val = result.rows[0].get(0);
-    assert!(
-        matches!(val, Some(&Db2Value::Null) | None),
-        "NULL param should store NULL"
-    );
+    let val: Option<String> = result.rows[0].get("VAL");
+    assert!(val.is_none(), "NULL param should store NULL");
 
     drop_table(&client, &table).await;
     client.close().await.expect("close");
@@ -162,7 +159,7 @@ async fn test_prepared_many_params() {
         .expect("prepare with 20 params");
 
     // Build 20 integer parameters
-    let params: Vec<Db2Value> = (1..=20).map(|i| Db2Value::Integer(i)).collect();
+    let params: Vec<Db2Value> = (1..=20).map(Db2Value::Integer).collect();
     let param_refs: Vec<&dyn db2_client::ToSql> =
         params.iter().map(|p| p as &dyn db2_client::ToSql).collect();
 

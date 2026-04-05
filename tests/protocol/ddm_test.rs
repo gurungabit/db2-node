@@ -11,8 +11,8 @@ use db2_proto::ddm::*;
 fn test_ddm_build_simple() {
     // Build a DDM with a single string parameter
     let mut builder = DdmBuilder::new(codepoints::EXCSAT);
-    builder.write_string_param(codepoints::EXTNAM, "db2wire_test");
-    let bytes = builder.finish();
+    builder.add_string(codepoints::EXTNAM, "db2wire_test");
+    let bytes = builder.build();
 
     // DDM header is 4 bytes: length (u16 BE) + code point (u16 BE)
     assert!(bytes.len() >= 4, "DDM must have at least a header");
@@ -30,25 +30,24 @@ fn test_ddm_build_simple() {
 #[test]
 fn test_ddm_parse_simple() {
     let mut builder = DdmBuilder::new(codepoints::EXCSAT);
-    builder.write_string_param(codepoints::SRVNAM, "TestServer");
-    let bytes = builder.finish();
+    builder.add_string(codepoints::SRVNAM, "TestServer");
+    let bytes = builder.build();
 
-    let ddm = Ddm::parse(&bytes).expect("should parse DDM");
-    assert_eq!(ddm.code_point(), codepoints::EXCSAT);
-    assert!(ddm.payload().len() > 0, "DDM should have payload");
+    let (ddm, _consumed) = DdmObject::parse(&bytes).expect("should parse DDM");
+    assert_eq!(ddm.code_point, codepoints::EXCSAT);
+    assert!(!ddm.data.is_empty(), "DDM should have payload");
 }
 
 #[test]
 fn test_ddm_nested_params() {
     let mut builder = DdmBuilder::new(codepoints::EXCSAT);
-    builder.write_string_param(codepoints::EXTNAM, "db2wire");
-    builder.write_string_param(codepoints::SRVNAM, "myserver");
-    builder.write_string_param(codepoints::SRVRLSLV, "V12R1M0");
-    let bytes = builder.finish();
+    builder.add_string(codepoints::EXTNAM, "db2wire");
+    builder.add_string(codepoints::SRVNAM, "myserver");
+    builder.add_string(codepoints::SRVRLSLV, "V12R1M0");
+    let bytes = builder.build();
 
-    let ddm = Ddm::parse(&bytes).expect("should parse");
-    // Iterate parameters
-    let params: Vec<DdmParam> = ddm.params().collect();
+    let (ddm, _) = DdmObject::parse(&bytes).expect("should parse");
+    let params = ddm.parameters();
     assert_eq!(params.len(), 3, "should have 3 nested parameters");
     assert_eq!(params[0].code_point, codepoints::EXTNAM);
     assert_eq!(params[1].code_point, codepoints::SRVNAM);
@@ -58,16 +57,16 @@ fn test_ddm_nested_params() {
 #[test]
 fn test_ddm_roundtrip() {
     let mut builder = DdmBuilder::new(codepoints::ACCSEC);
-    builder.write_u16_param(codepoints::SECMEC, codepoints::SECMEC_USRIDPWD);
-    builder.write_bytes_param(
+    builder.add_u16(codepoints::SECMEC, codepoints::SECMEC_USRIDPWD);
+    builder.add_code_point(
         codepoints::RDBNAM,
         &db2_proto::codepage::pad_rdbnam("TESTDB"),
     );
-    let built = builder.finish();
+    let built = builder.build();
 
-    let ddm = Ddm::parse(&built).expect("roundtrip parse");
-    assert_eq!(ddm.code_point(), codepoints::ACCSEC);
-    let params: Vec<DdmParam> = ddm.params().collect();
+    let (ddm, _) = DdmObject::parse(&built).expect("roundtrip parse");
+    assert_eq!(ddm.code_point, codepoints::ACCSEC);
+    let params = ddm.parameters();
     assert_eq!(params.len(), 2);
     assert_eq!(params[0].code_point, codepoints::SECMEC);
     assert_eq!(params[1].code_point, codepoints::RDBNAM);
@@ -77,10 +76,10 @@ fn test_ddm_roundtrip() {
 fn test_ddm_excsat_build() {
     // Build a realistic EXCSAT command
     let mut builder = DdmBuilder::new(codepoints::EXCSAT);
-    builder.write_string_param(codepoints::EXTNAM, "db2wire_test_client");
-    builder.write_string_param(codepoints::SRVNAM, "localhost");
-    builder.write_string_param(codepoints::SRVCLSNM, "DB2/LINUX");
-    builder.write_string_param(codepoints::SRVRLSLV, "V12R1M000");
+    builder.add_string(codepoints::EXTNAM, "db2wire_test_client");
+    builder.add_string(codepoints::SRVNAM, "localhost");
+    builder.add_string(codepoints::SRVCLSNM, "DB2/LINUX");
+    builder.add_string(codepoints::SRVRLSLV, "V12R1M000");
 
     // Build manager-level list
     let mgrlvl_data = build_mgrlvl_list(&[
@@ -89,9 +88,9 @@ fn test_ddm_excsat_build() {
         (codepoints::RDB, 7),
         (codepoints::SECMGR, 7),
     ]);
-    builder.write_bytes_param(codepoints::MGRLVLLS, &mgrlvl_data);
+    builder.add_code_point(codepoints::MGRLVLLS, &mgrlvl_data);
 
-    let bytes = builder.finish();
+    let bytes = builder.build();
     let code_point = u16::from_be_bytes([bytes[2], bytes[3]]);
     assert_eq!(
         code_point,
@@ -100,8 +99,8 @@ fn test_ddm_excsat_build() {
     );
 
     // Verify we can parse it back
-    let ddm = Ddm::parse(&bytes).expect("parse EXCSAT");
-    let params: Vec<DdmParam> = ddm.params().collect();
+    let (ddm, _) = DdmObject::parse(&bytes).expect("parse EXCSAT");
+    let params = ddm.parameters();
     assert!(params.len() >= 5, "EXCSAT should have at least 5 params");
 }
 
@@ -109,16 +108,16 @@ fn test_ddm_excsat_build() {
 fn test_ddm_empty_data() {
     // A DDM with no nested parameters (just the 4-byte header)
     let builder = DdmBuilder::new(codepoints::RDBCMM);
-    let bytes = builder.finish();
+    let bytes = builder.build();
 
     assert_eq!(
         bytes.len(),
         4,
         "empty DDM should be exactly 4 bytes (header only)"
     );
-    let ddm = Ddm::parse(&bytes).expect("parse empty DDM");
-    assert_eq!(ddm.code_point(), codepoints::RDBCMM);
-    let params: Vec<DdmParam> = ddm.params().collect();
+    let (ddm, _) = DdmObject::parse(&bytes).expect("parse empty DDM");
+    assert_eq!(ddm.code_point, codepoints::RDBCMM);
+    let params = ddm.parameters();
     assert_eq!(params.len(), 0, "empty DDM should have no params");
 }
 

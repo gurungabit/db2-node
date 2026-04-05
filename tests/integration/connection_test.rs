@@ -4,7 +4,7 @@
 mod common;
 use common::*;
 
-use db2_client::{Client, Config};
+use db2_client::Client;
 
 #[tokio::test]
 async fn test_basic_connect_disconnect() {
@@ -85,7 +85,7 @@ async fn test_multiple_sequential_connections() {
         let result = client
             .query("VALUES 1", &[])
             .await
-            .expect(&format!("query #{} should succeed", i));
+            .unwrap_or_else(|_| panic!("query #{} should succeed", i));
         assert_eq!(result.row_count, 1);
         client.close().await.expect("should close cleanly");
     }

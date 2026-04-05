@@ -31,7 +31,7 @@ async fn test_pool_concurrent_queries() {
             let result = pool
                 .query(&format!("VALUES {}", i), &[])
                 .await
-                .expect(&format!("concurrent query #{} should succeed", i));
+                .unwrap_or_else(|_| panic!("concurrent query #{} should succeed", i));
             assert_eq!(result.row_count, 1);
         });
         handles.push(handle);
@@ -54,8 +54,7 @@ async fn test_pool_exhaustion_and_wait() {
     let client2 = pool.acquire().await.expect("acquire 2");
 
     // Release one connection then acquire again -- should succeed
-    pool.release(&client1).expect("release 1");
-    client1.close().await.expect("close client1");
+    pool.release(client1).await;
 
     let client3 = pool.acquire().await.expect("acquire 3 after release");
     client3.close().await.expect("close client3");
