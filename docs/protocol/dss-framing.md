@@ -1,8 +1,3 @@
----
-title: "DSS Framing"
-weight: 1
----
-
 # DSS Framing (Data Stream Structure)
 
 Every DRDA message on the wire is wrapped in a DSS envelope. This is the lowest protocol layer.

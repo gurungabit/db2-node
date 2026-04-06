@@ -1,8 +1,3 @@
----
-title: "Protocol"
-weight: 40
----
-
 # DRDA Protocol
 
 db2-node implements the IBM DRDA (Distributed Relational Database Architecture) wire protocol. DRDA is an open standard published by The Open Group that defines how clients communicate with DB2 databases over TCP.
@@ -33,12 +28,12 @@ DRDA communication is structured in layers:
 
 ## Sections
 
-- [DSS Framing](dss-framing/) — The wire frame format
-- [DDM Objects](ddm-objects/) — Command and reply message structure
-- [Connection Flow](connection-flow/) — The 4-step handshake sequence
-- [Query Flow](query-flow/) — How SELECT, INSERT, UPDATE, DELETE work
-- [Data Encoding](data-encoding/) — FD:OCA, type system, EBCDIC
-- [Code Points](code-points/) — Reference table of all DRDA code points
+- [DSS Framing](dss-framing.md) — The wire frame format
+- [DDM Objects](ddm-objects.md) — Command and reply message structure
+- [Connection Flow](connection-flow.md) — The 4-step handshake sequence
+- [Query Flow](query-flow.md) — How SELECT, INSERT, UPDATE, DELETE work
+- [Data Encoding](data-encoding.md) — FD:OCA, type system, EBCDIC
+- [Code Points](code-points.md) — Reference table of all DRDA code points
 
 ## Reference Materials
 

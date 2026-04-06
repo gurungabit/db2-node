@@ -1,6 +1,6 @@
 .PHONY: all build test test-unit test-integration test-node db2-start db2-stop db2-status docs-build docs-serve clean
 
-HUGO_IMAGE ?= klakegg/hugo:ext-alpine
+MKDOCS_IMAGE ?= squidfunk/mkdocs-material:9.7.6
 DOCS_OUTPUT_DIR ?= .tmp-docs-public
 
 all: build test
@@ -40,10 +40,10 @@ test-node: db2-ensure
 	cd crates/db2-napi && npm install && npm test
 
 docs-build:
-	docker run --rm -v $(CURDIR):/work -w /work/docs $(HUGO_IMAGE) --destination /work/$(DOCS_OUTPUT_DIR)
+	docker run --rm -v $(CURDIR):/docs $(MKDOCS_IMAGE) build --clean --site-dir $(DOCS_OUTPUT_DIR)
 
 docs-serve:
-	docker run --rm -p 1313:1313 -v $(CURDIR):/work -w /work/docs $(HUGO_IMAGE) server --bind 0.0.0.0 --port 1313
+	docker run --rm -p 8000:8000 -v $(CURDIR):/docs $(MKDOCS_IMAGE) serve --dev-addr 0.0.0.0:8000
 
 test: test-unit test-integration
 

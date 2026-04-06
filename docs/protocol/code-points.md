@@ -1,8 +1,3 @@
----
-title: "Code Points"
-weight: 6
----
-
 # DRDA Code Point Reference
 
 Code points are 2-byte identifiers used in DDM objects to identify commands, replies, and parameters. This is a reference of the code points used by db2-node.

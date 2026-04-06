@@ -11,7 +11,7 @@ This repository contains the driver, the protocol implementation, the Node.js bi
 - `crates/db2-napi` — `napi-rs` bindings published as the `@gurungabit/db2-node` npm package
 - `tests/integration` — Rust integration tests against a real DB2 instance
 - `tests/node` — Node.js integration tests against the public JS API
-- `docs` — Hugo docs site
+- `docs` — MkDocs Material docs site
 - `examples/demo.ts` / `examples/demo-million.ts` — repo-local examples for quick validation and benchmarking
 - `examples/todo-app` — full-stack example app using the published Node bindings
 
@@ -135,7 +135,7 @@ DEMO_TOTAL_ROWS=100000 npx --yes tsx examples/demo-million.ts
 
 ## Docs Site
 
-Build the Hugo site:
+Build the MkDocs Material site:
 
 ```bash
 make docs-build
@@ -149,9 +149,9 @@ make docs-serve
 
 Then open:
 
-- `http://localhost:1313/db2-node/`
+- `http://localhost:8000/db2-node/`
 
-The local docs site includes search and is configured to match the GitHub Pages subpath.
+The deployed docs site lives at `https://gurungabit.github.io/db2-node/`.
 
 ## Release Flow
 

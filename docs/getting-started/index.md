@@ -1,8 +1,3 @@
----
-title: "Getting Started"
-weight: 10
----
-
 # Getting Started
 
 This guide walks you through installing `@gurungabit/db2-node`, connecting to a DB2 database, and running your first queries.
@@ -217,4 +212,4 @@ cd db2-node
 # Password: db2wire_test_pw
 ```
 
-See the [Contributing]({{< relref "contributing/_index.md" >}}) guide for full development instructions.
+See the [Contributing](../contributing/index.md) guide for full development instructions.

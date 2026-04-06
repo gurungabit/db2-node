@@ -1,8 +1,3 @@
----
-title: "Contributing"
-weight: 50
----
-
 # Contributing
 
 This guide covers the development setup, testing infrastructure, and contribution workflow for db2-node.
@@ -119,13 +114,13 @@ This captures DRDA byte sequences for known operations and saves them in `tests/
 
 ## Documentation Site
 
-You can run the Hugo docs site locally without installing Hugo on your machine:
+The docs site is built with Material for MkDocs. You can run it locally without installing Python or MkDocs on your machine:
 
 ```bash
 make docs-serve
 ```
 
-This serves the site at `http://localhost:1313/db2-node/`.
+This serves the site at `http://localhost:8000/db2-node/`.
 
 To build the static site into `.tmp-docs-public/`:
 
@@ -143,8 +138,8 @@ make docs-build
 | `make test-unit` | Unit tests only (no DB2) |
 | `make test-integration` | Integration tests (starts DB2 if needed) |
 | `make test-node` | Node.js tests |
-| `make docs-build` | Build the Hugo docs site into `.tmp-docs-public/` |
-| `make docs-serve` | Serve the Hugo docs site locally on port 1313 |
+| `make docs-build` | Build the MkDocs site into `.tmp-docs-public/` |
+| `make docs-serve` | Serve the MkDocs site locally on port 8000 |
 | `make db2-start` | Start DB2 container |
 | `make db2-stop` | Stop DB2 container |
 | `make db2-status` | Check DB2 status |

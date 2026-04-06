@@ -1,8 +1,3 @@
----
-title: "Architecture"
-weight: 20
----
-
 # Architecture
 
 db2-node is a pure Rust implementation of the IBM DRDA wire protocol, exposed to Node.js through napi-rs. This page explains the high-level architecture and how the pieces fit together.
@@ -137,7 +132,7 @@ Round trip 2:
   Server -> Client: SECCHKRM + ACCRDBRM
 ```
 
-See the [Protocol]({{< relref "protocol/_index.md" >}}) section for details.
+See the [Protocol](../protocol/index.md) section for details.
 
 ## Dependencies
 

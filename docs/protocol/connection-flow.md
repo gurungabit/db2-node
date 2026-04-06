@@ -1,8 +1,3 @@
----
-title: "Connection Flow"
-weight: 3
----
-
 # Connection Handshake Flow
 
 Establishing a DRDA connection requires a 4-step handshake. db2-node optimizes this to just 2 TCP round trips using DSS chaining.

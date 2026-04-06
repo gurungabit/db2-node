@@ -1,0 +1,66 @@
+site_name: db2-node
+site_description: A zero-dependency DB2 driver for Node.js, built with pure Rust via napi-rs
+site_url: https://gurungabit.github.io/db2-node/
+repo_url: https://github.com/gurungabit/db2-node
+repo_name: gurungabit/db2-node
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: green
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: green
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Overview: index.md
+  - Getting Started: getting-started/index.md
+  - Architecture: architecture/index.md
+  - API Reference: api-reference/index.md
+  - Protocol:
+      - Overview: protocol/index.md
+      - DSS Framing: protocol/dss-framing.md
+      - DDM Objects: protocol/ddm-objects.md
+      - Connection Flow: protocol/connection-flow.md
+      - Query Flow: protocol/query-flow.md
+      - Data Encoding: protocol/data-encoding.md
+      - Code Points: protocol/code-points.md
+  - Contributing: contributing/index.md

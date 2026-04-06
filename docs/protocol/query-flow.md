@@ -1,8 +1,3 @@
----
-title: "Query Flow"
-weight: 4
----
-
 # Query Execution Flows
 
 This page describes the DRDA message sequences for different SQL operations.
@@ -57,7 +52,7 @@ Describes how row data is encoded in QRYDTA:
 
 ### QRYDTA (Query Answer Set Data)
 
-Contains the actual row data. See [Data Encoding](../data-encoding/) for details on how rows are encoded.
+Contains the actual row data. See [Data Encoding](data-encoding.md) for details on how rows are encoded.
 
 ### CNTQRY (Continue Query)
 

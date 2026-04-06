@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'mkdocs.yml'
   workflow_dispatch:
 
 permissions:
@@ -18,7 +19,7 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  HUGO_VERSION: "0.160.0"
+  MKDOCS_IMAGE: squidfunk/mkdocs-material:9.7.6
 
 jobs:
   build:
@@ -28,20 +29,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Hugo
-        run: |
-          curl -fsSL -o /tmp/hugo.tar.gz "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
-          sudo tar -C /usr/local/bin -xzf /tmp/hugo.tar.gz hugo
-          hugo version
-
       - name: Build site
-        working-directory: docs
-        run: hugo --minify --baseURL "https://gurungabit.github.io/db2-node/"
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/docs" \
+            "${MKDOCS_IMAGE}" \
+            build --clean --site-dir .tmp-docs-public
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4.0.0
         with:
-          path: docs/public
+          path: .tmp-docs-public
 
   deploy:
     environment:

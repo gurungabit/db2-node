@@ -1,8 +1,3 @@
----
-title: "API Reference"
-weight: 30
----
-
 # API Reference
 
 Complete TypeScript API reference for `@gurungabit/db2-node`.

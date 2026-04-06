@@ -1,8 +1,3 @@
----
-title: "Data Encoding"
-weight: 5
----
-
 # Data Encoding
 
 This page covers how DB2 encodes data on the wire: the FD:OCA format, type system, CCSID negotiation, and EBCDIC handling.

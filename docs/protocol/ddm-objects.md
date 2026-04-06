@@ -1,8 +1,3 @@
----
-title: "DDM Objects"
-weight: 2
----
-
 # DDM Objects (Distributed Data Management)
 
 Inside each DSS frame, DDM objects carry the actual protocol commands and data. DDM uses a recursive TLV (Type-Length-Value) structure.
