@@ -5,7 +5,7 @@ weight: 3
 
 # Connection Handshake Flow
 
-Establishing a DRDA connection requires a 4-step handshake. db2-wire optimizes this to just 2 TCP round trips using DSS chaining.
+Establishing a DRDA connection requires a 4-step handshake. db2-node optimizes this to just 2 TCP round trips using DSS chaining.
 
 ## Full Handshake Sequence
 
@@ -60,9 +60,9 @@ Read 2:  [DSS(SECCHKRM)] [DSS(ACCRDBRM)]
 The client identifies itself and negotiates protocol capabilities.
 
 **Client sends EXCSAT with**:
-- `EXTNAM` — External name (e.g., "db2-wire-client")
+- `EXTNAM` — External name (e.g., "db2-node-client")
 - `SRVNAM` — Server name identifier
-- `SRVRLSLV` — Product release level (e.g., "db2wire00100")
+- `SRVRLSLV` — Product release level (e.g., "db2node00100")
 - `SRVCLSNM` — Server class name
 - `MGRLVLLS` — Manager level list (capability negotiation)
 
@@ -86,7 +86,7 @@ Negotiate which authentication mechanism to use.
 | `0x0004` | USRIDONL | User ID only (trusted) |
 | `0x0009` | EUSRIDPWD | Encrypted user ID + password |
 
-db2-wire uses `USRIDPWD` (0x0003) by default. When TLS is enabled, credentials are encrypted at the transport layer.
+db2-node uses `USRIDPWD` (0x0003) by default. When TLS is enabled, credentials are encrypted at the transport layer.
 
 ## Step 3: Security Check (SECCHK)
 

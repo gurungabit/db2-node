@@ -5,7 +5,7 @@ weight: 6
 
 # DRDA Code Point Reference
 
-Code points are 2-byte identifiers used in DDM objects to identify commands, replies, and parameters. This is a reference of the code points used by db2-wire.
+Code points are 2-byte identifiers used in DDM objects to identify commands, replies, and parameters. This is a reference of the code points used by db2-node.
 
 ## Connection / Handshake
 
@@ -50,7 +50,7 @@ Code points are 2-byte identifiers used in DDM objects to identify commands, rep
 | `0x2414` | SQLSTT | SQL Statement (carries SQL text) |
 | `0x2412` | SQLDTA | SQL Data (parameter values) |
 | `0x200C` | OPNQRY | Open Query (SELECT) |
-| `0x200E` | CNTQRY | Continue Query (fetch more rows) |
+| `0x2006` | CNTQRY | Continue Query (fetch more rows) |
 | `0x2005` | CLSQRY | Close Query |
 | `0x200A` | EXCSQLIMM | Execute SQL Immediate |
 | `0x200B` | EXCSQLSTT | Execute SQL Statement (prepared) |

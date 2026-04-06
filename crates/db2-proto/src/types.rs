@@ -64,6 +64,10 @@ pub const DRDA_TYPE_NVARGRAPH: u8 = 0x3F;
 pub const DRDA_TYPE_BOOLEAN: u8 = 0xBE;
 pub const DRDA_TYPE_NBOOLEAN: u8 = 0xBF;
 
+// Decimal floating point (IEEE 754 decimal64 / decimal128)
+pub const DRDA_TYPE_DECFLOAT: u8 = 0xBA;
+pub const DRDA_TYPE_NDECFLOAT: u8 = 0xBB;
+
 // XML
 pub const DRDA_TYPE_XML: u8 = 0xDC;
 pub const DRDA_TYPE_NXML: u8 = 0xDD;
@@ -77,6 +81,7 @@ pub enum Db2Type {
     Real,
     Double,
     Decimal { precision: u8, scale: u8 },
+    DecFloat(u8),
     Char(u16),
     VarChar(u16),
     LongVarChar,
@@ -108,6 +113,7 @@ impl Db2Type {
             0x0C => Db2Type::Decimal { precision, scale },
             0x0E => Db2Type::Double,
             0x16 => Db2Type::BigInt,
+            0xBA => Db2Type::DecFloat(if length > 8 { 34 } else { 16 }),
             0x20 => Db2Type::Date,
             0x22 => Db2Type::Time,
             0x24 => Db2Type::Timestamp,
@@ -140,6 +146,8 @@ impl Db2Type {
                 // Packed decimal: ceil((precision + 1) / 2) bytes
                 Some(((*precision as usize) + 2) / 2)
             }
+            Db2Type::DecFloat(34) => Some(16),
+            Db2Type::DecFloat(_) => Some(8),
             Db2Type::Char(len) => Some(*len as usize),
             Db2Type::Date => Some(10),
             Db2Type::Time => Some(8),
@@ -281,6 +289,34 @@ pub fn decode_float8(data: &[u8]) -> Result<f64> {
     ]))
 }
 
+/// Decode a DECFLOAT value from DB2's big-endian decimal64/decimal128 interchange bytes.
+pub fn decode_decfloat(data: &[u8], digits: u8) -> Result<String> {
+    match digits {
+        34 => {
+            if data.len() < 16 {
+                return Err(ProtoError::BufferTooShort {
+                    expected: 16,
+                    actual: data.len(),
+                });
+            }
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&data[..16]);
+            Ok(dec::Decimal128::from_be_bytes(bytes).to_string())
+        }
+        _ => {
+            if data.len() < 8 {
+                return Err(ProtoError::BufferTooShort {
+                    expected: 8,
+                    actual: data.len(),
+                });
+            }
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[..8]);
+            Ok(dec::Decimal64::from_be_bytes(bytes).to_string())
+        }
+    }
+}
+
 /// Encode a SMALLINT to big-endian bytes.
 pub fn encode_smallint(val: i16) -> [u8; 2] {
     val.to_be_bytes()
@@ -304,6 +340,24 @@ pub fn encode_float4(val: f32) -> [u8; 4] {
 /// Encode a DOUBLE to big-endian bytes.
 pub fn encode_float8(val: f64) -> [u8; 8] {
     val.to_be_bytes()
+}
+
+/// Encode a string as DB2 DECFLOAT decimal64/decimal128 bytes.
+pub fn encode_decfloat(value: &str, digits: u8) -> Result<Vec<u8>> {
+    match digits {
+        34 => {
+            let parsed = value
+                .parse::<dec::Decimal128>()
+                .map_err(|e| ProtoError::Other(format!("invalid DECFLOAT(34) value: {}", e)))?;
+            Ok(parsed.to_be_bytes().to_vec())
+        }
+        _ => {
+            let parsed = value
+                .parse::<dec::Decimal64>()
+                .map_err(|e| ProtoError::Other(format!("invalid DECFLOAT(16) value: {}", e)))?;
+            Ok(parsed.to_be_bytes().to_vec())
+        }
+    }
 }
 
 // ============================================================
@@ -554,5 +608,21 @@ mod tests {
         let (ty2, nullable2) = Db2Type::from_drda_type(DRDA_TYPE_VARCHAR, 100, 0, 0);
         assert_eq!(ty2, Db2Type::VarChar(100));
         assert!(!nullable2);
+
+        let (ty3, nullable3) = Db2Type::from_drda_type(DRDA_TYPE_DECFLOAT, 16, 0, 0);
+        assert_eq!(ty3, Db2Type::DecFloat(34));
+        assert!(!nullable3);
+    }
+
+    #[test]
+    fn test_decfloat_roundtrip() {
+        let encoded64 = encode_decfloat("123.45", 16).unwrap();
+        assert_eq!(decode_decfloat(&encoded64, 16).unwrap(), "123.45");
+
+        let encoded128 = encode_decfloat("-987654321.00001", 34).unwrap();
+        assert_eq!(
+            decode_decfloat(&encoded128, 34).unwrap(),
+            "-987654321.00001"
+        );
     }
 }

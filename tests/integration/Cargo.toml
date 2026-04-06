@@ -36,3 +36,7 @@ path = "pool_test.rs"
 [[test]]
 name = "edge_cases_test"
 path = "edge_cases_test.rs"
+
+[[test]]
+name = "tls_test"
+path = "tls_test.rs"

@@ -2,7 +2,7 @@
 name = "db2-napi"
 version = "0.1.0"
 edition = "2021"
-description = "Node.js bindings for db2-wire via napi-rs"
+description = "Node.js bindings for the db2-node driver via napi-rs"
 
 [lib]
 crate-type = ["cdylib"]

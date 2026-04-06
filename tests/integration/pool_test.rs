@@ -5,6 +5,8 @@ mod common;
 use common::*;
 
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::timeout;
 
 #[tokio::test]
 async fn test_pool_basic() {
@@ -57,8 +59,8 @@ async fn test_pool_exhaustion_and_wait() {
     pool.release(client1).await;
 
     let client3 = pool.acquire().await.expect("acquire 3 after release");
-    client3.close().await.expect("close client3");
-    client2.close().await.expect("close client2");
+    pool.release(client3).await;
+    pool.release(client2).await;
 
     pool.close().await.expect("close pool");
 }
@@ -79,5 +81,24 @@ async fn test_pool_recovers_from_broken_connection() {
         assert_eq!(result.row_count, 1);
     }
 
+    pool.close().await.expect("close pool");
+}
+
+#[tokio::test]
+async fn test_pool_client_close_releases_checkout_permit() {
+    let pool = Arc::new(create_pool(1).await);
+
+    let client = pool.acquire().await.expect("acquire checked-out client");
+    client
+        .close()
+        .await
+        .expect("closing a checked-out pooled client should succeed");
+
+    let result = timeout(Duration::from_secs(2), pool.query("VALUES 1", &[]))
+        .await
+        .expect("pool query should not block after closing a checked-out client")
+        .expect("pool query should succeed after releasing the permit");
+
+    assert_eq!(result.row_count, 1);
     pool.close().await.expect("close pool");
 }

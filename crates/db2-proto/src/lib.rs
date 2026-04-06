@@ -5,6 +5,7 @@ pub mod ddm;
 pub mod dss;
 pub mod fdoca;
 pub mod replies;
+pub mod secmec9;
 pub mod types;
 
 #[derive(Debug, Clone, PartialEq)]

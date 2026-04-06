@@ -5,7 +5,7 @@ weight: 20
 
 # Architecture
 
-db2-wire is a pure Rust implementation of the IBM DRDA wire protocol, exposed to Node.js through napi-rs. This page explains the high-level architecture and how the pieces fit together.
+db2-node is a pure Rust implementation of the IBM DRDA wire protocol, exposed to Node.js through napi-rs. This page explains the high-level architecture and how the pieces fit together.
 
 ## Overview
 
@@ -16,7 +16,7 @@ Node.js (JavaScript/TypeScript)
    napi-rs FFI layer (Rust -> Node.js native addon)
         |
         v
-   db2-wire (pure Rust)
+   db2-node (pure Rust)
         +-- connection pool (async, tokio-based)
         +-- DRDA protocol engine
         |     +-- DSS framing (Data Stream Structure)
@@ -74,7 +74,7 @@ napi-rs bindings exposing the Rust client to JavaScript.
 
 ### Zero Native Dependencies
 
-db2-wire has **no dependency** on `libdb2`, `unixODBC`, `OpenSSL`, or any C library. Everything is implemented in pure Rust:
+db2-node has **no dependency** on `libdb2`, `unixODBC`, `OpenSSL`, or any C library. Everything is implemented in pure Rust:
 
 - **Protocol**: Custom DRDA implementation
 - **TLS**: rustls (pure Rust)
@@ -137,7 +137,7 @@ Round trip 2:
   Server -> Client: SECCHKRM + ACCRDBRM
 ```
 
-See the [Protocol](/protocol/) section for details.
+See the [Protocol]({{< relref "protocol/_index.md" >}}) section for details.
 
 ## Dependencies
 

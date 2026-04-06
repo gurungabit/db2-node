@@ -1,11 +1,12 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
+use tokio::time::timeout;
 use tracing::{debug, trace, warn};
 
 use crate::config::Config;
-use crate::connection::Client;
+use crate::connection::{Client, PoolCheckoutEntry, PoolCheckoutMap};
 use crate::error::Error;
 use crate::types::{QueryResult, ToSql};
 
@@ -75,6 +76,7 @@ struct PooledConnection {
 pub struct Pool {
     config: PoolConfig,
     connections: Arc<Mutex<VecDeque<PooledConnection>>>,
+    checked_out: Arc<Mutex<PoolCheckoutMap>>,
     semaphore: Arc<Semaphore>,
 }
 
@@ -86,6 +88,7 @@ impl Pool {
             semaphore: Arc::new(Semaphore::new(config.max_connections as usize)),
             config,
             connections: Arc::new(Mutex::new(VecDeque::new())),
+            checked_out: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -103,6 +106,7 @@ impl Pool {
         let pool = Pool {
             config: config.clone(),
             connections: Arc::new(Mutex::new(VecDeque::new())),
+            checked_out: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(config.max_connections as usize)),
         };
 
@@ -166,10 +170,38 @@ impl Pool {
     }
 
     /// Close all connections in the pool.
+    ///
+    /// Waits up to `drain_timeout` for checked-out connections to be returned
+    /// before closing. Idle connections are closed immediately.
     pub async fn close(&self) -> Result<(), Error> {
-        let mut conns = self.connections.lock().await;
-        debug!("Closing pool with {} connections", conns.len());
+        self.close_with_timeout(Duration::from_secs(5)).await
+    }
 
+    /// Close the pool, waiting up to `drain_timeout` for in-flight connections.
+    pub async fn close_with_timeout(&self, drain_timeout: Duration) -> Result<(), Error> {
+        // Prevent new acquisitions
+        self.semaphore.close();
+
+        // Wait for checked-out connections to return
+        let deadline = tokio::time::Instant::now() + drain_timeout;
+        loop {
+            let checked_out = self.checked_out.lock().await.len();
+            if checked_out == 0 {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                warn!(
+                    "Pool drain timeout: {} connection(s) still checked out; closing anyway",
+                    checked_out
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Close idle connections
+        let mut conns = self.connections.lock().await;
+        debug!("Closing pool with {} idle connections", conns.len());
         while let Some(conn) = conns.pop_front() {
             if let Err(e) = conn.client.close().await {
                 warn!("Error closing pooled connection: {}", e);
@@ -184,6 +216,23 @@ impl Pool {
         self.connections.lock().await.len()
     }
 
+    /// Get the number of connections currently checked out (in use).
+    pub async fn active_count(&self) -> usize {
+        self.checked_out.lock().await.len()
+    }
+
+    /// Get the total number of connections (idle + active).
+    pub async fn total_count(&self) -> usize {
+        let idle = self.connections.lock().await.len();
+        let active = self.checked_out.lock().await.len();
+        idle + active
+    }
+
+    /// Get the configured maximum number of connections.
+    pub fn max_connections(&self) -> u32 {
+        self.config.max_connections
+    }
+
     /// Create a new connection using the pool's configuration.
     async fn create_connection(&self) -> Result<Client, Error> {
         debug!("Creating new pool connection");
@@ -195,49 +244,65 @@ impl Pool {
     /// Get a connection from the pool, creating one if necessary.
     async fn get_connection(&self) -> Result<PooledConnection, Error> {
         // Try to acquire a permit (limits max concurrent connections)
-        let _permit = self
+        let permit = self
             .semaphore
-            .acquire()
+            .clone()
+            .acquire_owned()
             .await
             .map_err(|_| Error::Pool("Pool semaphore closed".into()))?;
 
-        // Try to reuse an idle connection
-        {
-            let mut conns = self.connections.lock().await;
-            while let Some(conn) = conns.pop_front() {
-                // Check if the connection has exceeded its max lifetime
-                if conn.created_at.elapsed() > self.config.max_lifetime {
-                    trace!("Discarding expired connection");
-                    let _ = conn.client.close().await;
-                    continue;
-                }
+        // Try to reuse an idle connection.
+        loop {
+            let maybe_conn = { self.connections.lock().await.pop_front() };
+            let Some(conn) = maybe_conn else {
+                break;
+            };
 
-                // Check if the connection has been idle too long
-                if conn.last_used.elapsed() > self.config.idle_timeout {
-                    trace!("Discarding idle connection");
-                    let _ = conn.client.close().await;
-                    continue;
-                }
-
-                // Connection looks good
-                trace!("Reusing pooled connection");
-
-                // Release the permit since we're using an existing connection
-                // (the permit will be re-acquired by the semaphore when returned)
-                // Actually we need to forget the permit since we track via the pool
-                std::mem::forget(_permit);
-
-                return Ok(PooledConnection {
-                    client: conn.client,
-                    created_at: conn.created_at,
-                    last_used: Instant::now(),
-                });
+            if conn.created_at.elapsed() > self.config.max_lifetime {
+                trace!("Discarding expired connection");
+                let _ = conn.client.close().await;
+                continue;
             }
+
+            if conn.last_used.elapsed() > self.config.idle_timeout {
+                trace!("Discarding idle connection");
+                let _ = conn.client.close().await;
+                continue;
+            }
+
+            if !Self::health_check(&conn.client, self.health_check_timeout()).await {
+                trace!("Discarding unhealthy pooled connection");
+                let _ = conn.client.close().await;
+                continue;
+            }
+
+            trace!("Reusing pooled connection");
+            conn.client.attach_pool_checkout(&self.checked_out);
+            self.checked_out.lock().await.insert(
+                conn.client.pool_key(),
+                PoolCheckoutEntry {
+                    created_at: conn.created_at,
+                    _permit: permit,
+                },
+            );
+
+            return Ok(PooledConnection {
+                client: conn.client,
+                created_at: conn.created_at,
+                last_used: Instant::now(),
+            });
         }
 
         // No idle connections available - create a new one
         let client = self.create_connection().await?;
-        std::mem::forget(_permit);
+        client.attach_pool_checkout(&self.checked_out);
+        self.checked_out.lock().await.insert(
+            client.pool_key(),
+            PoolCheckoutEntry {
+                created_at: Instant::now(),
+                _permit: permit,
+            },
+        );
 
         Ok(PooledConnection {
             client,
@@ -248,29 +313,53 @@ impl Pool {
 
     /// Return a connection to the pool for reuse.
     async fn return_connection(&self, conn: PooledConnection) {
+        let checkout = conn.client.detach_pool_checkout().await;
+        let created_at = checkout
+            .as_ref()
+            .map(|entry| entry.created_at)
+            .unwrap_or(conn.created_at);
+
+        if checkout.is_none() {
+            warn!("Returning a client that is not tracked as checked out from this pool");
+        }
+
         // Check if the connection is still valid
         if !conn.client.is_connected().await {
             trace!("Not returning disconnected connection to pool");
-            self.semaphore.add_permits(1);
             return;
         }
 
         // Check lifetime
-        if conn.created_at.elapsed() > self.config.max_lifetime {
+        if created_at.elapsed() > self.config.max_lifetime {
             trace!("Not returning expired connection to pool");
             let _ = conn.client.close().await;
-            self.semaphore.add_permits(1);
             return;
         }
 
         let mut conns = self.connections.lock().await;
-        conns.push_back(conn);
-        self.semaphore.add_permits(1);
+        conns.push_back(PooledConnection {
+            client: conn.client,
+            created_at,
+            last_used: Instant::now(),
+        });
     }
 
     /// Perform a basic health check on a connection.
-    pub async fn health_check(client: &Client) -> bool {
+    pub async fn health_check(client: &Client, timeout_duration: Duration) -> bool {
         // Execute a simple query to verify the connection is alive
-        client.execute("VALUES 1").await.is_ok()
+        matches!(
+            timeout(timeout_duration, client.execute("VALUES 1")).await,
+            Ok(Ok(_))
+        )
+    }
+
+    fn health_check_timeout(&self) -> Duration {
+        const DEFAULT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+        let query_timeout = self.config.connection.query_timeout;
+        if query_timeout.is_zero() {
+            DEFAULT_HEALTH_CHECK_TIMEOUT
+        } else {
+            query_timeout.min(DEFAULT_HEALTH_CHECK_TIMEOUT)
+        }
     }
 }

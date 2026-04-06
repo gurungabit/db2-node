@@ -9,28 +9,32 @@ pub struct ManagerLevel {
     pub level: u16,
 }
 
-/// Default manager levels for a DB2 client.
+/// Default manager levels for a DB2 client (matching pydrda/DB2 CLI).
 pub fn default_manager_levels() -> Vec<ManagerLevel> {
     vec![
         ManagerLevel {
             code_point: AGENT,
-            level: 7,
+            level: 10,
         },
         ManagerLevel {
             code_point: SQLAM,
-            level: 7,
-        },
-        ManagerLevel {
-            code_point: RDB,
-            level: 7,
-        },
-        ManagerLevel {
-            code_point: SECMGR,
-            level: 7,
+            level: 11,
         },
         ManagerLevel {
             code_point: CMNTCPIP,
             level: 5,
+        },
+        ManagerLevel {
+            code_point: RDB,
+            level: 12,
+        },
+        ManagerLevel {
+            code_point: SECMGR,
+            level: 9,
+        },
+        ManagerLevel {
+            code_point: UNICODEMGR,
+            level: 1208,
         },
     ]
 }
@@ -52,10 +56,11 @@ pub fn build_excsat(
 ) -> Vec<u8> {
     let mut ddm = DdmBuilder::new(EXCSAT);
 
-    ddm.add_string(EXTNAM, external_name);
-    ddm.add_string(SRVNAM, server_name);
-    ddm.add_string(SRVCLSNM, class_name);
-    ddm.add_string(SRVRLSLV, product_level);
+    // EXCSAT strings are EBCDIC-encoded (before CCSID negotiation)
+    ddm.add_ebcdic_string(EXTNAM, external_name);
+    ddm.add_ebcdic_string(SRVNAM, server_name);
+    ddm.add_ebcdic_string(SRVRLSLV, product_level);
+    // Note: SRVCLSNM is also EBCDIC but we add it after MGRLVLLS (matching pydrda order)
 
     // MGRLVLLS: encoded as a sequence of (code_point: u16, level: u16) pairs
     // wrapped in a single parameter.
@@ -65,17 +70,18 @@ pub fn build_excsat(
         mgr_data.extend_from_slice(&ml.level.to_be_bytes());
     }
     ddm.add_code_point(MGRLVLLS, &mgr_data);
+    ddm.add_ebcdic_string(SRVCLSNM, class_name);
 
     ddm.build()
 }
 
-/// Build an EXCSAT with sensible defaults.
+/// Build an EXCSAT with sensible defaults matching DB2 CLI client.
 pub fn build_excsat_default() -> Vec<u8> {
     build_excsat(
-        "db2driver-node",
-        "localhost",
+        "db2wire",
+        "db2wire-client",
         "QDB2/JVM",
-        "JCC04200",
+        "SQL11014",
         &default_manager_levels(),
     )
 }

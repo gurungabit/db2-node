@@ -13,6 +13,13 @@ pub struct JsPoolConfig {
     pub user: String,
     pub password: String,
     pub ssl: Option<bool>,
+    pub reject_unauthorized: Option<bool>,
+    pub ca_cert: Option<String>,
+    pub connect_timeout: Option<u32>,
+    pub query_timeout: Option<u32>,
+    pub frame_drain_timeout: Option<u32>,
+    pub current_schema: Option<String>,
+    pub fetch_size: Option<u32>,
     pub min_connections: Option<u32>,
     pub max_connections: Option<u32>,
     pub idle_timeout: Option<u32>,
@@ -36,18 +43,21 @@ impl JsPool {
             &config.user,
             &config.password,
             config.ssl,
-            None, // connect_timeout uses default
-            None, // query_timeout uses default
-            None, // current_schema
-            None, // fetch_size
+            config.reject_unauthorized,
+            config.ca_cert,
+            config.connect_timeout,
+            config.query_timeout,
+            config.frame_drain_timeout,
+            config.current_schema.clone(),
+            config.fetch_size,
         );
 
         let pool_config = db2_client::PoolConfig {
             connection: client_config.clone(),
             min_connections: config.min_connections.unwrap_or(0),
             max_connections: config.max_connections.unwrap_or(10),
-            idle_timeout: std::time::Duration::from_secs(config.idle_timeout.unwrap_or(60) as u64),
-            max_lifetime: std::time::Duration::from_secs(config.max_lifetime.unwrap_or(300) as u64),
+            idle_timeout: std::time::Duration::from_secs(config.idle_timeout.unwrap_or(600) as u64),
+            max_lifetime: std::time::Duration::from_secs(config.max_lifetime.unwrap_or(3600) as u64),
         };
 
         // Pool::new is async in the client crate, but napi constructors are sync.
@@ -92,10 +102,11 @@ impl JsPool {
     }
 
     #[napi]
-    pub fn release(&self, _client: &JsClient) -> Result<()> {
-        // The pool manages connection lifecycle internally.
-        // When the JsClient is dropped or explicitly closed, the connection
-        // returns to the pool. This method exists for API compatibility.
+    pub async fn release(&self, client: &JsClient) -> Result<()> {
+        let mut guard = client.inner.lock().await;
+        if let Some(client) = guard.take() {
+            self.inner.release(client).await;
+        }
         Ok(())
     }
 
@@ -103,5 +114,25 @@ impl JsPool {
     pub async fn close(&self) -> Result<()> {
         self.inner.close().await.map_err(client_error_to_napi)?;
         Ok(())
+    }
+
+    #[napi(js_name = "idleCount")]
+    pub async fn idle_count(&self) -> Result<u32> {
+        Ok(self.inner.idle_count().await as u32)
+    }
+
+    #[napi(js_name = "activeCount")]
+    pub async fn active_count(&self) -> Result<u32> {
+        Ok(self.inner.active_count().await as u32)
+    }
+
+    #[napi(js_name = "totalCount")]
+    pub async fn total_count(&self) -> Result<u32> {
+        Ok(self.inner.total_count().await as u32)
+    }
+
+    #[napi(js_name = "maxConnections")]
+    pub fn max_connections(&self) -> u32 {
+        self.inner.max_connections()
     }
 }

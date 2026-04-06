@@ -1,4 +1,4 @@
-CONNECT TO testdb;
+CONNECT TO testdb@
 
 CREATE OR REPLACE PROCEDURE get_employees_by_dept(IN p_dept_id INTEGER)
   LANGUAGE SQL
@@ -7,13 +7,13 @@ BEGIN
   DECLARE c1 CURSOR WITH RETURN FOR
     SELECT id, name, salary, hired FROM employees WHERE dept_id = p_dept_id;
   OPEN c1;
-END;
+END@
 
 CREATE OR REPLACE PROCEDURE get_employee_count(IN p_dept_id INTEGER, OUT p_count INTEGER)
   LANGUAGE SQL
 BEGIN
   SELECT COUNT(*) INTO p_count FROM employees WHERE dept_id = p_dept_id;
-END;
+END@
 
 CREATE OR REPLACE PROCEDURE transfer_funds(
   IN p_from INTEGER,
@@ -24,6 +24,6 @@ CREATE OR REPLACE PROCEDURE transfer_funds(
 BEGIN
   UPDATE accounts SET balance = balance - p_amount WHERE id = p_from;
   UPDATE accounts SET balance = balance + p_amount WHERE id = p_to;
-END;
+END@
 
-COMMIT;
+COMMIT@

@@ -5,7 +5,7 @@ weight: 40
 
 # DRDA Protocol
 
-db2-wire implements the IBM DRDA (Distributed Relational Database Architecture) wire protocol. DRDA is an open standard published by The Open Group that defines how clients communicate with DB2 databases over TCP.
+db2-node implements the IBM DRDA (Distributed Relational Database Architecture) wire protocol. DRDA is an open standard published by The Open Group that defines how clients communicate with DB2 databases over TCP.
 
 This section provides a deep dive into the protocol internals.
 

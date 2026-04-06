@@ -17,7 +17,7 @@ During ACCRDB, the client and server negotiate a Type Definition Name that contr
 | `QTDSQLASC` | ASCII-based systems |
 | `QTDSQLBC` | Big-endian systems (z/OS) |
 
-db2-wire always requests `QTDSQLX86` to ensure standard encoding.
+db2-node always requests `QTDSQLX86` to ensure standard encoding.
 
 ## TYPDEFOVR (Type Definition Overrides)
 
@@ -108,7 +108,7 @@ Code Page 037 is the US/Canada EBCDIC variant. Key mappings:
 | `9` | `0xF9` |
 | Space | `0x40` |
 
-db2-wire includes a complete 256-byte bidirectional lookup table for EBCDIC 037 conversion.
+db2-node includes a complete 256-byte bidirectional lookup table for EBCDIC 037 conversion.
 
 ## DB2 SQL Type Codes
 

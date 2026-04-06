@@ -13,13 +13,14 @@ env:
   DB2_TEST_DATABASE: testdb
   DB2_TEST_USER: db2inst1
   DB2_TEST_PASSWORD: db2wire_test_pw
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -27,7 +28,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry & build
-        uses: actions/cache@v4
+        uses: actions/cache@v5.0.4
         with:
           path: |
             ~/.cargo/registry
@@ -52,13 +53,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit-tests
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry & build
-        uses: actions/cache@v4
+        uses: actions/cache@v5.0.4
         with:
           path: |
             ~/.cargo/registry
@@ -80,7 +81,19 @@ jobs:
       - name: Seed database
         run: ./tools/db2.sh seed
 
+      - name: Setup DB2 SSL
+        run: |
+          cd docker/tls
+          bash generate-certs.sh
+          bash setup-db2-ssl.sh
+
+      - name: Wait for DB2 after SSL restart
+        run: |
+          timeout 120 bash -c 'until docker exec db2-wire-test bash -c "su - db2inst1 -c \"db2 connect to testdb\"" > /dev/null 2>&1; do sleep 5; done'
+
       - name: Run integration tests
+        env:
+          DB2_TEST_SSL_PORT: "50001"
         run: cargo test --workspace --test '*' -- --test-threads=4
 
       - name: Stop DB2
@@ -92,18 +105,18 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit-tests
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.3.0
         with:
           node-version: 20
 
       - name: Cache cargo registry & build
-        uses: actions/cache@v4
+        uses: actions/cache@v5.0.4
         with:
           path: |
             ~/.cargo/registry
@@ -115,8 +128,12 @@ jobs:
       - name: Build napi module
         working-directory: crates/db2-napi
         run: |
-          npm install
+          npm ci
           npm run build
+
+      - name: Install Node.js test dependencies
+        working-directory: tests/node
+        run: npm ci
 
       - name: Start DB2
         run: |
@@ -130,8 +147,20 @@ jobs:
       - name: Seed database
         run: ./tools/db2.sh seed
 
+      - name: Setup DB2 SSL
+        run: |
+          cd docker/tls
+          bash generate-certs.sh
+          bash setup-db2-ssl.sh
+
+      - name: Wait for DB2 after SSL restart
+        run: |
+          timeout 120 bash -c 'until docker exec db2-wire-test bash -c "su - db2inst1 -c \"db2 connect to testdb\"" > /dev/null 2>&1; do sleep 5; done'
+
       - name: Run Node.js tests
-        working-directory: crates/db2-napi
+        working-directory: tests/node
+        env:
+          DB2_TEST_SSL_PORT: "50001"
         run: npm test
 
       - name: Stop DB2

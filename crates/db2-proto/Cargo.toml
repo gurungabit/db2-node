@@ -5,4 +5,4 @@ edition = "2021"
 description = "Pure DRDA protocol implementation for DB2 - no I/O dependencies"
 
 [dependencies]
-# Zero dependencies - pure protocol crate
+dec = "0.4.11"

@@ -1,7 +1,7 @@
 baseURL = "https://gurungabit.github.io/db2driver-node/"
 languageCode = "en-us"
-title = "db2-wire"
-theme = "db2-wire-theme"
+title = "db2-node"
+theme = "db2-node-theme"
 
 enableRobotsTXT = true
 enableGitInfo = true
@@ -47,5 +47,5 @@ enableGitInfo = true
       unsafe = true
 
 [outputs]
-  home = ["HTML", "RSS"]
+  home = ["HTML", "RSS", "JSON"]
   section = ["HTML"]

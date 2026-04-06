@@ -3,6 +3,8 @@
 #[path = "../common/mod.rs"]
 mod common;
 use common::*;
+use db2_client::{Client, Error};
+use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn test_select_dummy() {
@@ -212,6 +214,96 @@ async fn test_syntax_error() {
         msg
     );
     client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn test_runtime_query_error() {
+    let client = connect().await;
+    let err = client
+        .query("SELECT 1/0 AS X FROM SYSIBM.SYSDUMMY1", &[])
+        .await
+        .expect_err("division by zero should fail");
+
+    match err {
+        Error::Sql {
+            sqlstate,
+            sqlcode: _,
+            message,
+        } => {
+            assert!(!sqlstate.is_empty());
+            assert!(!message.is_empty());
+        }
+        other => panic!("expected SQL error, got {:?}", other),
+    }
+
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn test_query_timeout_interrupts_blocked_statement() {
+    let locker = connect().await;
+    let table = temp_table_name("timeout");
+    drop_table(&locker, &table).await;
+
+    locker
+        .query(
+            &format!("CREATE TABLE {} (id INTEGER NOT NULL, val INTEGER)", table),
+            &[],
+        )
+        .await
+        .expect("create table");
+    locker
+        .query(&format!("INSERT INTO {} VALUES (1, 10)", table), &[])
+        .await
+        .expect("seed row");
+
+    let txn = locker.begin_transaction().await.expect("begin lock holder");
+    txn.query(&format!("UPDATE {} SET val = 20 WHERE id = 1", table), &[])
+        .await
+        .expect("lock row");
+
+    let mut timeout_config = test_config();
+    timeout_config.query_timeout = Duration::from_millis(250);
+    timeout_config.frame_drain_timeout = Duration::from_millis(50);
+    let blocked_client = Client::connect_with(timeout_config)
+        .await
+        .expect("connect blocked client");
+
+    let started = Instant::now();
+    let err = blocked_client
+        .query(&format!("UPDATE {} SET val = 30 WHERE id = 1", table), &[])
+        .await
+        .expect_err("blocked update should time out");
+
+    assert!(
+        matches!(err, Error::Timeout(_)),
+        "expected timeout error, got {:?}",
+        err
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "timed-out query should fail promptly"
+    );
+    assert!(
+        !blocked_client.is_connected().await,
+        "timed-out client should be disconnected to avoid protocol desync"
+    );
+
+    txn.rollback().await.expect("unlock row");
+
+    let reconnect_result = blocked_client
+        .query("VALUES 1", &[])
+        .await
+        .expect("next client operation should reconnect after a timeout-induced disconnect");
+    assert_eq!(reconnect_result.row_count, 1);
+    assert!(
+        blocked_client.is_connected().await,
+        "client should be connected again after the follow-up query"
+    );
+
+    drop_table(&locker, &table).await;
+    let _ = blocked_client.close().await;
+    locker.close().await.expect("close");
 }
 
 #[tokio::test]

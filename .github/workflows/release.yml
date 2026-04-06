@@ -1,0 +1,267 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_NAME: db2-node
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build:
+    name: Build ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian
+            container_setup: ":"
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
+            container_setup: ":"
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian-aarch64
+            container_setup: ":"
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
+            setup: rustup target add aarch64-unknown-linux-musl
+            container_setup: rustup target add aarch64-unknown-linux-musl
+          - host: macos-15-intel
+            target: x86_64-apple-darwin
+          - host: macos-latest
+            target: aarch64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+          - host: windows-latest
+            target: aarch64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Setup Node.js
+        if: ${{ !matrix.settings.docker }}
+        uses: actions/setup-node@v6.3.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: crates/db2-napi/package-lock.json
+
+      - name: Install Rust toolchain
+        if: ${{ !matrix.settings.docker }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.settings.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.settings.target }}-
+
+      - name: Setup target toolchain
+        if: ${{ !matrix.settings.docker && matrix.settings.setup }}
+        run: ${{ matrix.settings.setup }}
+        shell: bash
+
+      - name: Install Node.js dependencies
+        if: ${{ !matrix.settings.docker }}
+        working-directory: crates/db2-napi
+        run: npm ci
+
+      - name: Build in container
+        if: ${{ matrix.settings.docker }}
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ${{ matrix.settings.docker }}
+          options: >-
+            --user 0:0
+            -v ${{ github.workspace }}:/build
+            -w /build
+          run: |
+            set -eux
+            rustup update stable
+            rustup default stable
+            rustc --version
+            cargo --version
+            cd crates/db2-napi
+            npm ci
+            ${{ matrix.settings.container_setup }}
+            npm run build -- --target ${{ matrix.settings.target }}
+
+      - name: Build
+        if: ${{ !matrix.settings.docker }}
+        working-directory: crates/db2-napi
+        run: npm run build -- --target ${{ matrix.settings.target }}
+
+      - name: Upload binding artifact
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: crates/db2-napi/db2-node.*.node
+          if-no-files-found: error
+
+  smoke-test-native:
+    name: Smoke test ${{ matrix.settings.target }}
+    needs: build
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - host: macos-15-intel
+            target: x86_64-apple-darwin
+          - host: macos-latest
+            target: aarch64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6.3.0
+        with:
+          node-version: 20
+
+      - name: Download binding artifact
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: crates/db2-napi
+
+      - name: Verify package loads
+        run: node tests/node/module-load.test.mjs
+
+  smoke-test-linux-musl:
+    name: Smoke test x86_64-unknown-linux-musl
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Download binding artifact
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: bindings-x86_64-unknown-linux-musl
+          path: crates/db2-napi
+
+      - name: Verify package loads on Alpine
+        run: |
+          docker run --rm \
+            -v "${PWD}:/build" \
+            -w /build \
+            node:20-alpine \
+            node tests/node/module-load.test.mjs
+
+  smoke-test-linux-arm64:
+    name: Smoke test aarch64 Linux bindings
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - target: aarch64-unknown-linux-gnu
+            image: node:20-slim
+            libc: gnu
+          - target: aarch64-unknown-linux-musl
+            image: node:20-alpine
+            libc: musl
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Download binding artifact
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: crates/db2-napi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.0.0
+        with:
+          platforms: arm64
+
+      - name: Verify package loads on arm64
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ${{ matrix.settings.image }}
+          options: --platform linux/arm64 -v ${{ github.workspace }}:/build -w /build
+          run: node tests/node/module-load.test.mjs
+
+  publish:
+    name: Publish npm packages
+    needs:
+      - build
+      - smoke-test-native
+      - smoke-test-linux-musl
+      - smoke-test-linux-arm64
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6.3.0
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: crates/db2-napi/package-lock.json
+
+      - name: Install package dependencies
+        working-directory: crates/db2-napi
+        run: npm ci
+
+      - name: Create npm package directories
+        working-directory: crates/db2-napi
+        run: npm run create:npm
+
+      - name: Download all binding artifacts
+        uses: actions/download-artifact@v8.0.1
+        with:
+          path: crates/db2-napi/artifacts
+
+      - name: Move artifacts into npm packages
+        working-directory: crates/db2-napi
+        run: npm run artifacts
+
+      - name: Show generated package layout
+        working-directory: crates/db2-napi
+        run: find npm -maxdepth 2 -type f | sort
+
+      - name: Publish release
+        working-directory: crates/db2-napi
+        run: |
+          npm config set provenance true
+          npm publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

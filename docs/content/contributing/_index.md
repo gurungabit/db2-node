@@ -5,7 +5,7 @@ weight: 50
 
 # Contributing
 
-This guide covers the development setup, testing infrastructure, and contribution workflow for db2-wire.
+This guide covers the development setup, testing infrastructure, and contribution workflow for db2-node.
 
 ## Prerequisites
 
@@ -117,6 +117,22 @@ sudo ./tools/capture-fixtures.sh
 
 This captures DRDA byte sequences for known operations and saves them in `tests/protocol/fixtures/` for use in unit tests.
 
+## Documentation Site
+
+You can run the Hugo docs site locally without installing Hugo on your machine:
+
+```bash
+make docs-serve
+```
+
+This serves the site at `http://localhost:1313/db2driver-node/`.
+
+To build the static site into `.tmp-docs-public/`:
+
+```bash
+make docs-build
+```
+
 ## Makefile Targets
 
 | Target | Description |
@@ -127,6 +143,8 @@ This captures DRDA byte sequences for known operations and saves them in `tests/
 | `make test-unit` | Unit tests only (no DB2) |
 | `make test-integration` | Integration tests (starts DB2 if needed) |
 | `make test-node` | Node.js tests |
+| `make docs-build` | Build the Hugo docs site into `.tmp-docs-public/` |
+| `make docs-serve` | Serve the Hugo docs site locally on port 1313 |
 | `make db2-start` | Start DB2 container |
 | `make db2-stop` | Stop DB2 container |
 | `make db2-status` | Check DB2 status |
@@ -136,7 +154,7 @@ This captures DRDA byte sequences for known operations and saves them in `tests/
 ## Code Organization
 
 ```
-db2-wire/
+db2driver-node/
 +-- crates/
 |   +-- db2-proto/      # Pure protocol (zero deps, no I/O)
 |   +-- db2-client/     # Async client (tokio)

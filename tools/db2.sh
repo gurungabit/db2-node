@@ -8,6 +8,9 @@ USER="db2inst1"
 COMPOSE_FILE="$(cd "$(dirname "$0")/../docker" && pwd)/docker-compose.yml"
 SEED_DIR="$(cd "$(dirname "$0")/../docker/seed" && pwd)"
 TIMEOUT=300
+LOGFILSIZ=8192
+LOGPRIMARY=32
+LOGSECOND=32
 
 # ── Colors ─────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -85,12 +88,42 @@ cmd_seed() {
     local fname
     fname="$(basename "$sql_file")"
     info "Running $fname..."
-    docker exec -i "$CONTAINER" bash -c "su - $USER -c 'db2 -tvf /seed/$fname'" || {
-      err "Failed to run $fname"
+    # Files using @ as statement terminator (compound SQL / stored procedures)
+    if grep -q '@$' "$sql_file"; then
+      docker exec -i "$CONTAINER" bash -c "su - $USER -c 'db2 -td@ -vf /seed/$fname'" || {
+        err "Failed to run $fname"
+        return 1
+      }
+    else
+      docker exec -i "$CONTAINER" bash -c "su - $USER -c 'db2 -tvf /seed/$fname'" || {
+        err "Failed to run $fname"
+        return 1
+      }
+    fi
+  done
+  cmd_tune_logs
+  ok "Database seeded successfully"
+}
+
+cmd_tune_logs() {
+  info "Tuning DB2 transaction log settings for bulk loads..."
+  local update_output
+  local update_status=0
+  update_output="$(docker exec "$CONTAINER" bash -c \
+    "su - $USER -c 'db2 update db cfg for $DB using LOGFILSIZ $LOGFILSIZ LOGPRIMARY $LOGPRIMARY LOGSECOND $LOGSECOND'" 2>&1)" || update_status=$?
+  printf '%s\n' "$update_output"
+  if [[ $update_status -ne 0 && $update_status -ne 2 ]]; then
+    err "Failed to update DB2 log configuration"
+    return 1
+  fi
+
+  docker exec "$CONTAINER" bash -c \
+    "su - $USER -c 'db2 force application all > /dev/null 2>&1 || true; db2 deactivate db $DB > /dev/null 2>&1 || true; db2 activate db $DB > /dev/null'" || {
+      err "Failed to reactivate DB2 after log tuning"
       return 1
     }
-  done
-  ok "Database seeded successfully"
+
+  ok "DB2 log config set: LOGFILSIZ=$LOGFILSIZ LOGPRIMARY=$LOGPRIMARY LOGSECOND=$LOGSECOND"
 }
 
 cmd_reset() {
@@ -146,6 +179,7 @@ Commands:
   stop      Stop the DB2 container
   status    Check if DB2 is running and accepting connections
   seed      Run seed SQL scripts against the database
+  tune      Increase DB2 log capacity for bulk-load demos/tests
   reset     Stop, remove volume, restart, and re-seed
   sql       Run a SQL statement (e.g., ./db2.sh sql "SELECT * FROM employees")
   exec      Execute a command inside the DB2 container
@@ -160,6 +194,7 @@ case "${1:-}" in
   stop)    cmd_stop ;;
   status)  cmd_status ;;
   seed)    cmd_seed ;;
+  tune)    cmd_tune_logs ;;
   reset)   cmd_reset ;;
   sql)     shift; cmd_sql "$@" ;;
   exec)    shift; cmd_exec "$@" ;;

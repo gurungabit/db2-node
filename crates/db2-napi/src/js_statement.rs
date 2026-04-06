@@ -47,6 +47,36 @@ impl JsPreparedStatement {
         Ok(query_result_to_js(result))
     }
 
+    /// Execute the prepared statement as a batch with multiple rows of parameters.
+    /// Each element of `param_rows` is an array of parameter values for one row.
+    #[napi(js_name = "executeBatch")]
+    pub async fn execute_batch(
+        &self,
+        param_rows: Vec<Vec<serde_json::Value>>,
+    ) -> Result<JsQueryResult> {
+        let guard = self.inner.lock().await;
+        let stmt = guard
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("PreparedStatement is closed"))?;
+
+        // Convert all rows from JSON to Db2Value
+        let db2_rows: Vec<Vec<db2_proto::types::Db2Value>> =
+            param_rows.iter().map(|row| js_params_to_db2(row)).collect();
+
+        // Build references for each row
+        let param_ref_rows: Vec<Vec<&dyn db2_client::ToSql>> = db2_rows
+            .iter()
+            .map(|row| row.iter().map(|p| p as &dyn db2_client::ToSql).collect())
+            .collect();
+
+        let result = stmt
+            .execute_batch(&param_ref_rows)
+            .await
+            .map_err(client_error_to_napi)?;
+
+        Ok(query_result_to_js(result))
+    }
+
     #[napi]
     pub async fn close(&self) -> Result<()> {
         let mut guard = self.inner.lock().await;

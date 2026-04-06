@@ -45,6 +45,7 @@ pub fn parse_sqldard(data: &[u8]) -> Result<Vec<ColumnDesc>> {
                 crate::types::Db2Type::Decimal { precision, scale } => {
                     (Some(*precision as u16), Some(*scale as u16))
                 }
+                crate::types::Db2Type::DecFloat(digits) => (Some(*digits as u16), None),
                 _ => (None, None),
             };
             ColumnDesc {

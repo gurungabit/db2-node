@@ -1,11 +1,18 @@
 {
-  "name": "db2-wire-node-tests",
+  "name": "db2-node-tests",
   "private": true,
   "scripts": {
-    "test": "node --test *.test.ts"
+    "test": "node --import tsx --test ./*.test.ts ./*.test.mjs",
+    "test:connection": "node --import tsx --test ./connection.test.ts",
+    "test:query": "node --import tsx --test ./query.test.ts",
+    "test:types": "node --import tsx --test ./data-types.test.ts",
+    "test:load": "node --test ./module-load.test.mjs",
+    "test:txn": "node --import tsx --test ./transaction.test.ts",
+    "test:error": "node --import tsx --test ./error-handling.test.ts",
+    "test:ddl": "node --import tsx --test ./ddl-dml.test.ts"
   },
   "devDependencies": {
-    "db2-wire": "file:../../crates/db2-napi",
+    "tsx": "^4.0.0",
     "@types/node": "^22"
   }
 }

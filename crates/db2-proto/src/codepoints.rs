@@ -33,6 +33,7 @@ pub const CCSIDSBC: u16 = 0x119C; // CCSID for Single-Byte Characters
 pub const CCSIDDBC: u16 = 0x119D; // CCSID for Double-Byte Characters
 pub const CCSIDMBC: u16 = 0x119E; // CCSID for Mixed-Byte Characters
 pub const RDBACCCL: u16 = 0x210F; // RDB Access Manager Class
+pub const CRRTKN: u16 = 0x2135; // Correlation Token
 
 // ============================================================
 // SQL Operation Commands
@@ -40,11 +41,14 @@ pub const RDBACCCL: u16 = 0x210F; // RDB Access Manager Class
 pub const CLSQRY: u16 = 0x2005; // Close Query
 pub const EXCSQLIMM: u16 = 0x200A; // Execute Immediate SQL
 pub const EXCSQLSTT: u16 = 0x200B; // Execute SQL Statement
+pub const EXCSQLSET: u16 = 0x2014; // Execute SQL SET Statement
+pub const DRPPKG: u16 = 0x2007; // Drop Package
+pub const DSCSQLSTT: u16 = 0x2008; // Describe SQL Statement
 pub const OPNQRY: u16 = 0x200C; // Open Query
 pub const PRPSQLSTT: u16 = 0x200D; // Prepare SQL Statement
 pub const RDBCMM: u16 = 0x200E; // RDB Commit Unit of Work
-pub const CNTQRY: u16 = 0x200F; // Continue Query
-pub const RDBRLLBCK: u16 = 0x2010; // RDB Rollback Unit of Work
+pub const CNTQRY: u16 = 0x2006; // Continue Query
+pub const RDBRLLBCK: u16 = 0x200F; // RDB Rollback Unit of Work
 
 // ============================================================
 // SQL Reply Data Objects
@@ -74,6 +78,8 @@ pub const SQLAM: u16 = 0x2407; // SQL Application Manager
 pub const RDB: u16 = 0x240F; // Relational Database
 pub const SECMGR: u16 = 0x1440; // Security Manager
 pub const CMNTCPIP: u16 = 0x1474; // TCP/IP Communication Manager
+pub const UNICODEMGR: u16 = 0x1C08; // Unicode Manager
+pub const XAMGR: u16 = 0x14CC; // XA Transaction Manager
 
 // ============================================================
 // Security Mechanism Values
@@ -90,18 +96,22 @@ pub const PKGNAMCSN: u16 = 0x2113; // Package Name, Consistency Token, Section N
 pub const PKGID: u16 = 0x2159; // Package Identifier
 pub const RDBCOLID: u16 = 0x2108; // RDB Collection Identifier
 pub const OUTOVR: u16 = 0x2415; // Output Override
+pub const OUTEXP: u16 = 0x2111; // Output Expected
 pub const QRYBLKSZ: u16 = 0x2114; // Query Block Size
 pub const MAXBLKEXT: u16 = 0x2141; // Maximum Number of Extra Blocks
 pub const QRYPRCTYP: u16 = 0x2102; // Query Protocol Type
 pub const NBRROW: u16 = 0x213A; // Number of Fetch or Insert Rows
 pub const RTNSQLDA: u16 = 0x2116; // Return SQL Descriptor Area
 pub const TYPSQLDA: u16 = 0x2146; // Type of SQL Descriptor Area
-pub const UOWDSP: u16 = 0x2115; // Unit of Work Disposition
+pub const UOWDSP: u16 = 0x210E; // Unit of Work Disposition
 pub const STTDEC: u16 = 0x2101; // Statement Decimal Delimiter
 pub const STTSTRDEL: u16 = 0x2104; // Statement String Delimiter
-pub const PKGSN: u16 = 0x2139; // Package Section Number
+pub const PKGSNLST: u16 = 0x2139; // List of PKGNAMCSN entries
+pub const PKGSN: u16 = PKGSNLST; // Legacy alias; section numbers are embedded inside PKGNAMCSN
 pub const MONITOR: u16 = 0x1900; // Monitor
 pub const RDBCMTOK: u16 = 0x2105; // RDB Commit Allowed
+pub const QRYINSID: u16 = 0x215B; // Query Instance Identifier
+pub const QRYROWSET: u16 = 0x2156; // Query Rowset Size
 
 // ============================================================
 // FD:OCA

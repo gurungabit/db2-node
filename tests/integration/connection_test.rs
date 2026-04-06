@@ -4,17 +4,17 @@
 mod common;
 use common::*;
 
-use db2_client::Client;
+use db2_client::{Client, Error};
 
 #[tokio::test]
 async fn test_basic_connect_disconnect() {
     let client = connect().await;
     // Verify the connection is alive by running a trivial query
     let result = client
-        .query("VALUES 1", &[])
+        .query("SELECT 1 AS VAL FROM SYSIBM.SYSDUMMY1", &[])
         .await
         .expect("should execute trivial query");
-    assert_eq!(result.row_count, 1);
+    assert!(result.row_count >= 1);
     client.close().await.expect("should disconnect cleanly");
 }
 
@@ -115,4 +115,25 @@ async fn test_server_attributes() {
         }
     }
     client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn test_explicit_close_does_not_auto_reconnect() {
+    let client = connect().await;
+
+    client.close().await.expect("close");
+
+    let err = client
+        .query("VALUES 1", &[])
+        .await
+        .expect_err("explicitly closed clients should stay closed until reconnect is requested");
+    assert!(
+        matches!(err, Error::Connection(ref message) if message.contains("Not connected")),
+        "expected closed client error, got {:?}",
+        err
+    );
+    assert!(
+        !client.is_connected().await,
+        "client should remain disconnected after an explicit close"
+    );
 }

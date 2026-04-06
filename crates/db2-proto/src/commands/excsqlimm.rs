@@ -23,6 +23,16 @@ pub fn build_excsqlimm_default(pkgnamcsn: &[u8]) -> Vec<u8> {
     build_excsqlimm(pkgnamcsn, true)
 }
 
+/// Build EXCSQLIMM for auto-commit statements.
+pub fn build_excsqlimm_autocommit(pkgnamcsn: &[u8]) -> Vec<u8> {
+    let mut ddm = DdmBuilder::new(EXCSQLIMM);
+    ddm.add_code_point(PKGNAMCSN, pkgnamcsn);
+    ddm.add_code_point(RDBCMTOK, &[0xF1]);
+    ddm.add_code_point(UOWDSP, &[UOWDSP_COMMIT as u8]);
+    ddm.add_u32(MONITOR, 0xE000_0000);
+    ddm.build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

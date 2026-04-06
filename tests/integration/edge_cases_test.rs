@@ -3,6 +3,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 use common::*;
+use db2_client::Error;
 
 #[tokio::test]
 async fn test_empty_string_vs_null() {
@@ -52,7 +53,7 @@ async fn test_empty_string_vs_null() {
 }
 
 #[tokio::test]
-async fn test_very_long_sql() {
+async fn test_very_long_sql_surfaces_db2_error() {
     let client = connect().await;
 
     // Build a ~40KB SQL statement using string concatenation
@@ -60,11 +61,22 @@ async fn test_very_long_sql() {
     let sql = format!("VALUES ('{}')", long_string);
     assert!(sql.len() > 39_000, "SQL should be > 39KB");
 
-    let result = client
+    let err = client
         .query(&sql, &[])
         .await
-        .expect("long SQL should execute");
-    assert_eq!(result.rows.len(), 1);
+        .expect_err("long SQL should return a DB2 limit error");
+
+    match err {
+        Error::Sql {
+            sqlstate,
+            sqlcode,
+            message: _,
+        } => {
+            assert_eq!(sqlstate, "54002");
+            assert_eq!(sqlcode, -102);
+        }
+        other => panic!("expected SQL limit error, got {:?}", other),
+    }
 
     client.close().await.expect("close");
 }
@@ -115,10 +127,10 @@ async fn test_rapid_prepare_close() {
         let stmt = client
             .prepare(&format!("VALUES {}", i))
             .await
-            .unwrap_or_else(|_| panic!("prepare #{}", i));
+            .unwrap_or_else(|e| panic!("prepare #{}: {}", i, e));
         stmt.close()
             .await
-            .unwrap_or_else(|_| panic!("close stmt #{}", i));
+            .unwrap_or_else(|e| panic!("close stmt #{}: {}", i, e));
     }
 
     // Verify the connection is still healthy after all that churn

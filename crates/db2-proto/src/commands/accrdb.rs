@@ -1,10 +1,24 @@
 //! Build ACCRDB (Access RDB) command.
-use crate::codepage::pad_rdbnam;
+use crate::codepage::{pad_rdbnam, utf8_to_ebcdic037};
 use crate::codepoints::*;
 use crate::ddm::DdmBuilder;
 
-/// Default product identifier (mimics JCC driver).
-pub const DEFAULT_PRDID: &str = "JCC04200";
+/// Build a CRRTKN (Correlation Token) for ACCRDB.
+fn build_crrtkn() -> Vec<u8> {
+    let mut token = utf8_to_ebcdic037("NF000001");
+    token.push(0x4B); // EBCDIC '.'
+    token.extend_from_slice(&utf8_to_ebcdic037("C0A5"));
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ts_bytes = ts.to_be_bytes();
+    token.extend_from_slice(&ts_bytes[2..8]); // last 6 bytes
+    token
+}
+
+/// Default product identifier (identifies as DB2 CLI client).
+pub const DEFAULT_PRDID: &str = "SQL11014";
 
 /// Default type definition name for x86/Linux/Windows.
 pub const DEFAULT_TYPDEFNAM: &str = "QTDSQLX86";
@@ -40,6 +54,11 @@ pub fn build_accrdb(
 
     // TYPDEFNAM is encoded as EBCDIC
     ddm.add_ebcdic_string(TYPDEFNAM, typdefnam);
+
+    // CRRTKN (Correlation Token) — required by DB2 LUW for package access
+    // Format: EBCDIC-encoded client identifier + timestamp bytes
+    let crrtkn = build_crrtkn();
+    ddm.add_code_point(CRRTKN, &crrtkn);
 
     // TYPDEFOVR contains CCSID sub-parameters
     let mut typdefovr_data = Vec::new();

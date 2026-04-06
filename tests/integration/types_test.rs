@@ -3,6 +3,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 use common::*;
+use db2_client::ToSql;
 
 #[tokio::test]
 async fn test_null_handling() {
@@ -193,6 +194,50 @@ async fn test_decimal_type() {
     assert_eq!(result.rows.len(), 3);
 
     drop_table(&client, &table).await;
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn test_decfloat_type() {
+    let client = connect().await;
+
+    let result = client
+        .query(
+            "VALUES (CAST('123.45' AS DECFLOAT(16)), CAST('-987654321.00001' AS DECFLOAT(34)))",
+            &[],
+        )
+        .await
+        .expect("select decfloat literals");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.columns.len(), 2);
+    assert!(
+        result.columns[0].type_name.contains("DecFloat(16)"),
+        "expected DECFLOAT(16) metadata, got {:?}",
+        result.columns[0]
+    );
+    assert!(
+        result.columns[1].type_name.contains("DecFloat(34)"),
+        "expected DECFLOAT(34) metadata, got {:?}",
+        result.columns[1]
+    );
+
+    let col1: String = result.rows[0].get("COL1").expect("COL1 should decode");
+    let col2: String = result.rows[0].get("COL2").expect("COL2 should decode");
+    assert_eq!(col1, "123.45");
+    assert_eq!(col2, "-987654321.00001");
+
+    let param = "42.125";
+    let param_result = client
+        .query("VALUES CAST(? AS DECFLOAT(16))", &[&param as &dyn ToSql])
+        .await
+        .expect("bind decfloat parameter");
+    assert_eq!(param_result.rows.len(), 1);
+    let bound: String = param_result.rows[0]
+        .get("1")
+        .or_else(|| param_result.rows[0].get("COL1"))
+        .expect("bound decfloat should decode");
+    assert_eq!(bound, "42.125");
+
     client.close().await.expect("close");
 }
 

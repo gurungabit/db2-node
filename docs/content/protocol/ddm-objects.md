@@ -37,10 +37,10 @@ DDM objects are recursively nested. A command like EXCSAT contains multiple para
 
 ```
 EXCSAT (0x1041)
-  +-- EXTNAM (0x115E): "db2-wire-client"
-  +-- SRVNAM (0x116D): "db2-wire"
-  +-- SRVRLSLV (0x115A): "db2wire00100"
-  +-- SRVCLSNM (0x1147): "db2-wire"
+  +-- EXTNAM (0x115E): "db2-node-client"
+  +-- SRVNAM (0x116D): "db2-node"
+  +-- SRVRLSLV (0x115A): "db2node00100"
+  +-- SRVCLSNM (0x1147): "db2-node"
   +-- MGRLVLLS (0x1404):
         +-- AGENT (0x1403): level 7
         +-- SQLAM (0x2407): level 7
@@ -55,10 +55,10 @@ The DDM builder creates properly framed objects:
 
 ```rust
 let excsat = DdmBuilder::new(EXCSAT)
-    .add_string(EXTNAM, "db2-wire-client")
-    .add_string(SRVNAM, "db2-wire")
-    .add_string(SRVRLSLV, "db2wire00100")
-    .add_string(SRVCLSNM, "db2-wire")
+    .add_string(EXTNAM, "db2-node-client")
+    .add_string(SRVNAM, "db2-node")
+    .add_string(SRVRLSLV, "db2node00100")
+    .add_string(SRVCLSNM, "db2-node")
     .add_bytes(MGRLVLLS, &mgrlvlls_bytes)
     .build();
 ```

@@ -10,6 +10,7 @@ use crate::ddm::DdmBuilder;
 pub fn build_excsqlstt(pkgnamcsn: &[u8], rtnsqlda: Option<u16>) -> Vec<u8> {
     let mut ddm = DdmBuilder::new(EXCSQLSTT);
     ddm.add_code_point(PKGNAMCSN, pkgnamcsn);
+    ddm.add_code_point(RDBCMTOK, &[0xF1]);
     if let Some(val) = rtnsqlda {
         ddm.add_u16(RTNSQLDA, val);
     }
@@ -19,6 +20,25 @@ pub fn build_excsqlstt(pkgnamcsn: &[u8], rtnsqlda: Option<u16>) -> Vec<u8> {
 /// Build EXCSQLSTT without requesting SQLDA return.
 pub fn build_excsqlstt_default(pkgnamcsn: &[u8]) -> Vec<u8> {
     build_excsqlstt(pkgnamcsn, None)
+}
+
+/// Build EXCSQLSTT for auto-commit statements.
+pub fn build_excsqlstt_autocommit(pkgnamcsn: &[u8]) -> Vec<u8> {
+    let mut ddm = DdmBuilder::new(EXCSQLSTT);
+    ddm.add_code_point(PKGNAMCSN, pkgnamcsn);
+    ddm.add_code_point(RDBCMTOK, &[0xF1]);
+    ddm.add_code_point(UOWDSP, &[UOWDSP_COMMIT as u8]);
+    ddm.add_u32(MONITOR, 0xE000_0000);
+    ddm.build()
+}
+
+/// Build EXCSQLSTT requesting a result set reply.
+pub fn build_excsqlstt_output(pkgnamcsn: &[u8]) -> Vec<u8> {
+    let mut ddm = DdmBuilder::new(EXCSQLSTT);
+    ddm.add_code_point(PKGNAMCSN, pkgnamcsn);
+    ddm.add_code_point(RDBCMTOK, &[0xF1]);
+    ddm.add_code_point(OUTEXP, &[0xF1]);
+    ddm.build()
 }
 
 #[cfg(test)]

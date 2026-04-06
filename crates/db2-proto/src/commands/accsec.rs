@@ -20,6 +20,26 @@ pub fn build_accsec_usridpwd(rdbnam: &str) -> Vec<u8> {
     build_accsec(SECMEC_USRIDPWD, rdbnam)
 }
 
+/// Build ACCSEC with encrypted user ID + password mechanism.
+/// Includes a SECTKN (security token) for DES key exchange.
+pub fn build_accsec_eusridpwd(rdbnam: &str) -> Vec<u8> {
+    let mut ddm = DdmBuilder::new(ACCSEC);
+    ddm.add_u16(SECMEC, SECMEC_EUSRIDPWD);
+    ddm.add_code_point(RDBNAM, &pad_rdbnam(rdbnam));
+    // Generate a random security token (DES public key, 32 bytes)
+    let sectkn: Vec<u8> = (0..32)
+        .map(|i| {
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            ((t >> (i * 3)) & 0xFF) as u8
+        })
+        .collect();
+    ddm.add_code_point(SECTKN, &sectkn);
+    ddm.build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

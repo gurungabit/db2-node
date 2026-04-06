@@ -13,8 +13,11 @@ pub struct JsConnectionConfig {
     pub user: String,
     pub password: String,
     pub ssl: Option<bool>,
+    pub reject_unauthorized: Option<bool>,
+    pub ca_cert: Option<String>,
     pub connect_timeout: Option<u32>,
     pub query_timeout: Option<u32>,
+    pub frame_drain_timeout: Option<u32>,
     pub current_schema: Option<String>,
     pub fetch_size: Option<u32>,
 }
@@ -45,7 +48,7 @@ pub struct JsServerInfo {
 
 #[napi]
 pub struct JsClient {
-    inner: Arc<Mutex<Option<db2_client::Client>>>,
+    pub(crate) inner: Arc<Mutex<Option<db2_client::Client>>>,
     config: db2_client::Config,
 }
 
@@ -60,8 +63,11 @@ impl JsClient {
             &config.user,
             &config.password,
             config.ssl,
+            config.reject_unauthorized,
+            config.ca_cert,
             config.connect_timeout,
             config.query_timeout,
+            config.frame_drain_timeout,
             config.current_schema,
             config.fetch_size,
         );
@@ -154,13 +160,20 @@ impl JsClient {
     }
 
     #[napi(js_name = "serverInfo")]
-    pub fn server_info(&self) -> Result<JsServerInfo> {
-        // Server info is typically available after connection is established.
-        // For now, return default values; the actual implementation would query
-        // server attributes from the EXCSAT/ACCRDB exchange.
-        Ok(JsServerInfo {
-            product_name: "DB2".to_string(),
-            server_release: String::new(),
-        })
+    pub async fn server_info(&self) -> Result<JsServerInfo> {
+        let guard = self.inner.lock().await;
+        let client = guard
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("Client is not connected"))?;
+        match client.server_info().await {
+            Some(info) => Ok(JsServerInfo {
+                product_name: info.product_name,
+                server_release: info.server_release,
+            }),
+            None => Ok(JsServerInfo {
+                product_name: String::new(),
+                server_release: String::new(),
+            }),
+        }
     }
 }

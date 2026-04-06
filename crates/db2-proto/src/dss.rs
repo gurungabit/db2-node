@@ -26,6 +26,20 @@ pub const DSS_MAGIC: u8 = 0xD0;
 pub const DSS_HEADER_LEN: usize = 6;
 /// Maximum length of a single DSS segment.
 pub const DSS_MAX_SEGMENT_LEN: usize = 32767;
+const DSS_FIRST_PAYLOAD_LEN: usize = DSS_MAX_SEGMENT_LEN - DSS_HEADER_LEN;
+const DSS_CONTINUATION_HEADER_LEN: usize = 2;
+const DSS_CONTINUATION_PAYLOAD_LEN: usize = DSS_MAX_SEGMENT_LEN - DSS_CONTINUATION_HEADER_LEN;
+
+fn decode_dss_length(raw_length: u16) -> u16 {
+    // LUW returns 0xFFFF for max-sized Object DSS segments carrying large QRYDTA blocks.
+    // The next DSS header starts 2 bytes earlier than a literal 65535-byte consume,
+    // so treat this as a 65533-byte segment.
+    if raw_length == 0xFFFF {
+        0xFFFD
+    } else {
+        raw_length
+    }
+}
 
 /// DSS type identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,7 +129,8 @@ impl DssHeader {
                 actual: data.len(),
             });
         }
-        let length = u16::from_be_bytes([data[0], data[1]]);
+        let raw_length = u16::from_be_bytes([data[0], data[1]]);
+        let length = decode_dss_length(raw_length);
         let magic = data[2];
         if magic != DSS_MAGIC {
             return Err(ProtoError::InvalidMagic(magic));
@@ -181,6 +196,11 @@ impl DssWriter {
         self.correlation_id
     }
 
+    /// Set the correlation ID explicitly.
+    pub fn set_correlation_id(&mut self, id: u16) {
+        self.correlation_id = id;
+    }
+
     /// Increment and return next correlation ID.
     pub fn next_correlation_id(&mut self) -> u16 {
         self.correlation_id = self.correlation_id.wrapping_add(1);
@@ -189,7 +209,13 @@ impl DssWriter {
 
     /// Write a single DDM payload wrapped in one or more DSS segments.
     /// If `chained` is true, the chained flag is set on the first DSS segment.
-    pub fn write_dss(&mut self, dss_type: DssType, chained: bool, payload: &[u8]) {
+    pub fn write_dss_full(
+        &mut self,
+        dss_type: DssType,
+        chained: bool,
+        same_correlation: bool,
+        payload: &[u8],
+    ) {
         let total = payload.len() + DSS_HEADER_LEN;
 
         if total <= DSS_MAX_SEGMENT_LEN {
@@ -200,44 +226,51 @@ impl DssWriter {
                 flags: DssFlags {
                     chained,
                     continue_on_error: false,
-                    same_correlation: false,
+                    same_correlation,
                 },
                 correlation_id: self.correlation_id,
             };
             self.buffer.extend_from_slice(&header.serialize());
             self.buffer.extend_from_slice(payload);
         } else {
-            // Multi-segment continuation
-            let mut offset = 0usize;
-            let mut first = true;
-            while offset < payload.len() {
-                let max_payload = DSS_MAX_SEGMENT_LEN - DSS_HEADER_LEN;
-                let remaining = payload.len() - offset;
-                let is_last = remaining <= max_payload;
-                let chunk_len = if is_last { remaining } else { max_payload };
-                let seg_len = chunk_len + DSS_HEADER_LEN;
-
-                let flags = DssFlags {
-                    chained: if first { chained } else { false },
+            let header = DssHeader {
+                length: 0xFFFF,
+                dss_type,
+                flags: DssFlags {
+                    chained,
                     continue_on_error: false,
-                    same_correlation: !first,
-                };
+                    same_correlation,
+                },
+                correlation_id: self.correlation_id,
+            };
+            self.buffer.extend_from_slice(&header.serialize());
 
-                let header = DssHeader {
-                    length: seg_len as u16,
-                    dss_type: if first { dss_type } else { DssType::Object },
-                    flags,
-                    correlation_id: self.correlation_id,
-                };
+            let mut offset = 0usize;
+            let first_chunk_len = DSS_FIRST_PAYLOAD_LEN.min(payload.len());
+            self.buffer.extend_from_slice(&payload[..first_chunk_len]);
+            offset += first_chunk_len;
 
-                self.buffer.extend_from_slice(&header.serialize());
+            while offset < payload.len() {
+                let remaining = payload.len() - offset;
+                let chunk_len = remaining.min(DSS_CONTINUATION_PAYLOAD_LEN);
+                let has_more = remaining > DSS_CONTINUATION_PAYLOAD_LEN;
+                let continuation_len = if has_more && chunk_len == DSS_CONTINUATION_PAYLOAD_LEN {
+                    0xFFFF
+                } else {
+                    (chunk_len + DSS_CONTINUATION_HEADER_LEN) as u16
+                };
+                self.buffer
+                    .extend_from_slice(&continuation_len.to_be_bytes());
                 self.buffer
                     .extend_from_slice(&payload[offset..offset + chunk_len]);
-
                 offset += chunk_len;
-                first = false;
             }
         }
+    }
+
+    /// Write a DSS without same_correlation flag (backwards compatible).
+    pub fn write_dss(&mut self, dss_type: DssType, chained: bool, payload: &[u8]) {
+        self.write_dss_full(dss_type, chained, false, payload);
     }
 
     /// Convenience: write a Request DSS.
@@ -248,6 +281,18 @@ impl DssWriter {
     /// Convenience: write an Object DSS (used for SQLSTT, SQLDTA, etc.).
     pub fn write_object(&mut self, payload: &[u8], chained: bool) {
         self.write_dss(DssType::Object, chained, payload);
+    }
+
+    /// Write an Object DSS with same_correlation flag set.
+    /// Used for SQLSTT, SQLDTA that continue a previous Request DSS.
+    pub fn write_object_same_corr(&mut self, payload: &[u8], chained: bool) {
+        self.write_dss_full(DssType::Object, chained, true, payload);
+    }
+
+    /// Write a Request DSS with same_correlation flag set.
+    /// Used when the next DSS will share this correlation ID (e.g., PRPSQLSTT before SQLSTT).
+    pub fn write_request_next_same_corr(&mut self, payload: &[u8], chained: bool) {
+        self.write_dss_full(DssType::Request, chained, true, payload);
     }
 }
 
@@ -305,8 +350,9 @@ impl DssReader {
         if self.remaining() < DSS_HEADER_LEN {
             return false;
         }
-        let len = u16::from_be_bytes([self.buffer[self.position], self.buffer[self.position + 1]])
-            as usize;
+        let raw_length =
+            u16::from_be_bytes([self.buffer[self.position], self.buffer[self.position + 1]]);
+        let len = decode_dss_length(raw_length) as usize;
         self.remaining() >= len
     }
 
@@ -330,8 +376,11 @@ impl DssReader {
         let first_header = header.clone();
         self.position += seg_len;
 
-        // Handle continuation: if next segment has same_correlation flag set,
-        // it's a continuation of this DSS.
+        // DSS continuation: only merge segments that are TRUE continuations
+        // (same_correlation + continuation of a large DDM > 32KB).
+        // Do NOT merge separate logical frames that happen to share correlation IDs.
+        // True continuations have same_correlation=true AND contain raw data
+        // without a new DDM header (no code_point at the start of the payload).
         loop {
             if self.remaining() < DSS_HEADER_LEN {
                 break;
@@ -340,15 +389,58 @@ impl DssReader {
             if !peek.flags.same_correlation {
                 break;
             }
+            // Check if this is a true continuation (same type, no new DDM header)
+            // or a separate message. A new DDM header starts with a length field
+            // that would be > 4 and a valid code_point.
+            // For safety, only merge if the first DSS type was Object and the
+            // continuation is also Object, AND the total payload so far exceeds
+            // a threshold suggesting it's a multi-segment DDM.
+            let continuation_type_ok = peek.dss_type == first_header.dss_type
+                || matches!(
+                    (first_header.dss_type, peek.dss_type),
+                    (DssType::Reply, DssType::Object) | (DssType::Request, DssType::Object)
+                );
+            if !continuation_type_ok {
+                break; // Different logical DSS type = separate message
+            }
+            // Don't merge if the payload starts with what looks like a DDM header
+            let cont_start = self.position + DSS_HEADER_LEN;
             let cont_len = peek.length as usize;
             if self.remaining() < cont_len {
-                // Not enough data yet — we can't partially consume, so put back.
-                // In practice, the caller should buffer more data and retry.
                 break;
             }
-            let cont_start = self.position + DSS_HEADER_LEN;
+            // Check if the continuation payload starts with a valid DDM object header
+            // (2-byte length + 2-byte code_point where code_point > 0x0100)
+            if cont_len > DSS_HEADER_LEN + 4 {
+                let payload_start = &self.buffer[cont_start..];
+                if payload_start.len() >= 4 {
+                    let ddm_len = u16::from_be_bytes([payload_start[0], payload_start[1]]) as usize;
+                    let ddm_cp = u16::from_be_bytes([payload_start[2], payload_start[3]]);
+                    // If this looks like a DDM object (length matches, code_point in range)
+                    // then it's a separate message, not a continuation
+                    if ddm_cp > 0x0100 && ddm_len <= (cont_len - DSS_HEADER_LEN + 4) {
+                        break;
+                    }
+                }
+            }
             let cont_end = self.position + cont_len;
-            payload.extend_from_slice(&self.buffer[cont_start..cont_end]);
+            let mut cont_payload = &self.buffer[cont_start..cont_end];
+            // Large extended DDM objects (for example QRYDTA with a 0x8004
+            // header) prepend a 2-byte continuation marker on follow-on DSS
+            // segments. Keep it out of the logical payload or downstream row
+            // decoders will see stray bytes at every segment boundary.
+            if payload.len() >= 4
+                && payload[0] == 0x80
+                && payload[1] == 0x04
+                && cont_payload.len() >= 2
+                && matches!(
+                    u16::from_be_bytes([cont_payload[0], cont_payload[1]]),
+                    0x7FFE | 0x7FFF
+                )
+            {
+                cont_payload = &cont_payload[2..];
+            }
+            payload.extend_from_slice(cont_payload);
             self.position += cont_len;
         }
 
@@ -414,5 +506,46 @@ mod tests {
         let frame = reader.next_frame().unwrap().unwrap();
         assert_eq!(frame.header.dss_type, DssType::Request);
         assert_eq!(frame.payload, payload);
+    }
+
+    #[test]
+    fn test_writer_large_payload_uses_continuation_headers() {
+        let payload = vec![0x5A; 70_000];
+        let mut writer = DssWriter::new(7);
+        writer.write_object(&payload, false);
+        let data = writer.finish();
+
+        assert_eq!(&data[0..2], &0xFFFFu16.to_be_bytes());
+        assert_eq!(data[2], DSS_MAGIC);
+        assert_eq!(data[3], DssType::Object.to_byte());
+        assert_eq!(&data[4..6], &7u16.to_be_bytes());
+        assert_eq!(
+            &data[6..6 + DSS_FIRST_PAYLOAD_LEN],
+            &payload[..DSS_FIRST_PAYLOAD_LEN]
+        );
+
+        let first_continuation_offset = DSS_HEADER_LEN + DSS_FIRST_PAYLOAD_LEN;
+        assert_eq!(
+            u16::from_be_bytes([
+                data[first_continuation_offset],
+                data[first_continuation_offset + 1],
+            ]),
+            0xFFFF
+        );
+
+        let second_continuation_offset =
+            first_continuation_offset + DSS_CONTINUATION_HEADER_LEN + DSS_CONTINUATION_PAYLOAD_LEN;
+        let tail_len = payload.len() - DSS_FIRST_PAYLOAD_LEN - DSS_CONTINUATION_PAYLOAD_LEN;
+        assert_eq!(
+            u16::from_be_bytes([
+                data[second_continuation_offset],
+                data[second_continuation_offset + 1],
+            ]) as usize,
+            tail_len + DSS_CONTINUATION_HEADER_LEN
+        );
+        assert_eq!(
+            data.len(),
+            DSS_HEADER_LEN + payload.len() + (2 * DSS_CONTINUATION_HEADER_LEN)
+        );
     }
 }

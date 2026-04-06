@@ -9,8 +9,11 @@ pub fn config_from_js(
     user: &str,
     password: &str,
     ssl: Option<bool>,
+    reject_unauthorized: Option<bool>,
+    ca_cert: Option<String>,
     connect_timeout: Option<u32>,
     query_timeout: Option<u32>,
+    frame_drain_timeout: Option<u32>,
     current_schema: Option<String>,
     fetch_size: Option<u32>,
 ) -> db2_client::Config {
@@ -22,12 +25,23 @@ pub fn config_from_js(
         password: password.to_string(),
         ..db2_client::Config::default()
     };
-    config.ssl = ssl.unwrap_or(false);
+    let use_ssl = ssl.unwrap_or(false);
+    config.ssl = use_ssl;
+    if use_ssl {
+        config.ssl_config = Some(db2_client::SslConfig {
+            reject_unauthorized: reject_unauthorized.unwrap_or(true),
+            ca_cert,
+            ..Default::default()
+        });
+    }
     if let Some(ct) = connect_timeout {
         config.connect_timeout = std::time::Duration::from_millis(ct as u64);
     }
     if let Some(qt) = query_timeout {
         config.query_timeout = std::time::Duration::from_millis(qt as u64);
+    }
+    if let Some(fd) = frame_drain_timeout {
+        config.frame_drain_timeout = std::time::Duration::from_millis(fd as u64);
     }
     config.current_schema = current_schema;
     if let Some(fs) = fetch_size {

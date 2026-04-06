@@ -3,3 +3,4 @@
 <title>{{ if not .IsHome }}{{ .Title }} | {{ end }}{{ .Site.Title }}</title>
 <meta name="description" content="{{ with .Description }}{{ . }}{{ else }}{{ .Site.Params.description }}{{ end }}">
 <link rel="stylesheet" href="{{ "css/style.css" | relURL }}">
+<script defer src="{{ "js/search.js" | relURL }}"></script>

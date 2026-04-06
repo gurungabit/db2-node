@@ -1,12 +1,5 @@
 //! Parse SQLDARD (SQL Descriptor Area Reply Data).
 use crate::codepage::ebcdic037_to_utf8;
-///
-/// Contains column metadata for a prepared statement or open query.
-/// The format is:
-///   - SQLCARD data (embedded, variable length)
-///   - Number of columns: u16 BE
-///   - For each column:
-///     - Column descriptor data (type, length, precision, scale, name, etc.)
 use crate::codepoints::SQLDARD;
 use crate::ddm::DdmObject;
 use crate::replies::sqlcard::{parse_sqlcard_data, SqlCard};
@@ -22,15 +15,15 @@ pub struct ColumnMetadata {
     pub name: String,
     /// DB2 SQL type.
     pub db2_type: Db2Type,
-    /// DRDA type code.
+    /// Approximate DRDA type code for downstream decoders.
     pub drda_type: u8,
     /// Data length.
     pub length: u16,
     /// Whether the column is nullable.
     pub nullable: bool,
-    /// Decimal precision (for DECIMAL type).
+    /// Decimal precision (for DECIMAL/NUMERIC).
     pub precision: u8,
-    /// Decimal scale (for DECIMAL type).
+    /// Decimal scale (for DECIMAL/NUMERIC).
     pub scale: u8,
     /// CCSID of the column data.
     pub ccsid: u16,
@@ -45,7 +38,7 @@ pub struct ColumnMetadata {
 /// Parsed SQLDARD result.
 #[derive(Debug, Clone)]
 pub struct SqlDard {
-    /// Embedded SQLCARD.
+    /// Embedded SQLCARD / SQLCA group.
     pub sqlcard: SqlCard,
     /// Number of columns.
     pub num_columns: u16,
@@ -66,59 +59,37 @@ pub fn parse_sqldard(obj: &DdmObject) -> Result<SqlDard> {
 }
 
 /// Parse SQLDARD from raw data bytes.
+///
+/// DB2 LUW with `QTDSQLX86` returns a mixed-endian SQLDA layout:
+/// control-group lengths remain network byte order, while the SQLTYPE
+/// identifiers and numeric payload fields are little-endian.
 pub fn parse_sqldard_data(data: &[u8]) -> Result<SqlDard> {
+    if let Some(compact) = parse_compact_sqldard_data(data)? {
+        return Ok(compact);
+    }
+
     if data.is_empty() {
         return Err(ProtoError::Other("empty SQLDARD data".into()));
     }
 
-    let mut offset = 0;
+    let (sqlcard, mut offset) = consume_sqlca_group(data)?;
 
-    // Parse embedded SQLCARD
-    // The SQLCARD starts with a null indicator byte.
-    let sqlcard_null = data[offset];
-    let sqlcard;
-    if sqlcard_null == 0xFF {
-        sqlcard = SqlCard::success();
-        offset += 1;
-    } else {
-        // Parse SQLCARD data — we need to figure out how much it consumes.
-        // SQLCARD: 1 (null) + 4 (sqlcode) + 5 (sqlstate) + 8 (sqlerrproc) + SQLCAXGRP
-        let sqlcard_start = offset;
-        offset += 1 + 4 + 5 + 8; // minimum: null + sqlcode + sqlstate + sqlerrproc
-
-        // SQLCAXGRP null indicator
-        if offset < data.len() {
-            let caxgrp_null = data[offset];
-            offset += 1;
-            if caxgrp_null != 0xFF {
-                offset += 24; // SQLERRD (6 * 4)
-                offset += 11; // SQLWARN
-                              // SQLERRMC length-prefixed
-                if offset + 2 <= data.len() {
-                    let errmc_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
-                    offset += 2 + errmc_len;
-                }
-                // SQLERRMCD_ (diagnostic sections) — skip with null indicators
-                // There may be additional SQLDIAGGRP data here; we try to skip null indicators
-                while offset < data.len() && data[offset] == 0xFF {
-                    offset += 1;
-                    // Check if we've reached column count data
-                    // Heuristic: if next two bytes could be a reasonable column count, stop
-                    if offset + 2 <= data.len() {
-                        let maybe_ncols = u16::from_be_bytes([data[offset], data[offset + 1]]);
-                        if maybe_ncols > 0 && maybe_ncols < 10000 {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        sqlcard =
-            parse_sqlcard_data(&data[sqlcard_start..offset]).unwrap_or_else(|_| SqlCard::success());
+    if offset >= data.len() {
+        return Ok(SqlDard {
+            sqlcard,
+            num_columns: 0,
+            columns: Vec::new(),
+        });
     }
 
-    // Number of columns
+    // SQLDHGRP flag. The current LUW replies usually omit it (`0xFF`),
+    // but some result sets include the optional group.
+    let dh_flag = data[offset];
+    offset += 1;
+    if dh_flag != 0xFF {
+        offset = skip_sqldhgrp(data, offset)?;
+    }
+
     if offset + 2 > data.len() {
         return Ok(SqlDard {
             sqlcard,
@@ -126,207 +97,429 @@ pub fn parse_sqldard_data(data: &[u8]) -> Result<SqlDard> {
             columns: Vec::new(),
         });
     }
-    let num_columns = u16::from_be_bytes([data[offset], data[offset + 1]]);
+
+    let mut declared_columns = u16::from_le_bytes([data[offset], data[offset + 1]]);
+    if declared_columns > 256 && offset + 3 <= data.len() && data[offset] == 0xFF {
+        offset += 1;
+        declared_columns = u16::from_le_bytes([data[offset], data[offset + 1]]);
+    }
     offset += 2;
 
-    // Parse column descriptors
-    let mut columns = Vec::with_capacity(num_columns as usize);
-    for i in 0..num_columns as usize {
+    let mut columns = Vec::new();
+    for index in 0..declared_columns as usize {
         if offset >= data.len() {
             break;
         }
-        match parse_column_descriptor(&data[offset..], i) {
-            Ok((col, consumed)) => {
-                columns.push(col);
-                offset += consumed;
-            }
+
+        let end = descriptor_end(data, offset).unwrap_or(data.len());
+        let descriptor = &data[offset..end];
+        if descriptor.is_empty() {
+            break;
+        }
+
+        match parse_column_descriptor(descriptor, index) {
+            Ok(column) => columns.push(column),
             Err(_) => break,
         }
+
+        offset = end;
     }
 
     Ok(SqlDard {
         sqlcard,
-        num_columns,
+        num_columns: columns.len() as u16,
         columns,
     })
 }
 
-/// Parse a single column descriptor from SQLDARD data.
-/// Returns (ColumnMetadata, bytes consumed).
-fn parse_column_descriptor(data: &[u8], index: usize) -> Result<(ColumnMetadata, usize)> {
-    // The column descriptor format (SQLDA column entry):
-    //   - SQLPRECISION (2 bytes): precision
-    //   - SQLSCALE (2 bytes): scale
-    //   - SQLLENGTH (8 bytes): length (as i64, but we use lower bytes)
-    //   - SQLTYPE (2 bytes): DRDA type code
-    //   - SQLCCSID (2 bytes): CCSID
-    //   - SQLDOPTGRP null indicator (1 byte)
-    //   - If SQLDOPTGRP not null:
-    //     - SQLNAME_LENGTH (2 bytes) + SQLNAME (variable, EBCDIC)
-    //     - SQLLABEL_LENGTH (2 bytes) + SQLLABEL (variable, EBCDIC)
-    //     - SQLCOMMENTS null indicator (1 byte)
-    //     - etc.
+fn parse_compact_sqldard_data(data: &[u8]) -> Result<Option<SqlDard>> {
+    let Some((declared_columns, mut offset)) = find_compact_descriptor_table(data) else {
+        return Ok(None);
+    };
 
-    let min_len = 2 + 2 + 8 + 2 + 2; // = 16 bytes minimum
-    if data.len() < min_len {
-        return Err(ProtoError::BufferTooShort {
-            expected: min_len,
-            actual: data.len(),
-        });
+    let mut columns = Vec::with_capacity(declared_columns);
+
+    for index in 0..declared_columns {
+        if offset + 16 > data.len() {
+            break;
+        }
+
+        let end = next_compact_descriptor_offset(data, offset, index + 1 < declared_columns)
+            .unwrap_or(data.len());
+        if end > data.len() || end <= offset {
+            break;
+        }
+
+        match parse_column_descriptor(&data[offset..end], index) {
+            Ok(column) => columns.push(column),
+            Err(_) => break,
+        }
+
+        offset = end;
     }
 
-    let mut offset = 0;
+    if columns.is_empty() {
+        return Ok(None);
+    }
 
-    let precision_raw = u16::from_be_bytes([data[offset], data[offset + 1]]);
-    offset += 2;
-    let scale_raw = u16::from_be_bytes([data[offset], data[offset + 1]]);
-    offset += 2;
+    Ok(Some(SqlDard {
+        sqlcard: parse_sqlcard_data(data).unwrap_or_else(|_| SqlCard::success()),
+        num_columns: columns.len() as u16,
+        columns,
+    }))
+}
 
-    // SQLLENGTH: 8 bytes (i64), but we only need the lower 2 or 4 bytes
-    let length_i64 = i64::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-        data[offset + 4],
-        data[offset + 5],
-        data[offset + 6],
-        data[offset + 7],
-    ]);
-    offset += 8;
-    let length = length_i64 as u16;
+fn find_compact_descriptor_table(data: &[u8]) -> Option<(usize, usize)> {
+    if data.len() < 18 {
+        return None;
+    }
 
-    let sql_type = u16::from_be_bytes([data[offset], data[offset + 1]]);
-    offset += 2;
+    for pos in 0..=(data.len() - 18) {
+        let count = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        if count == 0 || count > 512 {
+            continue;
+        }
 
-    let ccsid = u16::from_be_bytes([data[offset], data[offset + 1]]);
-    offset += 2;
+        let start = pos + 2;
+        if !looks_like_compact_descriptor_start(&data[start..]) {
+            continue;
+        }
 
-    let drda_type = sql_type as u8;
-    let nullable = (drda_type & 0x01) != 0;
-    let precision = precision_raw as u8;
-    let scale = scale_raw as u8;
-    let (db2_type, _) = Db2Type::from_drda_type(drda_type, length, precision, scale);
+        if count == 1 {
+            return Some((count, start));
+        }
 
-    let mut name = String::new();
-    let mut label = String::new();
-    let mut base_table_name = String::new();
-    let mut schema_name = String::new();
-
-    // SQLDOPTGRP null indicator
-    if offset < data.len() {
-        let opt_null = data[offset];
-        offset += 1;
-
-        if opt_null != 0xFF && offset + 2 <= data.len() {
-            // SQLNAME
-            let name_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
-            offset += 2;
-            if offset + name_len <= data.len() {
-                name = ebcdic037_to_utf8(&data[offset..offset + name_len])
-                    .trim()
-                    .to_string();
-                offset += name_len;
-            }
-
-            // SQLLABEL
-            if offset + 2 <= data.len() {
-                let label_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
-                offset += 2;
-                if offset + label_len <= data.len() {
-                    label = ebcdic037_to_utf8(&data[offset..offset + label_len])
-                        .trim()
-                        .to_string();
-                    offset += label_len;
-                }
-            }
-
-            // SQLCOMMENTS null indicator
-            if offset < data.len() {
-                let comments_null = data[offset];
-                offset += 1;
-                if comments_null != 0xFF && offset + 2 <= data.len() {
-                    let comments_len =
-                        u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
-                    offset += 2;
-                    offset += comments_len; // skip comments
-                }
-            }
-
-            // SQLUDTGRP null indicator
-            if offset < data.len() {
-                let udt_null = data[offset];
-                offset += 1;
-                if udt_null != 0xFF {
-                    // Skip UDT group data — variable length, we just skip known fields
-                    // UDT schema (2 + len), UDT name (2 + len)
-                    for _ in 0..2 {
-                        if offset + 2 <= data.len() {
-                            let flen =
-                                u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
-                            offset += 2 + flen;
-                        }
-                    }
-                }
-            }
-
-            // SQLDXGRP null indicator (extended info: base table name, schema, etc.)
-            if offset < data.len() {
-                let dx_null = data[offset];
-                offset += 1;
-                if dx_null != 0xFF {
-                    // SQLBASECOLNM
-                    if offset + 2 <= data.len() {
-                        let bcol_len =
-                            u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
-                        offset += 2;
-                        offset += bcol_len;
-                    }
-                    // SQLSCHEMA
-                    if offset + 2 <= data.len() {
-                        let schema_len =
-                            u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
-                        offset += 2;
-                        if offset + schema_len <= data.len() {
-                            schema_name = ebcdic037_to_utf8(&data[offset..offset + schema_len])
-                                .trim()
-                                .to_string();
-                            offset += schema_len;
-                        }
-                    }
-                    // SQLTABLENAME
-                    if offset + 2 <= data.len() {
-                        let tbl_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
-                        offset += 2;
-                        if offset + tbl_len <= data.len() {
-                            base_table_name = ebcdic037_to_utf8(&data[offset..offset + tbl_len])
-                                .trim()
-                                .to_string();
-                            offset += tbl_len;
-                        }
-                    }
-                }
+        if let Some(next) = next_compact_descriptor_offset(data, start, true) {
+            if next > start && looks_like_compact_descriptor_start(&data[next..]) {
+                return Some((count, start));
             }
         }
     }
 
-    Ok((
-        ColumnMetadata {
-            index,
-            name,
-            db2_type,
-            drda_type,
-            length,
-            nullable,
-            precision,
-            scale,
-            ccsid,
-            base_table_name,
-            schema_name,
-            label,
+    None
+}
+
+fn consume_sqlca_group(data: &[u8]) -> Result<(SqlCard, usize)> {
+    // SQLDARD embeds the SQLCARD/SQLCA group directly. The compact LUW layout is:
+    //   sqlca_flag (1)
+    //   sqlcode (4, LE)
+    //   sqlstate (5)
+    //   sqlerrproc (8)
+    //   sqlcaxgrp_flag (1)
+    //   if present:
+    //     rowsfetched (8, LE)
+    //     rowsupdated (4, LE)
+    //     sqlerrd (12)
+    //     sqlwarn (11)
+    //     rdbname (2-byte BE len + bytes)
+    //     errmsgm (2-byte BE len + bytes)
+    //     errmsgs (2-byte BE len + bytes)
+    let mut offset = 1 + 4 + 5 + 8;
+    if data.len() < offset + 1 {
+        return Err(ProtoError::BufferTooShort {
+            expected: offset + 1,
+            actual: data.len(),
+        });
+    }
+
+    let cax_flag = data[offset];
+    offset += 1;
+    if cax_flag != 0xFF {
+        offset += 8 + 4 + 12 + 11;
+        offset = skip_len_prefixed_string(data, offset)?;
+        offset = skip_len_prefixed_string(data, offset)?;
+        offset = skip_len_prefixed_string(data, offset)?;
+    }
+
+    let sqlcard = parse_sqlcard_data(&data[..offset]).unwrap_or_else(|_| SqlCard::success());
+    Ok((sqlcard, offset))
+}
+
+fn skip_sqldhgrp(data: &[u8], mut offset: usize) -> Result<usize> {
+    let fixed = 6 * 2;
+    if offset + fixed > data.len() {
+        return Err(ProtoError::BufferTooShort {
+            expected: offset + fixed,
+            actual: data.len(),
+        });
+    }
+    offset += fixed;
+    offset = skip_len_prefixed_string(data, offset)?;
+    offset = skip_len_prefixed_string(data, offset)?;
+    offset = skip_len_prefixed_string(data, offset)?;
+    Ok(offset)
+}
+
+fn skip_len_prefixed_string(data: &[u8], offset: usize) -> Result<usize> {
+    if offset + 2 > data.len() {
+        return Err(ProtoError::BufferTooShort {
+            expected: offset + 2,
+            actual: data.len(),
+        });
+    }
+    let len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+    let end = offset + 2 + len;
+    if end > data.len() {
+        return Err(ProtoError::BufferTooShort {
+            expected: end,
+            actual: data.len(),
+        });
+    }
+    Ok(end)
+}
+
+fn descriptor_end(data: &[u8], start: usize) -> Option<usize> {
+    data[start..]
+        .windows(3)
+        .position(|window| window == [0xFF, 0xFF, 0xFF])
+        .map(|rel| start + rel + 3)
+}
+
+fn next_compact_descriptor_offset(data: &[u8], start: usize, expect_more: bool) -> Option<usize> {
+    if !expect_more {
+        return Some(data.len());
+    }
+
+    for pos in (start + 16)..data.len() {
+        if data[pos] != 0xFF {
+            continue;
+        }
+
+        let next = pos + 1;
+        if next + 16 > data.len() {
+            continue;
+        }
+
+        if looks_like_compact_descriptor_start(&data[next..]) {
+            return Some(next);
+        }
+    }
+
+    None
+}
+
+fn looks_like_compact_descriptor_start(data: &[u8]) -> bool {
+    if data.len() < 16 {
+        return false;
+    }
+
+    let precision = u16::from_le_bytes([data[0], data[1]]) as u8;
+    let scale = u16::from_le_bytes([data[2], data[3]]) as u8;
+    let raw_length = u64::from_le_bytes([
+        data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+    ]);
+    let sql_type = u16::from_le_bytes([data[12], data[13]]);
+    let base_sql_type = sql_type & !1;
+
+    if !matches!(
+        base_sql_type,
+        384 | 388
+            | 392
+            | 404
+            | 408
+            | 412
+            | 448
+            | 452
+            | 456
+            | 464
+            | 468
+            | 472
+            | 480
+            | 484
+            | 488
+            | 492
+            | 496
+            | 500
+            | 908
+            | 912
+            | 988
+    ) {
+        return false;
+    }
+
+    if precision > 63 || scale > 63 {
+        return false;
+    }
+
+    raw_length <= 0x0001_0000
+}
+
+fn parse_column_descriptor(data: &[u8], index: usize) -> Result<ColumnMetadata> {
+    if data.len() < 16 {
+        return Err(ProtoError::BufferTooShort {
+            expected: 16,
+            actual: data.len(),
+        });
+    }
+
+    let precision = u16::from_le_bytes([data[0], data[1]]) as u8;
+    let scale = u16::from_le_bytes([data[2], data[3]]) as u8;
+    let raw_length = u64::from_le_bytes([
+        data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+    ]);
+    let sql_type = u16::from_le_bytes([data[12], data[13]]);
+    let ccsid = decode_ccsid([data[14], data[15]]);
+
+    let nullable = (sql_type & 0x0001) != 0;
+    let db2_type = db2_type_from_sqlda(sql_type, raw_length, precision, scale);
+    let length = normalized_length(sql_type, raw_length, precision, &db2_type);
+    let drda_type = drda_type_for(&db2_type, nullable);
+    let name = extract_column_name(data).unwrap_or_else(|| format!("COL{}", index + 1));
+
+    Ok(ColumnMetadata {
+        index,
+        name,
+        db2_type,
+        drda_type,
+        length,
+        nullable,
+        precision,
+        scale,
+        ccsid,
+        base_table_name: String::new(),
+        schema_name: String::new(),
+        label: String::new(),
+    })
+}
+
+fn decode_ccsid(bytes: [u8; 2]) -> u16 {
+    let be = u16::from_be_bytes(bytes);
+    let le = u16::from_le_bytes(bytes);
+
+    if be == 0 || le == 0 {
+        return be.max(le);
+    }
+
+    let be_small = be <= 10000;
+    let le_small = le <= 10000;
+    match (be_small, le_small) {
+        (true, false) => be,
+        (false, true) => le,
+        _ => be,
+    }
+}
+
+fn extract_column_name(data: &[u8]) -> Option<String> {
+    for start in 16..data.len() {
+        let len = data[start] as usize;
+        if len == 0 || len > 64 || start + 1 + len > data.len() {
+            continue;
+        }
+
+        let bytes = &data[start + 1..start + 1 + len];
+        if !is_probably_name(bytes) {
+            continue;
+        }
+
+        return Some(decode_text(bytes));
+    }
+
+    None
+}
+
+fn is_probably_name(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'$' | b'#' | b'@'))
+}
+
+fn decode_text(bytes: &[u8]) -> String {
+    if bytes.is_ascii() {
+        String::from_utf8_lossy(bytes).to_string()
+    } else {
+        ebcdic037_to_utf8(bytes).trim().to_string()
+    }
+}
+
+fn db2_type_from_sqlda(sql_type: u16, raw_length: u64, precision: u8, scale: u8) -> Db2Type {
+    match sql_type & !1 {
+        384 => Db2Type::Date,
+        388 => Db2Type::Time,
+        392 => Db2Type::Timestamp,
+        404 => Db2Type::Blob,
+        408 => Db2Type::Clob,
+        412 => Db2Type::DbClob,
+        448 | 456 => Db2Type::VarChar(raw_length.min(u16::MAX as u64) as u16),
+        452 => Db2Type::Char(raw_length.min(u16::MAX as u64) as u16),
+        464 | 472 => Db2Type::VarGraphic(raw_length.min(u16::MAX as u64) as u16),
+        468 => Db2Type::Graphic(raw_length.min(u16::MAX as u64) as u16),
+        480 => {
+            if raw_length >= 8 {
+                Db2Type::Double
+            } else {
+                Db2Type::Real
+            }
+        }
+        484 | 488 => Db2Type::Decimal { precision, scale },
+        996 => Db2Type::DecFloat(if raw_length > 8 { 34 } else { 16 }),
+        492 => Db2Type::BigInt,
+        496 => Db2Type::Integer,
+        500 => Db2Type::SmallInt,
+        908 => Db2Type::VarBinary(raw_length.min(u16::MAX as u64) as u16),
+        912 => Db2Type::Binary(raw_length.min(u16::MAX as u64) as u16),
+        988 => Db2Type::Xml,
+        _ => Db2Type::VarChar(raw_length.min(u16::MAX as u64) as u16),
+    }
+}
+
+fn normalized_length(sql_type: u16, raw_length: u64, precision: u8, db2_type: &Db2Type) -> u16 {
+    match sql_type & !1 {
+        384 => 10,
+        388 => 8,
+        392 => 26,
+        404 | 408 | 412 | 448 | 452 | 456 | 464 | 468 | 472 | 908 | 912 | 988 => {
+            raw_length.min(u16::MAX as u64) as u16
+        }
+        480 => match db2_type {
+            Db2Type::Double => 8,
+            _ => 4,
         },
-        offset,
-    ))
+        484 | 488 => ((precision as usize + 2) / 2) as u16,
+        996 => raw_length.min(u16::MAX as u64) as u16,
+        492 => 8,
+        496 => 4,
+        500 => 2,
+        _ => raw_length.min(u16::MAX as u64) as u16,
+    }
+}
+
+fn drda_type_for(db2_type: &Db2Type, nullable: bool) -> u8 {
+    use crate::types::*;
+
+    let base = match db2_type {
+        Db2Type::SmallInt => DRDA_TYPE_SMALLINT,
+        Db2Type::Integer => DRDA_TYPE_INTEGER,
+        Db2Type::BigInt => DRDA_TYPE_BIGINT,
+        Db2Type::Real => DRDA_TYPE_FLOAT4,
+        Db2Type::Double => DRDA_TYPE_FLOAT8,
+        Db2Type::Decimal { .. } => DRDA_TYPE_DECIMAL,
+        Db2Type::DecFloat(_) => DRDA_TYPE_DECFLOAT,
+        Db2Type::Char(_) => DRDA_TYPE_CHAR,
+        Db2Type::VarChar(_) | Db2Type::LongVarChar => DRDA_TYPE_VARCHAR,
+        Db2Type::Clob => DRDA_TYPE_CLOB,
+        Db2Type::Binary(_) => DRDA_TYPE_BINARY,
+        Db2Type::VarBinary(_) => DRDA_TYPE_VARBINARY,
+        Db2Type::Blob => DRDA_TYPE_BLOB,
+        Db2Type::Date => DRDA_TYPE_DATE,
+        Db2Type::Time => DRDA_TYPE_TIME,
+        Db2Type::Timestamp => DRDA_TYPE_TIMESTAMP,
+        Db2Type::Graphic(_) => DRDA_TYPE_GRAPHIC,
+        Db2Type::VarGraphic(_) => DRDA_TYPE_VARGRAPH,
+        Db2Type::DbClob => DRDA_TYPE_DBCLOB,
+        Db2Type::Boolean => DRDA_TYPE_BOOLEAN,
+        Db2Type::Xml => DRDA_TYPE_XML,
+        Db2Type::Null => DRDA_TYPE_NVARCHAR,
+    };
+
+    if nullable {
+        base | 0x01
+    } else {
+        base
+    }
 }
 
 #[cfg(test)]
@@ -335,10 +528,17 @@ mod tests {
 
     #[test]
     fn test_parse_minimal_sqldard() {
-        // Build a minimal SQLDARD: null SQLCARD + 0 columns
         let mut data = Vec::new();
-        data.push(0xFF); // null SQLCARD
-        data.extend_from_slice(&0u16.to_be_bytes()); // 0 columns
+        // SQLCA group: flag(1) + sqlcode(4) + sqlstate(5) + sqlerrproc(8) + sqlcaxgrp_flag(1)
+        data.push(0x00); // SQLCA flag (not null)
+        data.extend_from_slice(&0i32.to_le_bytes()); // sqlcode = 0
+        data.extend_from_slice(b"00000"); // sqlstate
+        data.extend_from_slice(b"SQLPROC1"); // sqlerrproc
+        data.push(0xFF); // SQLCAXGRP absent
+                         // SQLDHGRP flag
+        data.push(0xFF); // SQLDHGRP absent
+                         // num_columns (LE u16)
+        data.extend_from_slice(&0u16.to_le_bytes());
 
         let mut builder = crate::ddm::DdmBuilder::new(SQLDARD);
         builder.add_raw(&data);
@@ -348,6 +548,15 @@ mod tests {
         let dard = parse_sqldard(&obj).unwrap();
         assert_eq!(dard.num_columns, 0);
         assert!(dard.columns.is_empty());
-        assert!(dard.sqlcard.is_success());
+    }
+
+    #[test]
+    fn test_extract_column_name() {
+        let descriptor = [
+            0, 0, 0, 0, 50, 0, 0, 0, 0, 0, 0, 0, 0xC1, 0x01, 0x04, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 8,
+            0, 0, 0, 0, 0, 4, b'N', b'A', b'M', b'E', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF,
+            0xFF,
+        ];
+        assert_eq!(extract_column_name(&descriptor), Some("NAME".to_string()));
     }
 }

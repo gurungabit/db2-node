@@ -10,18 +10,26 @@ use crate::ddm::DdmBuilder;
 ///     - 0 = do not return
 ///     - 1 = return standard
 ///     - 2 = return extended
-pub fn build_prpsqlstt(pkgnamcsn: &[u8], rtnsqlda: Option<u16>) -> Vec<u8> {
+pub fn build_prpsqlstt(pkgnamcsn: &[u8], rtnsqlda: bool) -> Vec<u8> {
     let mut ddm = DdmBuilder::new(PRPSQLSTT);
     ddm.add_code_point(PKGNAMCSN, pkgnamcsn);
-    if let Some(val) = rtnsqlda {
-        ddm.add_u16(RTNSQLDA, val);
+    if rtnsqlda {
+        // RTNSQLDA: 0xF1 = EBCDIC 'Y' (yes, return SQLDA)
+        ddm.add_code_point(RTNSQLDA, &[0xF1]);
+        // Match Derby and request the extended output SQLDA format.
+        ddm.add_code_point(TYPSQLDA, &[TYPSQLDA_X_OUTPUT as u8]);
     }
     ddm.build()
 }
 
 /// Build PRPSQLSTT requesting the SQL descriptor area.
 pub fn build_prpsqlstt_with_sqlda(pkgnamcsn: &[u8]) -> Vec<u8> {
-    build_prpsqlstt(pkgnamcsn, Some(1))
+    build_prpsqlstt(pkgnamcsn, true)
+}
+
+/// Build PRPSQLSTT without requesting the SQL descriptor area.
+pub fn build_prpsqlstt_without_sqlda(pkgnamcsn: &[u8]) -> Vec<u8> {
+    build_prpsqlstt(pkgnamcsn, false)
 }
 
 #[cfg(test)]

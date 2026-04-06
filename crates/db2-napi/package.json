@@ -1,25 +1,68 @@
 {
-  "name": "db2-wire",
+  "name": "db2-node",
   "version": "0.1.0",
   "description": "Zero-dependency DB2 driver for Node.js, built with pure Rust",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "index.cjs",
+  "types": "types.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.cjs",
+      "default": "./index.cjs"
+    }
+  },
+  "files": [
+    "README.md",
+    "index.cjs",
+    "index.js",
+    "index.mjs",
+    "index.d.ts",
+    "types.d.ts"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "build": "napi build --release",
-    "build:debug": "napi build",
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "create:npm": "napi create-npm-dir -t .",
+    "prepublishOnly": "napi prepublish -t npm --tagstyle npm",
     "test": "node --test"
   },
   "napi": {
-    "name": "db2-wire",
+    "name": "db2-node",
     "triples": {
       "defaults": true,
       "additional": [
+        "x86_64-unknown-linux-musl",
         "aarch64-apple-darwin",
-        "aarch64-unknown-linux-gnu"
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "aarch64-pc-windows-msvc"
       ]
     }
   },
-  "keywords": ["db2", "database", "drda", "driver", "napi", "rust"],
+  "keywords": [
+    "db2",
+    "database",
+    "drda",
+    "driver",
+    "napi",
+    "rust"
+  ],
+  "homepage": "https://github.com/gurungabit/db2driver-node",
+  "bugs": {
+    "url": "https://github.com/gurungabit/db2driver-node/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gurungabit/db2driver-node.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT",
   "devDependencies": {
     "@napi-rs/cli": "^2"

@@ -1,0 +1,25 @@
+<header class="site-header">
+  <nav class="navbar">
+    <a href="{{ .Site.Home.RelPermalink }}" class="nav-brand">{{ .Site.Title }}</a>
+    <ul class="nav-links">
+      {{ range .Site.Menus.main }}
+      <li><a href="{{ .URL | relURL }}"{{ if $.IsMenuCurrent "main" . }} class="active"{{ end }}>{{ .Name }}</a></li>
+      {{ end }}
+      <li><a href="{{ .Site.Params.github_repo }}" target="_blank">GitHub</a></li>
+    </ul>
+    <div class="nav-tools">
+      <div class="search-shell" data-search-shell data-search-index="{{ "index.json" | relURL }}">
+        <label class="sr-only" for="doc-search">Search docs</label>
+        <input
+          id="doc-search"
+          class="search-input"
+          type="search"
+          placeholder="Search docs"
+          autocomplete="off"
+          spellcheck="false"
+        >
+        <div class="search-results" data-search-results></div>
+      </div>
+    </div>
+  </nav>
+</header>

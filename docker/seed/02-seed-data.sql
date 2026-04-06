@@ -35,13 +35,12 @@ INSERT INTO test_strings (empty, ascii, unicode, long_text)
 INSERT INTO test_strings (empty, ascii, unicode, long_text)
   VALUES ('', 'line1' || CHR(10) || 'line2', '中文测试数据', NULL);
 
-BEGIN
-  DECLARE i INTEGER DEFAULT 1;
-  WHILE i <= 10000 DO
-    INSERT INTO test_large (val, label)
-      VALUES (i, 'Row number ' || CAST(i AS VARCHAR(10)));
-    SET i = i + 1;
-  END WHILE;
-END;
+INSERT INTO test_large (val, label)
+  WITH t(i) AS (
+    VALUES 1
+    UNION ALL
+    SELECT i + 1 FROM t WHERE i < 10000
+  )
+  SELECT i, 'Row number ' || CAST(i AS VARCHAR(10)) FROM t;
 
 COMMIT;

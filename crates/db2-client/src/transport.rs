@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::config::{Config, SslConfig};
 use crate::error::Error;
@@ -16,12 +16,13 @@ pub enum Transport {
 
 impl Transport {
     /// Connect to the DB2 server, optionally upgrading to TLS.
+    ///
+    /// The `connect_timeout` bounds the entire process: TCP connect + TLS handshake.
     pub async fn connect(config: &Config) -> Result<Self, Error> {
         let addr = config.addr();
         debug!("Connecting to DB2 server at {}", addr);
 
-        // Connect with timeout
-        let stream = timeout(config.connect_timeout, TcpStream::connect(&addr))
+        timeout(config.connect_timeout, Self::connect_inner(config, &addr))
             .await
             .map_err(|_| {
                 Error::Timeout(format!(
@@ -29,6 +30,12 @@ impl Transport {
                     addr, config.connect_timeout
                 ))
             })?
+    }
+
+    /// Inner connection logic (TCP + optional TLS), called under timeout.
+    async fn connect_inner(config: &Config, addr: &str) -> Result<Self, Error> {
+        let stream = TcpStream::connect(addr)
+            .await
             .map_err(|e| Error::Connection(format!("Failed to connect to {}: {}", addr, e)))?;
 
         // Set TCP nodelay for low-latency protocol exchange
@@ -70,14 +77,38 @@ impl Transport {
 
     /// Build the rustls ClientConfig from our SslConfig.
     fn build_tls_config(ssl_config: Option<&SslConfig>) -> Result<rustls::ClientConfig, Error> {
+        // Ensure the ring crypto provider is installed (idempotent)
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let builder = rustls::ClientConfig::builder();
 
-        // Determine root certificate store
+        if let Some(ssl) = ssl_config {
+            if !ssl.reject_unauthorized {
+                // If not rejecting unauthorized, build a config that skips server verification
+                let config = builder
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(NoVerifier))
+                    .with_no_client_auth();
+                return Ok(config);
+            }
+        }
+
         let mut root_store = rustls::RootCertStore::empty();
+        let native_certs = rustls_native_certs::load_native_certs();
+        if !native_certs.errors.is_empty() {
+            warn!(
+                "Encountered {} error(s) while loading native certificates",
+                native_certs.errors.len()
+            );
+        }
+        for cert in native_certs.certs {
+            root_store
+                .add(cert)
+                .map_err(|e| Error::Tls(format!("Failed to add native CA cert: {}", e)))?;
+        }
 
         if let Some(ssl) = ssl_config {
             if let Some(ca_cert_path) = &ssl.ca_cert {
-                // Load CA certificate from file
                 let ca_data = std::fs::read(ca_cert_path).map_err(|e| {
                     Error::Tls(format!("Failed to read CA cert {}: {}", ca_cert_path, e))
                 })?;
@@ -91,19 +122,14 @@ impl Transport {
                         .map_err(|e| Error::Tls(format!("Failed to add CA cert: {}", e)))?;
                 }
             }
-
-            if !ssl.reject_unauthorized {
-                // If not rejecting unauthorized, build a config that skips server verification
-                let config = builder
-                    .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(NoVerifier))
-                    .with_no_client_auth();
-                return Ok(config);
-            }
         }
 
-        // If we have no custom CA certs loaded, the root store may be empty.
-        // In production, we'd load system certs. For now, proceed with what we have.
+        if root_store.is_empty() {
+            return Err(Error::Tls(
+                "TLS verification is enabled but no root certificates are available".into(),
+            ));
+        }
+
         let config = builder
             .with_root_certificates(root_store)
             .with_no_client_auth();

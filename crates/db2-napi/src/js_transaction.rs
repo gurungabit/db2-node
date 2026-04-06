@@ -51,6 +51,18 @@ impl JsTransaction {
         Ok(query_result_to_js(result))
     }
 
+    /// Prepare a SQL statement within this transaction.
+    #[napi]
+    pub async fn prepare(&self, sql: String) -> Result<crate::js_statement::JsPreparedStatement> {
+        let mut guard = self.inner.lock().await;
+        let txn = guard.as_mut().ok_or_else(|| {
+            napi::Error::from_reason("Transaction is already committed or rolled back")
+        })?;
+
+        let stmt = txn.prepare(&sql).await.map_err(client_error_to_napi)?;
+        Ok(crate::js_statement::JsPreparedStatement::from_inner(stmt))
+    }
+
     #[napi]
     pub async fn commit(&self) -> Result<()> {
         let mut guard = self.inner.lock().await;

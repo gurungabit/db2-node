@@ -11,21 +11,22 @@ use crate::ddm::DdmBuilder;
 ///   - nbrrow: Number of rows to fetch
 pub fn build_cntqry(
     pkgnamcsn: &[u8],
+    qryinsid: Option<&[u8]>,
     qryblksz: u32,
     maxblkext: Option<i16>,
-    nbrrow: Option<u32>,
+    qryrowset: Option<u32>,
 ) -> Vec<u8> {
     let mut ddm = DdmBuilder::new(CNTQRY);
     ddm.add_code_point(PKGNAMCSN, pkgnamcsn);
     ddm.add_u32(QRYBLKSZ, qryblksz);
-    ddm.add_u16(QRYPRCTYP, QRYPRCTYP_LMTBLKPRC);
-
     if let Some(ext) = maxblkext {
         ddm.add_u16(MAXBLKEXT, ext as u16);
     }
-
-    if let Some(rows) = nbrrow {
-        ddm.add_u32(NBRROW, rows);
+    if let Some(qryinsid) = qryinsid {
+        ddm.add_code_point(QRYINSID, qryinsid);
+    }
+    if let Some(rows) = qryrowset {
+        ddm.add_u32(QRYROWSET, rows);
     }
 
     ddm.build()
@@ -33,7 +34,7 @@ pub fn build_cntqry(
 
 /// Build CNTQRY with typical defaults.
 pub fn build_cntqry_default(pkgnamcsn: &[u8]) -> Vec<u8> {
-    build_cntqry(pkgnamcsn, 32767, Some(-1), Some(100))
+    build_cntqry(pkgnamcsn, None, 32767, Some(-1), Some(100))
 }
 
 #[cfg(test)]

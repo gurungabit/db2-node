@@ -5,7 +5,7 @@ weight: 10
 
 # Getting Started
 
-This guide walks you through installing db2-wire, connecting to a DB2 database, and running your first queries.
+This guide walks you through installing db2-node, connecting to a DB2 database, and running your first queries.
 
 ## Prerequisites
 
@@ -15,20 +15,20 @@ This guide walks you through installing db2-wire, connecting to a DB2 database, 
 ## Installation
 
 ```bash
-npm install db2-wire
+npm install db2-node
 ```
 
-db2-wire ships prebuilt native binaries for:
-- `linux-x64` (glibc)
-- `darwin-arm64` (Apple Silicon)
-- `win32-x64`
+db2-node ships prebuilt native binaries for:
+- Linux: `x64` glibc, `x64` musl, `arm64` glibc, `arm64` musl
+- macOS: `x64`, `arm64` (Apple Silicon)
+- Windows: `x64`, `arm64`
 
 No compiler toolchain needed for supported platforms.
 
 ## Connecting to DB2
 
 ```typescript
-import { Client } from 'db2-wire';
+import { Client } from 'db2-node';
 
 const client = new Client({
   host: 'localhost',
@@ -50,9 +50,12 @@ await client.connect();
 | `database` | `string` | — | Database name |
 | `user` | `string` | — | Username |
 | `password` | `string` | — | Password |
-| `ssl` | `boolean \| SslConfig` | `false` | Enable TLS |
-| `connectTimeout` | `number` | `30000` | Connection timeout in ms |
-| `queryTimeout` | `number` | `0` | Query timeout in ms (0 = none) |
+| `ssl` | `boolean` | `false` | Enable TLS/SSL |
+| `rejectUnauthorized` | `boolean` | `true` | Verify server certificate |
+| `caCert` | `string` | — | Path to CA certificate PEM file |
+| `connectTimeout` | `number` | `30000` | Connection timeout in ms (TCP + TLS) |
+| `queryTimeout` | `number` | `0` | Query timeout in ms (0 = no timeout) |
+| `frameDrainTimeout` | `number` | `500` | DRDA reply frame drain timeout in ms |
 | `currentSchema` | `string` | — | Default schema |
 | `fetchSize` | `number` | `100` | Rows per fetch batch |
 
@@ -101,7 +104,13 @@ await stmt.execute(['Alice', 1]);
 await stmt.execute(['Bob', 2]);
 await stmt.execute(['Carol', 1]);
 
-await stmt.close();
+// Batch insert (single round-trip)
+await stmt.executeBatch([
+  ['Dave', 3],
+  ['Eve', 1],
+]);
+
+await stmt.close(); // always close when done
 ```
 
 ## Transactions
@@ -119,12 +128,14 @@ try {
 }
 ```
 
+Transactions also support prepared statements via `tx.prepare()`.
+
 ## Connection Pool
 
 For applications with concurrent database access:
 
 ```typescript
-import { Pool } from 'db2-wire';
+import { Pool } from 'db2-node';
 
 const pool = new Pool({
   host: 'localhost',
@@ -133,7 +144,6 @@ const pool = new Pool({
   user: 'db2inst1',
   password: 'password',
   maxConnections: 20,
-  idleTimeout: 30000,
 });
 
 // Pool manages connections automatically
@@ -141,27 +151,53 @@ const result = await pool.query('SELECT COUNT(*) AS cnt FROM employees');
 
 // Or acquire a connection for multiple operations
 const client = await pool.acquire();
-// ... use client ...
-pool.release(client);
+try {
+  // ... use client ...
+} finally {
+  await pool.release(client);
+}
 
 await pool.close();
 ```
 
+### Pool Options
+
+All connection options above, plus:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `minConnections` | `number` | `0` | Minimum idle connections to maintain |
+| `maxConnections` | `number` | `10` | Maximum total connections |
+| `idleTimeout` | `number` | `600` | Close idle connections after this many seconds (10 min) |
+| `maxLifetime` | `number` | `3600` | Recycle connections after this many seconds (1 hour) |
+
 ## TLS / SSL
 
 ```typescript
+// Skip certificate verification (development/testing)
+const client = new Client({
+  host: 'localhost',
+  port: 50001,
+  database: 'testdb',
+  user: 'db2inst1',
+  password: 'secret',
+  ssl: true,
+  rejectUnauthorized: false,
+});
+
+// Verify with custom CA certificate (production)
 const client = new Client({
   host: 'db2.example.com',
   port: 50001,
   database: 'PRODDB',
   user: 'app_user',
   password: 'secret',
-  ssl: {
-    ca: '/path/to/ca-cert.pem',
-    rejectUnauthorized: true,
-  },
+  ssl: true,
+  caCert: '/path/to/ca-cert.pem',
 });
 ```
+
+When `rejectUnauthorized` is `true` (the default), system trust store certificates are loaded automatically. Custom CA certificates from `caCert` are added on top.
 
 ## Development Setup
 
@@ -181,4 +217,4 @@ cd db2driver-node
 # Password: db2wire_test_pw
 ```
 
-See the [Contributing](/contributing/) guide for full development instructions.
+See the [Contributing]({{< relref "contributing/_index.md" >}}) guide for full development instructions.

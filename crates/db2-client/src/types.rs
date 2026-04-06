@@ -172,14 +172,16 @@ impl<T: ToSql> ToSql for Option<T> {
 /// Encode a Db2Value to its wire format bytes.
 ///
 /// This is used when building SQLDTA for parameterized queries.
+#[allow(dead_code)]
 pub(crate) fn encode_db2_value(value: &Db2Value) -> Vec<u8> {
     match value {
         Db2Value::Null => vec![0xFF], // null indicator
-        Db2Value::SmallInt(v) => v.to_be_bytes().to_vec(),
-        Db2Value::Integer(v) => v.to_be_bytes().to_vec(),
-        Db2Value::BigInt(v) => v.to_be_bytes().to_vec(),
-        Db2Value::Real(v) => v.to_be_bytes().to_vec(),
-        Db2Value::Double(v) => v.to_be_bytes().to_vec(),
+        // Under QTDSQLX86, fixed-width numeric parameter data is little-endian.
+        Db2Value::SmallInt(v) => v.to_le_bytes().to_vec(),
+        Db2Value::Integer(v) => v.to_le_bytes().to_vec(),
+        Db2Value::BigInt(v) => v.to_le_bytes().to_vec(),
+        Db2Value::Real(v) => v.to_le_bytes().to_vec(),
+        Db2Value::Double(v) => v.to_le_bytes().to_vec(),
         Db2Value::Decimal(s) => {
             // Encode as varchar for simplicity; a full impl would use packed BCD
             encode_varchar(s.as_bytes())
@@ -202,6 +204,7 @@ pub(crate) fn encode_db2_value(value: &Db2Value) -> Vec<u8> {
 }
 
 /// Encode bytes as a variable-length field (2-byte length prefix + data).
+#[allow(dead_code)]
 fn encode_varchar(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(2 + data.len());
     out.extend_from_slice(&(data.len() as u16).to_be_bytes());

@@ -10,6 +10,8 @@ pub struct OpenQueryReply {
     pub severity_code: u16,
     /// Query protocol type actually used by the server.
     pub query_protocol_type: Option<u16>,
+    /// Query instance identifier for follow-up CNTQRY/CLSQRY flows.
+    pub query_instance_id: Option<Vec<u8>>,
     /// Other parameters from the reply.
     pub parameters: Vec<(u16, Vec<u8>)>,
 }
@@ -33,6 +35,7 @@ pub fn parse_opnqryrm(obj: &DdmObject) -> Result<OpenQueryReply> {
     let params = obj.parameters();
     let mut severity_code: u16 = 0;
     let mut query_protocol_type: Option<u16> = None;
+    let mut query_instance_id: Option<Vec<u8>> = None;
     let mut raw_params = Vec::new();
 
     for param in &params {
@@ -43,6 +46,9 @@ pub fn parse_opnqryrm(obj: &DdmObject) -> Result<OpenQueryReply> {
             QRYPRCTYP => {
                 query_protocol_type = param.as_u16();
             }
+            QRYINSID => {
+                query_instance_id = Some(param.data.clone());
+            }
             _ => {
                 raw_params.push((param.code_point, param.data.clone()));
             }
@@ -52,6 +58,7 @@ pub fn parse_opnqryrm(obj: &DdmObject) -> Result<OpenQueryReply> {
     Ok(OpenQueryReply {
         severity_code,
         query_protocol_type,
+        query_instance_id,
         parameters: raw_params,
     })
 }

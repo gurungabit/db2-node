@@ -28,6 +28,7 @@ pub fn test_config() -> Config {
         ssl_config: None,
         connect_timeout: std::time::Duration::from_secs(10),
         query_timeout: std::time::Duration::from_secs(30),
+        frame_drain_timeout: std::time::Duration::from_millis(500),
         fetch_size: 100,
         current_schema: None,
     }
