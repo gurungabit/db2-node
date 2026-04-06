@@ -1,0 +1,9 @@
+{{ $toc := .TableOfContents }}
+{{ if and $toc (ne (trim $toc "\n\r\t ") "") }}
+<aside class="page-toc" aria-label="On this page">
+  <div class="page-toc-panel">
+    <p class="docs-sidebar-label">On this page</p>
+    {{ $toc }}
+  </div>
+</aside>
+{{ end }}

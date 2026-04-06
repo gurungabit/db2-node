@@ -1,0 +1,42 @@
+{{ $currentSection := .CurrentSection }}
+{{ if .IsSection }}
+  {{ $currentSection = . }}
+{{ end }}
+{{ $home := .Site.Home }}
+{{ $sections := $home.Sections.ByWeight }}
+
+<aside class="docs-sidebar" aria-label="Documentation navigation">
+  <div class="docs-sidebar-panel">
+    <p class="docs-sidebar-label">Documentation</p>
+    <ul class="docs-sidebar-list">
+      <li class="docs-sidebar-item">
+        <a href="{{ $home.RelPermalink }}" class="docs-sidebar-link{{ if eq .RelPermalink $home.RelPermalink }} is-active{{ end }}">
+          Overview
+        </a>
+      </li>
+      {{ range $section := $sections }}
+        {{ $isCurrentTopLevel := and $currentSection (eq $currentSection.RelPermalink $section.RelPermalink) }}
+        {{ $isActiveSection := eq $.RelPermalink $section.RelPermalink }}
+        <li class="docs-sidebar-item">
+          <a href="{{ $section.RelPermalink }}" class="docs-sidebar-link{{ if $isActiveSection }} is-active{{ else if $isCurrentTopLevel }} is-section-current{{ end }}">
+            {{ $section.Title }}
+          </a>
+          {{ if $isCurrentTopLevel }}
+            {{ $children := $section.Pages.ByWeight }}
+            {{ if $children }}
+              <ul class="docs-sidebar-children">
+                {{ range $child := $children }}
+                  <li>
+                    <a href="{{ $child.RelPermalink }}" class="docs-sidebar-sublink{{ if eq $.RelPermalink $child.RelPermalink }} is-active{{ end }}">
+                      {{ $child.Title }}
+                    </a>
+                  </li>
+                {{ end }}
+              </ul>
+            {{ end }}
+          {{ end }}
+        </li>
+      {{ end }}
+    </ul>
+  </div>
+</aside>
