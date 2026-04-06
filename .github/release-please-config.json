@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    "crates/db2-napi": {
+      "release-type": "node",
+      "package-name": "@gurungabit/db2-node",
+      "changelog-path": "crates/db2-napi/CHANGELOG.md",
+      "include-v-in-tag": true,
+      "include-component-in-tag": false
+    }
+  }
+}

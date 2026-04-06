@@ -156,8 +156,15 @@ The local docs site includes search and is configured to match the GitHub Pages 
 ## Release Flow
 
 - The npm package is `@gurungabit/db2-node`
+- `.github/workflows/release-please.yml` opens and updates a release PR from `main`
+- Merging that release PR creates the next `v*` tag
 - Tag pushes matching `v*` trigger `.github/workflows/release.yml`
 - The release workflow builds prebuilt binaries, smoke-tests module loading, and publishes npm artifacts
+
+### Release Automation Notes
+
+- Release Please follows Conventional Commits; `feat`, `fix`, and `deps` commits are releasable by default
+- For the tag created by Release Please to trigger the publish workflow, set a `RELEASE_PLEASE_TOKEN` secret to a PAT or GitHub App token with repository write access
 
 ## Status
 
