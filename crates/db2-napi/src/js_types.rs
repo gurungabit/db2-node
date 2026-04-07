@@ -79,14 +79,17 @@ pub fn query_result_to_js(result: db2_client::types::QueryResult) -> JsQueryResu
 }
 
 /// Convert a single Row to a JSON object using column names as keys.
+///
+/// Type resolution order matters: numeric types are tried before String
+/// because `FromDb2Value for String` can convert numeric values to strings,
+/// which would cause integers and floats to be returned as JSON strings
+/// instead of JSON numbers.
 fn row_to_json(row: &db2_client::Row, col_names: &[String]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for name in col_names {
         let is_null = row.is_null(name);
         if is_null {
             map.insert(name.clone(), serde_json::Value::Null);
-        } else if let Some(v) = row.get::<String>(name) {
-            map.insert(name.clone(), serde_json::Value::String(v));
         } else if let Some(v) = row.get::<i64>(name) {
             map.insert(name.clone(), serde_json::Value::Number(v.into()));
         } else if let Some(v) = row.get::<f64>(name) {
@@ -95,6 +98,14 @@ fn row_to_json(row: &db2_client::Row, col_names: &[String]) -> serde_json::Value
             map.insert(name.clone(), serde_json::Value::Number(num));
         } else if let Some(v) = row.get::<bool>(name) {
             map.insert(name.clone(), serde_json::Value::Bool(v));
+        } else if let Some(v) = row.get::<Vec<u8>>(name) {
+            let arr: Vec<serde_json::Value> = v
+                .into_iter()
+                .map(|b| serde_json::Value::Number(b.into()))
+                .collect();
+            map.insert(name.clone(), serde_json::Value::Array(arr));
+        } else if let Some(v) = row.get::<String>(name) {
+            map.insert(name.clone(), serde_json::Value::String(v));
         } else {
             map.insert(name.clone(), serde_json::Value::Null);
         }

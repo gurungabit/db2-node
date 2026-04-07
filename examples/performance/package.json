@@ -1,0 +1,26 @@
+{
+  "name": "db2-performance-suite",
+  "version": "1.0.0",
+  "description": "Comprehensive performance and edge-case tests for @gurungabit/db2-node",
+  "type": "module",
+  "scripts": {
+    "all": "npx tsx src/run-all.ts",
+    "crud": "npx tsx src/bench-crud.ts",
+    "batch": "npx tsx src/bench-batch.ts",
+    "pipeline": "npx tsx src/bench-pipeline.ts",
+    "blob": "npx tsx src/bench-blob.ts",
+    "edge": "npx tsx src/bench-edge-cases.ts",
+    "pool": "npx tsx src/bench-pool.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@gurungabit/db2-node": "^0.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}

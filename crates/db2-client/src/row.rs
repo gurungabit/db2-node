@@ -148,11 +148,6 @@ impl FromDb2Value for String {
             db2_proto::types::Db2Value::Time(v) => Some(v.clone()),
             db2_proto::types::Db2Value::Timestamp(v) => Some(v.clone()),
             db2_proto::types::Db2Value::Xml(v) => Some(v.clone()),
-            db2_proto::types::Db2Value::SmallInt(v) => Some(v.to_string()),
-            db2_proto::types::Db2Value::Integer(v) => Some(v.to_string()),
-            db2_proto::types::Db2Value::BigInt(v) => Some(v.to_string()),
-            db2_proto::types::Db2Value::Real(v) => Some(v.to_string()),
-            db2_proto::types::Db2Value::Double(v) => Some(v.to_string()),
             db2_proto::types::Db2Value::Decimal(v) => Some(v.clone()),
             _ => None,
         }
