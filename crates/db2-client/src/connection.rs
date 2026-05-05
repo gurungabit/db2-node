@@ -1,7 +1,7 @@
 use bytes::BytesMut;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 use tokio::sync::{Mutex, OwnedSemaphorePermit};
 use tokio::time::timeout;
@@ -28,6 +28,8 @@ pub(crate) const ZOS_DIRECT_QUERY_SECTION: u16 = 1;
 pub(crate) const PREPARED_STATEMENT_PKGID: &str = "SYSLH200";
 pub(crate) const PREPARED_STATEMENT_MAX_SECTION: u16 = 385;
 const ZOS_SELECT_CACHE_MAX_ENTRIES: usize = 64;
+const ZOS_KNOWN_NON_LOB_SELECT_MAX_ENTRIES: usize = 256;
+static ZOS_KNOWN_NON_LOB_SELECTS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 
 pub(crate) struct PoolCheckoutEntry {
     pub(crate) created_at: std::time::Instant,
@@ -243,6 +245,37 @@ impl ClientInner {
 
             frames.extend(more_frames);
             if prepare_frames_have_result_metadata(&frames) {
+                break;
+            }
+        }
+
+        Ok(frames)
+    }
+
+    async fn read_zos_chained_select_reply_frames(&mut self) -> Result<Vec<DssFrame>, Error> {
+        let mut frames = self.read_reply_frames().await?;
+        if prepare_frames_have_result_metadata(&frames)
+            && chained_select_frames_have_query_reply(&frames)
+        {
+            return Ok(frames);
+        }
+
+        let frame_drain_timeout = self.frame_drain_timeout();
+        loop {
+            let more_frames = match timeout(frame_drain_timeout, self.read_reply_frames()).await {
+                Ok(Ok(frames)) => frames,
+                Ok(Err(err)) => return Err(err),
+                Err(_) => break,
+            };
+
+            if more_frames.is_empty() {
+                break;
+            }
+
+            frames.extend(more_frames);
+            if prepare_frames_have_result_metadata(&frames)
+                && chained_select_frames_have_query_reply(&frames)
+            {
                 break;
             }
         }
@@ -649,8 +682,9 @@ impl ClientInner {
             let qryblksz: u32 = 0x0000FFFF;
 
             if params.is_empty() && use_zos_sqlstt {
+                let zos_cache_key = zos_select_cache_key(sql);
                 if self.zos_lob_internal_depth == 0 && use_zos_select_cache() {
-                    if let Some(cached) = self.zos_select_cache.get(sql).cloned() {
+                    if let Some(cached) = self.zos_select_cache.get(&zos_cache_key).cloned() {
                         self.activate_section(cached.package_id, cached.section_number);
                         let result = self
                             .open_zos_select(
@@ -663,11 +697,28 @@ impl ClientInner {
                         match result {
                             Ok(result) => return Ok(result),
                             Err(err) if should_reprepare_cached_zos_select(&err) => {
-                                self.zos_select_cache.remove(sql);
+                                self.zos_select_cache.remove(&zos_cache_key);
                                 self.release_prepared_section(cached.section_number);
                             }
                             Err(err) => return Err(err),
                         }
+                    }
+                }
+
+                if self.zos_lob_internal_depth == 0
+                    && use_zos_known_non_lob_chained_prepare_open()
+                    && zos_known_non_lob_select(&zos_cache_key)
+                {
+                    if let Some(result) = self
+                        .execute_zos_known_non_lob_chained_select(
+                            sql,
+                            &sqlstt_data,
+                            use_zos_cursor_attributes,
+                            &zos_cache_key,
+                        )
+                        .await?
+                    {
+                        return Ok(result);
                     }
                 }
 
@@ -729,9 +780,12 @@ impl ClientInner {
                     .await;
                 match result {
                     Ok(result) => {
+                        if !result_metadata_needs_zos_lob_route(&column_info, &result_descriptors) {
+                            remember_zos_non_lob_select(&zos_cache_key);
+                        }
                         if let Some(section_number) = cache_section {
                             self.zos_select_cache.insert(
-                                sql.to_string(),
+                                zos_cache_key,
                                 CachedZosSelect {
                                     package_id,
                                     section_number,
@@ -837,6 +891,129 @@ impl ClientInner {
 
             self.execute_with_params(&pkgnamcsn, params, &input_descriptors)
                 .await
+        }
+    }
+
+    async fn execute_zos_known_non_lob_chained_select(
+        &mut self,
+        sql: &str,
+        sqlstt_data: &[u8],
+        use_zos_cursor_attributes: bool,
+        zos_cache_key: &str,
+    ) -> Result<Option<QueryResult>, Error> {
+        let cache_section = if use_zos_select_cache()
+            && self.zos_select_cache.len() < ZOS_SELECT_CACHE_MAX_ENTRIES
+        {
+            self.allocate_zos_cached_select_section()
+        } else {
+            None
+        };
+        let (package_id, section_number) = cache_section
+            .map(|section| (DIRECT_QUERY_PKGID, section))
+            .unwrap_or((DIRECT_QUERY_PKGID, ZOS_DIRECT_QUERY_SECTION));
+        self.activate_section(package_id, section_number);
+        let pkgnamcsn = self.build_pkgnamcsn_for(package_id, section_number);
+        let prpsqlstt_data = db2_proto::commands::prpsqlstt::build_prpsqlstt_with_sqlda(&pkgnamcsn);
+
+        let opnqry_data = {
+            let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
+            ddm.add_code_point(codepoints::PKGNAMCSN, &pkgnamcsn);
+            ddm.add_u32(
+                codepoints::QRYBLKSZ,
+                db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
+            );
+            if use_zos_non_lob_extra_blocks() {
+                ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
+            }
+            ddm.add_code_point(0x215D, &[0x01]); // QRYCLSIMP = 1 (close on endqry)
+            ddm.build()
+        };
+
+        let corr_id = self.next_correlation_id();
+        let mut writer = DssWriter::new(corr_id);
+        writer.write_request_next_same_corr(&prpsqlstt_data, true);
+        if use_zos_cursor_attributes {
+            let sqlattr_data = db2_proto::commands::sqlattr::build_sqlattr_for_read_only_cursor();
+            writer.write_object_same_corr(&sqlattr_data, true);
+        }
+        writer.write_object(sqlstt_data, true);
+        writer.set_correlation_id(self.next_correlation_id());
+        writer.write_request(&opnqry_data, false);
+
+        let send_buf = writer.finish();
+        if let Err(err) = self.send_bytes(&send_buf).await {
+            if let Some(section_number) = cache_section {
+                self.release_prepared_section(section_number);
+            }
+            return Err(err);
+        }
+
+        let frames = match self.read_zos_chained_select_reply_frames().await {
+            Ok(frames) => frames,
+            Err(err) => {
+                if let Some(section_number) = cache_section {
+                    self.release_prepared_section(section_number);
+                }
+                return Err(err);
+            }
+        };
+        let column_info = match self.parse_prepare_reply(&frames) {
+            Ok(column_info) => column_info,
+            Err(err) => {
+                if let Some(section_number) = cache_section {
+                    self.release_prepared_section(section_number);
+                }
+                return Err(err);
+            }
+        };
+        let result_descriptors = self.parse_prepare_result_descriptors(&frames);
+        if result_metadata_needs_zos_lob_route(&column_info, &result_descriptors) {
+            forget_zos_non_lob_select(zos_cache_key);
+            if let Some(section_number) = cache_section {
+                self.release_prepared_section(section_number);
+            }
+            return Ok(None);
+        }
+
+        let fetch_size_override = if use_zos_non_lob_sql_rowset_cap() {
+            parse_fetch_first_row_limit(sql)
+                .and_then(|limit| u32::try_from(limit).ok())
+                .map(|limit| limit.min(self.config.fetch_size.max(1)))
+        } else {
+            None
+        };
+        let result = self
+            .process_query_reply_with_fetch_size(
+                &frames,
+                &column_info,
+                Some(&result_descriptors),
+                fetch_size_override,
+            )
+            .await;
+
+        match result {
+            Ok(result) => {
+                remember_zos_non_lob_select(zos_cache_key);
+                if let Some(section_number) = cache_section {
+                    self.zos_select_cache.insert(
+                        zos_cache_key.to_string(),
+                        CachedZosSelect {
+                            package_id,
+                            section_number,
+                            pkgnamcsn: pkgnamcsn.clone().into(),
+                            column_info,
+                            result_descriptors,
+                        },
+                    );
+                }
+                Ok(Some(result))
+            }
+            Err(err) => {
+                if let Some(section_number) = cache_section {
+                    self.release_prepared_section(section_number);
+                }
+                Err(err)
+            }
         }
     }
 
@@ -4095,6 +4272,45 @@ fn use_zos_select_cache() -> bool {
         .unwrap_or(true)
 }
 
+fn use_zos_known_non_lob_chained_prepare_open() -> bool {
+    env::var("DB2_ZOS_KNOWN_NON_LOB_CHAIN_PREPARE_OPEN")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn zos_select_cache_key(sql: &str) -> String {
+    sql.trim().to_string()
+}
+
+fn zos_known_non_lob_selects() -> &'static StdMutex<HashSet<String>> {
+    ZOS_KNOWN_NON_LOB_SELECTS.get_or_init(|| StdMutex::new(HashSet::new()))
+}
+
+fn zos_known_non_lob_select(key: &str) -> bool {
+    zos_known_non_lob_selects()
+        .lock()
+        .map(|known| known.contains(key))
+        .unwrap_or(false)
+}
+
+fn remember_zos_non_lob_select(key: &str) {
+    if let Ok(mut known) = zos_known_non_lob_selects().lock() {
+        if known.len() >= ZOS_KNOWN_NON_LOB_SELECT_MAX_ENTRIES {
+            known.clear();
+        }
+        known.insert(key.to_string());
+    }
+}
+
+fn forget_zos_non_lob_select(key: &str) {
+    if let Ok(mut known) = zos_known_non_lob_selects().lock() {
+        known.remove(key);
+    }
+}
+
 pub(crate) fn query_diagnostics_enabled() -> bool {
     debug_hex_enabled()
         || env::var("DB2_QUERY_DIAGNOSTICS")
@@ -5302,6 +5518,32 @@ fn prepare_frames_have_result_metadata(frames: &[DssFrame]) -> bool {
                 objects
                     .iter()
                     .any(|obj| obj.code_point == codepoints::SQLDARD)
+            })
+    })
+}
+
+fn chained_select_frames_have_query_reply(frames: &[DssFrame]) -> bool {
+    frames.iter().any(|frame| {
+        ClientInner::parse_ddm_objects(&frame.payload)
+            .ok()
+            .is_some_and(|objects| {
+                objects.iter().any(|obj| {
+                    matches!(
+                        obj.code_point,
+                        codepoints::OPNQRYRM
+                            | codepoints::QRYDSC
+                            | codepoints::QRYDTA
+                            | codepoints::ENDQRYRM
+                            | codepoints::SYNTAXRM
+                            | codepoints::PRCCNVRM
+                            | codepoints::CMDNSPRM
+                            | codepoints::PRMNSPRM
+                            | codepoints::VALNSPRM
+                            | codepoints::DTAMCHRM
+                            | codepoints::QRYNOPRM
+                            | codepoints::SQLERRRM
+                    )
+                })
             })
     })
 }
