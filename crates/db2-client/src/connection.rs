@@ -891,6 +891,15 @@ impl ClientInner {
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
             && !has_zos_lobs
             && use_zos_non_lob_extra_blocks();
+        let zos_non_lob_nbrrow = if self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && !has_zos_lobs
+            && use_zos_non_lob_nbrrow()
+        {
+            parse_fetch_first_row_limit(sql).map(|limit| limit.min(32_767) as u32)
+        } else {
+            None
+        };
         let opnqry_data = {
             let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
             ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
@@ -898,6 +907,9 @@ impl ClientInner {
                 codepoints::QRYBLKSZ,
                 db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
             );
+            if let Some(rows) = zos_non_lob_nbrrow {
+                ddm.add_u32(codepoints::NBRROW, rows);
+            }
             if has_zos_lobs && use_native_zos_lob_strategy() {
                 ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
                 ddm.add_u16(codepoints::QRYPRCTYP, codepoints::QRYPRCTYP_LMTBLKPRC);
@@ -3005,6 +3017,15 @@ fn use_zos_non_lob_extra_blocks() -> bool {
 
 fn zos_non_lob_open_drain_timeout() -> Duration {
     Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_OPEN_DRAIN_MS", 2, 0, 25) as u64)
+}
+
+fn use_zos_non_lob_nbrrow() -> bool {
+    env::var("DB2_ZOS_NON_LOB_NBRROW")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
 }
 
 fn skip_zos_native_lob_initial_drain() -> bool {
