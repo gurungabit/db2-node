@@ -112,7 +112,9 @@ impl Transaction {
                 .as_ref()
                 .map_or(false, crate::connection::is_db2_zos_server);
             let sqlstt_data = crate::connection::build_sqlstt_for_server(sql, use_zos_sqlstt);
-            let use_zos_cursor_attributes = crate::connection::sql_is_query(sql) && use_zos_sqlstt;
+            let use_zos_cursor_attributes = crate::connection::sql_is_query(sql)
+                && use_zos_sqlstt
+                && crate::connection::use_zos_read_only_cursor_attributes();
 
             let mut writer = db2_proto::dss::DssWriter::new(corr_id);
             writer.write_request_next_same_corr(&prpsqlstt_data, true);

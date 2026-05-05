@@ -633,7 +633,8 @@ impl ClientInner {
 
         let is_query = sql_is_query(sql);
         let use_zos_sqlstt = self.server_info.as_ref().map_or(false, is_db2_zos_server);
-        let use_zos_cursor_attributes = is_query && use_zos_sqlstt && !params.is_empty();
+        let use_zos_cursor_attributes =
+            is_query && use_zos_sqlstt && use_zos_read_only_cursor_attributes();
         let pkgnamcsn = self.direct_query_pkgnamcsn();
         let mut input_descriptors = Vec::new();
 
@@ -688,6 +689,11 @@ impl ClientInner {
 
                 let mut writer = DssWriter::new(corr_id);
                 writer.write_request_next_same_corr(&prpsqlstt_data, true);
+                if use_zos_cursor_attributes {
+                    let sqlattr_data =
+                        db2_proto::commands::sqlattr::build_sqlattr_for_read_only_cursor();
+                    writer.write_object_same_corr(&sqlattr_data, true);
+                }
                 writer.write_object(&sqlstt_data, false);
 
                 let send_buf = writer.finish();
@@ -2378,7 +2384,8 @@ impl Client {
                 db2_proto::commands::prpsqlstt::build_prpsqlstt_with_sqlda(&pkgnamcsn);
             let use_zos_sqlstt = guard.server_info.as_ref().map_or(false, is_db2_zos_server);
             let sqlstt_data = build_sqlstt_for_server(sql, use_zos_sqlstt);
-            let use_zos_cursor_attributes = sql_is_query(sql) && use_zos_sqlstt;
+            let use_zos_cursor_attributes =
+                sql_is_query(sql) && use_zos_sqlstt && use_zos_read_only_cursor_attributes();
 
             let mut writer = DssWriter::new(corr_id);
             writer.write_request_next_same_corr(&prpsqlstt_data, true);
@@ -3005,6 +3012,15 @@ fn skip_zos_native_lob_initial_drain() -> bool {
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             value == "0" || value == "false" || value == "off" || value == "no"
+        })
+        .unwrap_or(true)
+}
+
+pub(crate) fn use_zos_read_only_cursor_attributes() -> bool {
+    env::var("DB2_ZOS_READ_ONLY_CURSOR_ATTR")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
         })
         .unwrap_or(true)
 }
