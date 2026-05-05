@@ -123,7 +123,7 @@ impl Cursor {
         } else {
             inner.config.query_timeout
         };
-        let mut frames = match timeout(read_timeout, inner.read_reply_frames()).await {
+        let frames = match timeout(read_timeout, inner.read_reply_frames()).await {
             Ok(result) => result?,
             Err(_) => {
                 return Err(Error::Timeout(format!(
@@ -136,29 +136,6 @@ impl Cursor {
                 )));
             }
         };
-        if has_lobs && crate::connection::use_native_zos_lob_strategy() {
-            loop {
-                match timeout(
-                    crate::connection::native_zos_lob_frame_drain_timeout(),
-                    inner.read_reply_frames(),
-                )
-                .await
-                {
-                    Ok(Ok(mut more_frames)) => {
-                        if more_frames.is_empty() {
-                            break;
-                        }
-                        self.last_fetch_diagnostics.push(format!(
-                            "native_lob_drain extra_frames={}",
-                            more_frames.len()
-                        ));
-                        frames.append(&mut more_frames);
-                    }
-                    Ok(Err(err)) => return Err(err),
-                    Err(_) => break,
-                }
-            }
-        }
         if debug_hex_enabled() && self.fetch_calls <= 5 {
             eprintln!("[db2-wire] CNTQRY received {} frame(s)", frames.len());
         }
@@ -166,6 +143,72 @@ impl Cursor {
         let mut extdta_payloads = Vec::new();
         let mut end_of_query = false;
 
+        self.process_fetch_frames(&frames, &mut rows, &mut extdta_payloads, &mut end_of_query)?;
+        apply_extdta_payloads_to_rows(&mut rows, &self.descriptors, &extdta_payloads);
+
+        if has_lobs && crate::connection::use_native_zos_lob_strategy() {
+            while native_fetch_needs_more_frames(
+                &rows,
+                &self.descriptors,
+                &self.pending_row_bytes,
+                end_of_query,
+            ) {
+                let more_frames = match timeout(
+                    crate::connection::native_zos_lob_frame_drain_timeout(),
+                    inner.read_reply_frames(),
+                )
+                .await
+                {
+                    Ok(Ok(frames)) => frames,
+                    Ok(Err(err)) => return Err(err),
+                    Err(_) => {
+                        self.last_fetch_diagnostics.push(format!(
+                            "native_lob_adaptive_drain timed_out rows={} extdta={} pending_tail={} unresolved={}",
+                            rows.len(),
+                            extdta_payloads.len(),
+                            self.pending_row_bytes.len(),
+                            rows_need_extdta_payloads(&rows, &self.descriptors)
+                        ));
+                        break;
+                    }
+                };
+                if more_frames.is_empty() {
+                    break;
+                }
+                self.last_fetch_diagnostics.push(format!(
+                    "native_lob_adaptive_drain extra_frames={}",
+                    more_frames.len()
+                ));
+                self.process_fetch_frames(
+                    &more_frames,
+                    &mut rows,
+                    &mut extdta_payloads,
+                    &mut end_of_query,
+                )?;
+                apply_extdta_payloads_to_rows(&mut rows, &self.descriptors, &extdta_payloads);
+            }
+        }
+
+        if debug_hex_enabled() && self.fetch_calls <= 5 {
+            eprintln!(
+                "[db2-wire] CNTQRY fetch#{} rows={} end={} pending_tail={}",
+                self.fetch_calls,
+                rows.len(),
+                end_of_query,
+                self.pending_row_bytes.len()
+            );
+        }
+
+        Ok((rows, end_of_query, extdta_payloads))
+    }
+
+    fn process_fetch_frames(
+        &mut self,
+        frames: &[db2_proto::dss::DssFrame],
+        rows: &mut Vec<Row>,
+        extdta_payloads: &mut Vec<Vec<u8>>,
+        end_of_query: &mut bool,
+    ) -> Result<(), Error> {
         for (frame_index, frame) in frames.iter().enumerate() {
             let objects = ClientInner::parse_ddm_objects(&frame.payload)?;
             if objects.is_empty() {
@@ -193,7 +236,7 @@ impl Cursor {
                         obj.data.len()
                     );
                 }
-                if end_of_query && obj.code_point == codepoints::QRYNOPRM {
+                if *end_of_query && obj.code_point == codepoints::QRYNOPRM {
                     trace!("Cursor: ignoring late QRYNOPRM after ENDQRYRM");
                     continue;
                 }
@@ -242,7 +285,7 @@ impl Cursor {
                     }
                     codepoints::ENDQRYRM => {
                         trace!("Cursor: end of query");
-                        end_of_query = true;
+                        *end_of_query = true;
                         self.closed = true;
                     }
                     codepoints::SQLCARD => {
@@ -270,20 +313,18 @@ impl Cursor {
             }
         }
 
-        apply_extdta_payloads_to_rows(&mut rows, &self.descriptors, &extdta_payloads);
-
-        if debug_hex_enabled() && self.fetch_calls <= 5 {
-            eprintln!(
-                "[db2-wire] CNTQRY fetch#{} rows={} end={} pending_tail={}",
-                self.fetch_calls,
-                rows.len(),
-                end_of_query,
-                self.pending_row_bytes.len()
-            );
-        }
-
-        Ok((rows, end_of_query, extdta_payloads))
+        Ok(())
     }
+}
+
+fn native_fetch_needs_more_frames(
+    rows: &[Row],
+    descriptors: &[db2_proto::fdoca::ColumnDescriptor],
+    pending_row_bytes: &[u8],
+    end_of_query: bool,
+) -> bool {
+    rows_need_extdta_payloads(rows, descriptors)
+        || (!end_of_query && (rows.is_empty() || !pending_row_bytes.is_empty()))
 }
 
 fn apply_extdta_payloads_to_rows(
@@ -330,6 +371,22 @@ fn apply_extdta_payloads_to_rows(
             }
         }
     }
+}
+
+fn rows_need_extdta_payloads(
+    rows: &[Row],
+    descriptors: &[db2_proto::fdoca::ColumnDescriptor],
+) -> bool {
+    rows.iter().any(|row| {
+        row.values()
+            .iter()
+            .enumerate()
+            .any(|(column_index, value)| {
+                descriptors.get(column_index).is_some_and(|descriptor| {
+                    descriptor_uses_extdta(descriptor) && value_needs_extdta(value)
+                })
+            })
+    })
 }
 
 fn descriptors_need_lob_fetch(descriptors: &[db2_proto::fdoca::ColumnDescriptor]) -> bool {
