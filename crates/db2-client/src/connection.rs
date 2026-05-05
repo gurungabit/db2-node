@@ -1988,6 +1988,14 @@ impl ClientInner {
         )
         .is_some_and(|descriptors| descriptors_need_lob_materialization(column_info, descriptors));
 
+        if self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && has_lobs
+            && use_native_zos_lob_strategy()
+            && skip_zos_native_lob_initial_drain()
+        {
+            return false;
+        }
+
         if self.server_info.as_ref().map_or(false, is_db2_zos_server) && !has_lobs {
             return false;
         }
@@ -2990,6 +2998,15 @@ fn use_zos_non_lob_extra_blocks() -> bool {
 
 fn zos_non_lob_open_drain_timeout() -> Duration {
     Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_OPEN_DRAIN_MS", 2, 0, 25) as u64)
+}
+
+fn skip_zos_native_lob_initial_drain() -> bool {
+    env::var("DB2_ZOS_NATIVE_LOB_INITIAL_DRAIN")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            value == "0" || value == "false" || value == "off" || value == "no"
+        })
+        .unwrap_or(true)
 }
 
 fn zos_lob_frame_drain_timeout() -> Duration {
