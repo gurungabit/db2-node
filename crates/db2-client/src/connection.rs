@@ -1064,20 +1064,22 @@ impl ClientInner {
             .collect::<Vec<_>>();
 
         let mut diagnostics = base_result.diagnostics;
-        diagnostics.push(format!(
-            "zos_lob_chunked source={} strategy=base-plus-combined-chunk-grid rows={} lob_columns={} chunk_queries={} clob_chunk_limit={} dbclob_chunk_limit={} batch_reply_target={} chunk_window_target={}",
-            source,
-            output_rows.len(),
-            catalog_columns
-                .iter()
-                .filter(|column| column.is_lob())
-                .count(),
-            chunk_query_count,
-            ZOS_CLOB_CHUNK_LIMIT,
-            ZOS_DBCLOB_CHUNK_LIMIT,
-            zos_lob_batch_reply_target(),
-            zos_lob_chunk_window_target()
-        ));
+        if query_diagnostics_enabled() {
+            diagnostics.push(format!(
+                "zos_lob_chunked source={} strategy=base-plus-combined-chunk-grid rows={} lob_columns={} chunk_queries={} clob_chunk_limit={} dbclob_chunk_limit={} batch_reply_target={} chunk_window_target={}",
+                source,
+                output_rows.len(),
+                catalog_columns
+                    .iter()
+                    .filter(|column| column.is_lob())
+                    .count(),
+                chunk_query_count,
+                ZOS_CLOB_CHUNK_LIMIT,
+                ZOS_DBCLOB_CHUNK_LIMIT,
+                zos_lob_batch_reply_target(),
+                zos_lob_chunk_window_target()
+            ));
+        }
 
         Ok(Some(QueryResult::with_rows_and_diagnostics(
             output_rows,
@@ -1141,21 +1143,23 @@ impl ClientInner {
             .collect::<Vec<_>>();
 
         let mut diagnostics = initial_result.diagnostics;
-        diagnostics.push(format!(
-            "zos_lob_chunked source={} strategy=bounded-single-pass-combined-grid rows={} lob_columns={} chunk_queries={} initial_specs={} clob_chunk_limit={} dbclob_chunk_limit={} batch_reply_target={} chunk_window_target={}",
-            source,
-            output_rows.len(),
-            catalog_columns
-                .iter()
-                .filter(|column| column.is_lob())
-                .count(),
-            chunk_query_count,
-            initial_specs.len(),
-            ZOS_CLOB_CHUNK_LIMIT,
-            ZOS_DBCLOB_CHUNK_LIMIT,
-            zos_lob_batch_reply_target(),
-            zos_lob_chunk_window_target()
-        ));
+        if query_diagnostics_enabled() {
+            diagnostics.push(format!(
+                "zos_lob_chunked source={} strategy=bounded-single-pass-combined-grid rows={} lob_columns={} chunk_queries={} initial_specs={} clob_chunk_limit={} dbclob_chunk_limit={} batch_reply_target={} chunk_window_target={}",
+                source,
+                output_rows.len(),
+                catalog_columns
+                    .iter()
+                    .filter(|column| column.is_lob())
+                    .count(),
+                chunk_query_count,
+                initial_specs.len(),
+                ZOS_CLOB_CHUNK_LIMIT,
+                ZOS_DBCLOB_CHUNK_LIMIT,
+                zos_lob_batch_reply_target(),
+                zos_lob_chunk_window_target()
+            ));
+        }
 
         Ok(Some(QueryResult::with_rows_and_diagnostics(
             output_rows,
@@ -1275,10 +1279,12 @@ impl ClientInner {
                 .await
             {
                 Ok(Some(mut retry_result)) => {
-                    retry_result.diagnostics.push(format!(
-                        "zos_lob_retry source={} reason={}",
-                        source, original_error
-                    ));
+                    if query_diagnostics_enabled() {
+                        retry_result.diagnostics.push(format!(
+                            "zos_lob_retry source={} reason={}",
+                            source, original_error
+                        ));
+                    }
                     return Ok(retry_result);
                 }
                 Ok(None) => {}
@@ -1302,10 +1308,12 @@ impl ClientInner {
                 .await
             {
                 Ok(Some(mut retry_result)) => {
-                    retry_result.diagnostics.push(format!(
-                        "zos_lob_retry source=catalog-after-{} reason={}",
-                        source, original_error
-                    ));
+                    if query_diagnostics_enabled() {
+                        retry_result.diagnostics.push(format!(
+                            "zos_lob_retry source=catalog-after-{} reason={}",
+                            source, original_error
+                        ));
+                    }
                     return Ok(retry_result);
                 }
                 Ok(None) => {
@@ -1593,17 +1601,24 @@ impl ClientInner {
         let mut pending_row_bytes = Vec::new();
         let mut extdta_payloads = Vec::new();
         let mut end_of_query = false;
-        let mut diagnostics = frame_diagnostics(frames);
+        let collect_diagnostics = query_diagnostics_enabled();
+        let mut diagnostics = if collect_diagnostics {
+            frame_diagnostics(frames)
+        } else {
+            Vec::new()
+        };
         let prefer_sqldard_descriptors =
             self.zos_lob_internal_depth > 0 || sqldard_descriptors.is_some();
-        if let Some(descriptors) = sqldard_descriptors.as_ref() {
-            diagnostics.push(format!(
-                "initial_descriptors count={} {}",
-                descriptors.len(),
-                descriptor_summary(descriptors)
-            ));
+        if collect_diagnostics {
+            if let Some(descriptors) = sqldard_descriptors.as_ref() {
+                diagnostics.push(format!(
+                    "initial_descriptors count={} {}",
+                    descriptors.len(),
+                    descriptor_summary(descriptors)
+                ));
+            }
         }
-        if prefer_sqldard_descriptors {
+        if collect_diagnostics && prefer_sqldard_descriptors {
             diagnostics.push("descriptor_preference=SQLDARD".into());
         }
 
@@ -1618,6 +1633,7 @@ impl ClientInner {
             &mut pending_row_bytes,
             &mut extdta_payloads,
             &mut end_of_query,
+            collect_diagnostics,
             &mut diagnostics,
         )?;
 
@@ -1656,7 +1672,9 @@ impl ClientInner {
             if more_frames.is_empty() {
                 break;
             }
-            diagnostics.extend(frame_diagnostics(&more_frames));
+            if collect_diagnostics {
+                diagnostics.extend(frame_diagnostics(&more_frames));
+            }
 
             if debug_hex_enabled() {
                 eprintln!(
@@ -1676,6 +1694,7 @@ impl ClientInner {
                 &mut pending_row_bytes,
                 &mut extdta_payloads,
                 &mut end_of_query,
+                collect_diagnostics,
                 &mut diagnostics,
             )?;
         }
@@ -1697,7 +1716,9 @@ impl ClientInner {
                 self.send_bytes(&send_buf).await?;
 
                 let more_frames = self.read_reply_frames().await?;
-                diagnostics.extend(frame_diagnostics(&more_frames));
+                if collect_diagnostics {
+                    diagnostics.extend(frame_diagnostics(&more_frames));
+                }
                 process_query_frames(
                     &more_frames,
                     column_info,
@@ -1709,6 +1730,7 @@ impl ClientInner {
                     &mut pending_row_bytes,
                     &mut extdta_payloads,
                     &mut end_of_query,
+                    collect_diagnostics,
                     &mut diagnostics,
                 )?;
 
@@ -1826,36 +1848,38 @@ impl ClientInner {
             Vec::new()
         };
 
-        diagnostics.push(format!(
-            "decode_final rows={} columns={} pending_tail={} qrydsc_desc={} sqldard_desc={} active_desc={}",
-            rows.len(),
-            columns.len(),
-            pending_row_bytes.len(),
-            qrydsc_descriptors.as_ref().map(|v| v.len()).unwrap_or(0),
-            sqldard_descriptors.as_ref().map(|v| v.len()).unwrap_or(0),
-            active_descriptors.map(|v| v.len()).unwrap_or(0)
-        ));
-        if let Some(descriptors) = active_descriptors {
+        if collect_diagnostics {
             diagnostics.push(format!(
-                "decode_final descriptors {}",
-                descriptor_summary(descriptors)
+                "decode_final rows={} columns={} pending_tail={} qrydsc_desc={} sqldard_desc={} active_desc={}",
+                rows.len(),
+                columns.len(),
+                pending_row_bytes.len(),
+                qrydsc_descriptors.as_ref().map(|v| v.len()).unwrap_or(0),
+                sqldard_descriptors.as_ref().map(|v| v.len()).unwrap_or(0),
+                active_descriptors.map(|v| v.len()).unwrap_or(0)
             ));
-            if !pending_row_bytes.is_empty() {
+            if let Some(descriptors) = active_descriptors {
                 diagnostics.push(format!(
-                    "decode_final pending_tail_preview={}",
+                    "decode_final descriptors {}",
+                    descriptor_summary(descriptors)
+                ));
+                if !pending_row_bytes.is_empty() {
+                    diagnostics.push(format!(
+                        "decode_final pending_tail_preview={}",
+                        format_hex_preview(&pending_row_bytes, 160)
+                    ));
+                    diagnostics.push(format!(
+                        "decode_final progress={}",
+                        db2_proto::fdoca::describe_decode_progress(&pending_row_bytes, descriptors)
+                    ));
+                }
+            } else if !pending_row_bytes.is_empty() {
+                diagnostics.push(format!(
+                    "decode_final pending_without_descriptors len={} preview={}",
+                    pending_row_bytes.len(),
                     format_hex_preview(&pending_row_bytes, 160)
                 ));
-                diagnostics.push(format!(
-                    "decode_final progress={}",
-                    db2_proto::fdoca::describe_decode_progress(&pending_row_bytes, descriptors)
-                ));
             }
-        } else if !pending_row_bytes.is_empty() {
-            diagnostics.push(format!(
-                "decode_final pending_without_descriptors len={} preview={}",
-                pending_row_bytes.len(),
-                format_hex_preview(&pending_row_bytes, 160)
-            ));
         }
 
         if debug_hex_enabled() {
@@ -2000,7 +2024,11 @@ impl ClientInner {
             rows: Vec::new(),
             row_count,
             columns,
-            diagnostics: frame_diagnostics(frames),
+            diagnostics: if query_diagnostics_enabled() {
+                frame_diagnostics(frames)
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -3931,6 +3959,16 @@ fn use_zos_select_cache() -> bool {
         .unwrap_or(true)
 }
 
+pub(crate) fn query_diagnostics_enabled() -> bool {
+    debug_hex_enabled()
+        || env::var("DB2_QUERY_DIAGNOSTICS")
+            .map(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                !(value == "0" || value == "false" || value == "off" || value == "no")
+            })
+            .unwrap_or(false)
+}
+
 fn should_reprepare_cached_zos_select(err: &Error) -> bool {
     matches!(
         err,
@@ -4773,6 +4811,7 @@ fn process_query_frames(
     pending_row_bytes: &mut Vec<u8>,
     extdta_payloads: &mut Vec<Vec<u8>>,
     end_of_query: &mut bool,
+    collect_diagnostics: bool,
     diagnostics: &mut Vec<String>,
 ) -> Result<(), Error> {
     for frame in frames {
@@ -4825,11 +4864,13 @@ fn process_query_frames(
                                     descriptors.len()
                                 );
                             }
-                            diagnostics.push(format!(
-                                "qrydsc_descriptors count={} {}",
-                                descriptors.len(),
-                                descriptor_summary(&descriptors)
-                            ));
+                            if collect_diagnostics {
+                                diagnostics.push(format!(
+                                    "qrydsc_descriptors count={} {}",
+                                    descriptors.len(),
+                                    descriptor_summary(&descriptors)
+                                ));
+                            }
                             *qrydsc_descriptors = Some(descriptors);
                             decode_pending_query_data(
                                 column_info,
@@ -4838,6 +4879,7 @@ fn process_query_frames(
                                 qrydsc_descriptors,
                                 prefer_sqldard_descriptors,
                                 pending_row_bytes,
+                                collect_diagnostics,
                                 diagnostics,
                             )?;
                         } else if debug_hex_enabled() {
@@ -4888,30 +4930,35 @@ fn process_query_frames(
                             let col_names = row_column_names(column_info, values.len());
                             rows.push(Row::new(col_names, values));
                         }
-                        diagnostics.push(format!(
-                            "qrydta_decode data_len={} pending_before={} rows_decoded={} rows_total={} pending_after={} descriptors={} preview={}",
-                            obj.data.len(),
-                            pending_before,
-                            decoded_count,
-                            rows.len(),
-                            pending_row_bytes.len(),
-                            descs.len(),
-                            format_hex_preview(&obj.data, 128)
-                        ));
-                        if decoded_count == 0 || rows.len() == rows_before {
-                            let progress_bytes = if pending_row_bytes.is_empty() {
-                                obj.data.as_slice()
-                            } else {
-                                pending_row_bytes.as_slice()
-                            };
+                        if collect_diagnostics {
                             diagnostics.push(format!(
-                                "qrydta_decode progress={}",
-                                db2_proto::fdoca::describe_decode_progress(progress_bytes, descs)
+                                "qrydta_decode data_len={} pending_before={} rows_decoded={} rows_total={} pending_after={} descriptors={} preview={}",
+                                obj.data.len(),
+                                pending_before,
+                                decoded_count,
+                                rows.len(),
+                                pending_row_bytes.len(),
+                                descs.len(),
+                                format_hex_preview(&obj.data, 128)
                             ));
-                            diagnostics.push(format!(
-                                "qrydta_decode descriptors {}",
-                                descriptor_summary(descs)
-                            ));
+                            if decoded_count == 0 || rows.len() == rows_before {
+                                let progress_bytes = if pending_row_bytes.is_empty() {
+                                    obj.data.as_slice()
+                                } else {
+                                    pending_row_bytes.as_slice()
+                                };
+                                diagnostics.push(format!(
+                                    "qrydta_decode progress={}",
+                                    db2_proto::fdoca::describe_decode_progress(
+                                        progress_bytes,
+                                        descs
+                                    )
+                                ));
+                                diagnostics.push(format!(
+                                    "qrydta_decode descriptors {}",
+                                    descriptor_summary(descs)
+                                ));
+                            }
                         }
                     } else {
                         if debug_hex_enabled() {
@@ -4920,21 +4967,25 @@ fn process_query_frames(
                                 obj.data.len()
                             );
                         }
-                        diagnostics.push(format!(
-                            "qrydta_buffered_without_descriptors len={} preview={}",
-                            obj.data.len(),
-                            format_hex_preview(&obj.data, 128)
-                        ));
+                        if collect_diagnostics {
+                            diagnostics.push(format!(
+                                "qrydta_buffered_without_descriptors len={} preview={}",
+                                obj.data.len(),
+                                format_hex_preview(&obj.data, 128)
+                            ));
+                        }
                         pending_row_bytes.extend_from_slice(&obj.data);
                     }
                 }
                 codepoints::EXTDTA => {
                     trace!("Received EXTDTA");
-                    diagnostics.push(format!(
-                        "extdta len={} preview={}",
-                        obj.data.len(),
-                        format_hex_preview(&obj.data, 128)
-                    ));
+                    if collect_diagnostics {
+                        diagnostics.push(format!(
+                            "extdta len={} preview={}",
+                            obj.data.len(),
+                            format_hex_preview(&obj.data, 128)
+                        ));
+                    }
                     extdta_payloads.push(obj.data);
                 }
                 codepoints::ENDQRYRM => {
@@ -4957,11 +5008,13 @@ fn process_query_frames(
                                 descriptors.len()
                             );
                         }
-                        diagnostics.push(format!(
-                            "sqldard_descriptors count={} {}",
-                            descriptors.len(),
-                            descriptor_summary(&descriptors)
-                        ));
+                        if collect_diagnostics {
+                            diagnostics.push(format!(
+                                "sqldard_descriptors count={} {}",
+                                descriptors.len(),
+                                descriptor_summary(&descriptors)
+                            ));
+                        }
                         *sqldard_descriptors = Some(descriptors);
                         decode_pending_query_data(
                             column_info,
@@ -4970,6 +5023,7 @@ fn process_query_frames(
                             qrydsc_descriptors,
                             prefer_sqldard_descriptors,
                             pending_row_bytes,
+                            collect_diagnostics,
                             diagnostics,
                         )?;
                     } else if debug_hex_enabled() {
@@ -5009,6 +5063,7 @@ fn decode_pending_query_data(
     qrydsc_descriptors: &Option<Vec<db2_proto::fdoca::ColumnDescriptor>>,
     prefer_sqldard_descriptors: bool,
     pending_row_bytes: &mut Vec<u8>,
+    collect_diagnostics: bool,
     diagnostics: &mut Vec<String>,
 ) -> Result<(), Error> {
     if pending_row_bytes.is_empty() {
@@ -5036,23 +5091,25 @@ fn decode_pending_query_data(
         rows.push(Row::new(col_names, values));
     }
     *pending_row_bytes = buffered;
-    diagnostics.push(format!(
-        "pending_qrydta_decode pending_before={} rows_decoded={} rows_total={} pending_after={} descriptors={}",
-        pending_before,
-        decoded_count,
-        rows.len(),
-        pending_row_bytes.len(),
-        descs.len()
-    ));
-    if decoded_count == 0 && !pending_row_bytes.is_empty() {
+    if collect_diagnostics {
         diagnostics.push(format!(
-            "pending_qrydta_decode progress={}",
-            db2_proto::fdoca::describe_decode_progress(pending_row_bytes, descs)
+            "pending_qrydta_decode pending_before={} rows_decoded={} rows_total={} pending_after={} descriptors={}",
+            pending_before,
+            decoded_count,
+            rows.len(),
+            pending_row_bytes.len(),
+            descs.len()
         ));
-        diagnostics.push(format!(
-            "pending_qrydta_decode descriptors {}",
-            descriptor_summary(descs)
-        ));
+        if decoded_count == 0 && !pending_row_bytes.is_empty() {
+            diagnostics.push(format!(
+                "pending_qrydta_decode progress={}",
+                db2_proto::fdoca::describe_decode_progress(pending_row_bytes, descs)
+            ));
+            diagnostics.push(format!(
+                "pending_qrydta_decode descriptors {}",
+                descriptor_summary(descs)
+            ));
+        }
     }
 
     Ok(())

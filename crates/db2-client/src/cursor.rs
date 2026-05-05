@@ -59,13 +59,16 @@ impl Cursor {
         let pkgnamcsn = inner.build_pkgnamcsn_for(inner.package_id, inner.section_number);
         let has_lobs = descriptors_need_lob_fetch(&self.descriptors)
             || column_info_needs_lob_fetch(&self.column_info);
+        let collect_diagnostics = crate::connection::query_diagnostics_enabled();
 
         self.last_fetch_diagnostics.clear();
         let cntqry_data = if has_lobs && crate::connection::use_native_zos_lob_strategy() {
-            self.last_fetch_diagnostics.push(
-                "cntqry_request has_lobs=true native_limited_block=true rdbnam=false maxblkext=-1 qryrowset=none rtnextdta=RTNEXTALL"
-                    .to_string(),
-            );
+            if collect_diagnostics {
+                self.last_fetch_diagnostics.push(
+                    "cntqry_request has_lobs=true native_limited_block=true rdbnam=false maxblkext=-1 qryrowset=none rtnextdta=RTNEXTALL"
+                        .to_string(),
+                );
+            }
             db2_proto::commands::cntqry::build_cntqry_with_rtnextdta(
                 &pkgnamcsn,
                 self.query_instance_id.as_deref(),
@@ -80,11 +83,13 @@ impl Cursor {
                     .server_info
                     .as_ref()
                     .map_or(false, crate::connection::is_db2_zos_server);
-            self.last_fetch_diagnostics.push(format!(
-                "cntqry_request has_lobs={} native_lobs=false rdbnam=false maxblkext={} qryrowset=none rtnextdta=none",
-                has_lobs,
-                if use_extended_materialized_blocks { "-1" } else { "none" }
-            ));
+            if collect_diagnostics {
+                self.last_fetch_diagnostics.push(format!(
+                    "cntqry_request has_lobs={} native_lobs=false rdbnam=false maxblkext={} qryrowset=none rtnextdta=none",
+                    has_lobs,
+                    if use_extended_materialized_blocks { "-1" } else { "none" }
+                ));
+            }
             db2_proto::commands::cntqry::build_cntqry(
                 &pkgnamcsn,
                 self.query_instance_id.as_deref(),
@@ -98,7 +103,7 @@ impl Cursor {
         let mut writer = DssWriter::new(corr_id);
         writer.write_request(&cntqry_data, false);
         let send_buf = writer.finish();
-        if has_lobs {
+        if collect_diagnostics && has_lobs {
             self.last_fetch_diagnostics.push(format!(
                 "cntqry_send bytes={} preview={}",
                 send_buf.len(),
@@ -143,7 +148,13 @@ impl Cursor {
         let mut extdta_payloads = Vec::new();
         let mut end_of_query = false;
 
-        self.process_fetch_frames(&frames, &mut rows, &mut extdta_payloads, &mut end_of_query)?;
+        self.process_fetch_frames(
+            &frames,
+            &mut rows,
+            &mut extdta_payloads,
+            &mut end_of_query,
+            collect_diagnostics,
+        )?;
         apply_extdta_payloads_to_rows(&mut rows, &self.descriptors, &extdta_payloads);
 
         if has_lobs && crate::connection::use_native_zos_lob_strategy() {
@@ -162,28 +173,33 @@ impl Cursor {
                     Ok(Ok(frames)) => frames,
                     Ok(Err(err)) => return Err(err),
                     Err(_) => {
-                        self.last_fetch_diagnostics.push(format!(
-                            "native_lob_adaptive_drain timed_out rows={} extdta={} pending_tail={} unresolved={}",
-                            rows.len(),
-                            extdta_payloads.len(),
-                            self.pending_row_bytes.len(),
-                            rows_need_extdta_payloads(&rows, &self.descriptors)
-                        ));
+                        if collect_diagnostics {
+                            self.last_fetch_diagnostics.push(format!(
+                                "native_lob_adaptive_drain timed_out rows={} extdta={} pending_tail={} unresolved={}",
+                                rows.len(),
+                                extdta_payloads.len(),
+                                self.pending_row_bytes.len(),
+                                rows_need_extdta_payloads(&rows, &self.descriptors)
+                            ));
+                        }
                         break;
                     }
                 };
                 if more_frames.is_empty() {
                     break;
                 }
-                self.last_fetch_diagnostics.push(format!(
-                    "native_lob_adaptive_drain extra_frames={}",
-                    more_frames.len()
-                ));
+                if collect_diagnostics {
+                    self.last_fetch_diagnostics.push(format!(
+                        "native_lob_adaptive_drain extra_frames={}",
+                        more_frames.len()
+                    ));
+                }
                 self.process_fetch_frames(
                     &more_frames,
                     &mut rows,
                     &mut extdta_payloads,
                     &mut end_of_query,
+                    collect_diagnostics,
                 )?;
                 apply_extdta_payloads_to_rows(&mut rows, &self.descriptors, &extdta_payloads);
             }
@@ -208,27 +224,32 @@ impl Cursor {
         rows: &mut Vec<Row>,
         extdta_payloads: &mut Vec<Vec<u8>>,
         end_of_query: &mut bool,
+        collect_diagnostics: bool,
     ) -> Result<(), Error> {
         for (frame_index, frame) in frames.iter().enumerate() {
             let objects = ClientInner::parse_ddm_objects(&frame.payload)?;
             if objects.is_empty() {
-                self.last_fetch_diagnostics.push(format!(
-                    "frame#{} corr={} objects=0 payload_len={}",
-                    frame_index,
-                    frame.header.correlation_id,
-                    frame.payload.len()
-                ));
+                if collect_diagnostics {
+                    self.last_fetch_diagnostics.push(format!(
+                        "frame#{} corr={} objects=0 payload_len={}",
+                        frame_index,
+                        frame.header.correlation_id,
+                        frame.payload.len()
+                    ));
+                }
                 continue;
             }
             for obj in objects {
-                self.last_fetch_diagnostics.push(format!(
-                    "frame#{} corr={} cp=0x{:04X} len={} preview={}",
-                    frame_index,
-                    frame.header.correlation_id,
-                    obj.code_point,
-                    obj.data.len(),
-                    format_hex_preview(&obj.data, 96)
-                ));
+                if collect_diagnostics {
+                    self.last_fetch_diagnostics.push(format!(
+                        "frame#{} corr={} cp=0x{:04X} len={} preview={}",
+                        frame_index,
+                        frame.header.correlation_id,
+                        obj.code_point,
+                        obj.data.len(),
+                        format_hex_preview(&obj.data, 96)
+                    ));
+                }
                 if debug_hex_enabled() && self.fetch_calls <= 5 {
                     eprintln!(
                         "[db2-wire] CNTQRY object cp=0x{:04X} len={}",
@@ -241,11 +262,14 @@ impl Cursor {
                     continue;
                 }
                 if let Some(err) = crate::connection::protocol_reply_error(&obj, "fetch") {
-                    return Err(Error::Protocol(format!(
-                        "{}; last_fetch=[{}]",
-                        err,
-                        self.last_fetch_diagnostics.join("; ")
-                    )));
+                    if collect_diagnostics {
+                        return Err(Error::Protocol(format!(
+                            "{}; last_fetch=[{}]",
+                            err,
+                            self.last_fetch_diagnostics.join("; ")
+                        )));
+                    }
+                    return Err(err);
                 }
                 match obj.code_point {
                     codepoints::QRYDTA => {
