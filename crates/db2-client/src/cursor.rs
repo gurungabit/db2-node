@@ -17,6 +17,7 @@ use db2_proto::dss::DssWriter;
 /// detects ENDQRYRM to know when the result set is exhausted.
 pub(crate) struct Cursor {
     column_info: Vec<ColumnInfo>,
+    column_names: Arc<[String]>,
     pub(crate) descriptors: Vec<db2_proto::fdoca::ColumnDescriptor>,
     query_instance_id: Option<Vec<u8>>,
     pkgnamcsn: Vec<u8>,
@@ -36,8 +37,15 @@ impl Cursor {
         pkgnamcsn: Vec<u8>,
         fetch_size: u32,
     ) -> Self {
+        let column_names = column_info
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<Vec<_>>()
+            .into();
+
         Cursor {
             column_info,
+            column_names,
             descriptors,
             query_instance_id,
             pkgnamcsn,
@@ -355,14 +363,8 @@ impl Cursor {
                         )
                         .map_err(|e| Error::Protocol(e.to_string()))?;
                         if !decoded_rows.is_empty() {
-                            let col_names: Arc<[String]> = self
-                                .column_info
-                                .iter()
-                                .map(|c| c.name.clone())
-                                .collect::<Vec<_>>()
-                                .into();
                             for values in decoded_rows {
-                                rows.push(Row::new_shared(col_names.clone(), values));
+                                rows.push(Row::new_shared(self.column_names.clone(), values));
                             }
                         }
                     }
