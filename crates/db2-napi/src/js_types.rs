@@ -1,4 +1,7 @@
 use crate::js_connection::{JsColumnInfo, JsQueryResult};
+use napi::bindgen_prelude::{
+    Env, FromNapiValue, Null, ToNapiValue, TypeName, ValidateNapiValue, ValueType,
+};
 
 /// Convert a db2_client::Config from our JS-facing connection config.
 #[allow(clippy::too_many_arguments)]
@@ -227,14 +230,10 @@ pub fn query_result_to_js(result: db2_client::types::QueryResult) -> JsQueryResu
         })
         .collect();
 
-    let col_names: Vec<String> = result_columns.iter().map(|c| c.name.clone()).collect();
-    let rows: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|row| row_to_json_owned(row, &col_names))
-        .collect();
+    let col_names: Vec<String> = result_columns.into_iter().map(|c| c.name).collect();
 
     JsQueryResult {
-        rows,
+        rows: JsRows { rows, col_names },
         row_count,
         columns,
         diagnostics,
@@ -287,39 +286,76 @@ fn parse_enum_length(type_name: &str, variant: &str) -> Option<u16> {
     inner.parse::<u16>().ok()
 }
 
-fn row_to_json_owned(row: db2_client::Row, col_names: &[String]) -> serde_json::Value {
-    let mut map = serde_json::Map::with_capacity(col_names.len());
-    let mut values = row.into_values().into_iter();
-    for name in col_names {
-        let value = values
-            .next()
-            .map(db2_value_to_json_owned)
-            .unwrap_or(serde_json::Value::Null);
-        map.insert(name.clone(), value);
-    }
-    serde_json::Value::Object(map)
+pub struct JsRows {
+    rows: Vec<db2_client::Row>,
+    col_names: Vec<String>,
 }
 
-fn db2_value_to_json_owned(value: db2_proto::types::Db2Value) -> serde_json::Value {
+impl TypeName for JsRows {
+    fn type_name() -> &'static str {
+        "Array<any>"
+    }
+
+    fn value_type() -> ValueType {
+        ValueType::Object
+    }
+}
+
+impl ValidateNapiValue for JsRows {}
+
+impl FromNapiValue for JsRows {
+    unsafe fn from_napi_value(
+        _env: napi::bindgen_prelude::sys::napi_env,
+        _napi_val: napi::bindgen_prelude::sys::napi_value,
+    ) -> napi::Result<Self> {
+        Err(napi::Error::from_reason(
+            "JsRows is an output-only result type",
+        ))
+    }
+}
+
+impl ToNapiValue for JsRows {
+    unsafe fn to_napi_value(
+        env: napi::bindgen_prelude::sys::napi_env,
+        val: Self,
+    ) -> napi::Result<napi::bindgen_prelude::sys::napi_value> {
+        let env_wrapper = Env::from(env);
+        let mut js_rows = env_wrapper.create_array_with_length(val.rows.len())?;
+
+        for (row_index, row) in val.rows.into_iter().enumerate() {
+            let mut js_row = env_wrapper.create_object()?;
+            let mut values = row.into_values().into_iter();
+            for name in &val.col_names {
+                match values.next() {
+                    Some(value) => set_db2_value_property(&mut js_row, name, value)?,
+                    None => js_row.set_named_property(name, Null)?,
+                }
+            }
+            js_rows.set_element(row_index as u32, js_row)?;
+        }
+
+        napi::bindgen_prelude::Object::to_napi_value(env, js_rows)
+    }
+}
+
+fn set_db2_value_property(
+    object: &mut napi::bindgen_prelude::Object,
+    name: &str,
+    value: db2_proto::types::Db2Value,
+) -> napi::Result<()> {
     use db2_proto::types::Db2Value;
 
     match value {
-        Db2Value::Null => serde_json::Value::Null,
-        Db2Value::SmallInt(v) => serde_json::Value::Number((v as i64).into()),
-        Db2Value::Integer(v) => serde_json::Value::Number((v as i64).into()),
-        Db2Value::BigInt(v) => serde_json::Value::Number(v.into()),
-        Db2Value::Real(v) => serde_json::Number::from_f64(v as f64)
-            .map(serde_json::Value::Number)
-            .unwrap_or_else(|| serde_json::Value::Number(0.into())),
-        Db2Value::Double(v) => serde_json::Number::from_f64(v)
-            .map(serde_json::Value::Number)
-            .unwrap_or_else(|| serde_json::Value::Number(0.into())),
-        Db2Value::Boolean(v) => serde_json::Value::Bool(v),
-        Db2Value::Binary(v) | Db2Value::Blob(v) => serde_json::Value::Array(
-            v.into_iter()
-                .map(|b| serde_json::Value::Number(b.into()))
-                .collect(),
-        ),
+        Db2Value::Null => object.set_named_property(name, Null),
+        Db2Value::SmallInt(v) => object.set_named_property(name, v as i64),
+        Db2Value::Integer(v) => object.set_named_property(name, v as i64),
+        Db2Value::BigInt(v) => object.set_named_property(name, v),
+        Db2Value::Real(v) => {
+            object.set_named_property(name, if v.is_finite() { v as f64 } else { 0.0 })
+        }
+        Db2Value::Double(v) => object.set_named_property(name, if v.is_finite() { v } else { 0.0 }),
+        Db2Value::Boolean(v) => object.set_named_property(name, v),
+        Db2Value::Binary(v) | Db2Value::Blob(v) => object.set_named_property(name, v),
         Db2Value::Decimal(v)
         | Db2Value::Char(v)
         | Db2Value::VarChar(v)
@@ -328,7 +364,7 @@ fn db2_value_to_json_owned(value: db2_proto::types::Db2Value) -> serde_json::Val
         | Db2Value::Date(v)
         | Db2Value::Time(v)
         | Db2Value::Timestamp(v)
-        | Db2Value::Xml(v) => serde_json::Value::String(v),
+        | Db2Value::Xml(v) => object.set_named_property(name, v),
     }
 }
 

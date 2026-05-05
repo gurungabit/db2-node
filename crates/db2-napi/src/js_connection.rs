@@ -29,9 +29,9 @@ pub struct JsConnectionConfig {
 }
 
 #[napi(object)]
-#[derive(Clone)]
 pub struct JsQueryResult {
-    pub rows: Vec<serde_json::Value>,
+    #[napi(ts_type = "Array<any>")]
+    pub rows: crate::js_types::JsRows,
     pub row_count: i64,
     pub columns: Vec<JsColumnInfo>,
     pub diagnostics: Vec<String>,
