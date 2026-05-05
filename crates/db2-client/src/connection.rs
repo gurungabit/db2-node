@@ -856,10 +856,6 @@ impl ClientInner {
         let has_zos_lobs = result_metadata_needs_zos_lob_route(column_info, result_descriptors);
         let use_extended_materialized_blocks = self.zos_lob_internal_depth > 0
             && self.server_info.as_ref().map_or(false, is_db2_zos_server);
-        let use_zos_non_lob_limited_block = self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
-            && !has_zos_lobs
-            && use_zos_non_lob_limited_block_open();
         let opnqry_data = {
             let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
             ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
@@ -870,13 +866,6 @@ impl ClientInner {
             if has_zos_lobs && use_native_zos_lob_strategy() {
                 ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
                 ddm.add_u16(codepoints::QRYPRCTYP, codepoints::QRYPRCTYP_LMTBLKPRC);
-            } else if use_zos_non_lob_limited_block {
-                ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
-                // OPNQRY selects limited-block protocol with QRYBLKCTL, not QRYPRCTYP.
-                ddm.add_u16(codepoints::QRYBLKCTL, codepoints::LMTBLKPRC);
-                if let Some(row_limit) = parse_fetch_first_row_limit(sql) {
-                    ddm.add_u32(codepoints::QRYROWSET, row_limit.min(32_767) as u32);
-                }
             } else if use_extended_materialized_blocks {
                 ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
             }
@@ -3965,15 +3954,6 @@ pub(crate) fn use_native_zos_lob_strategy() -> bool {
 
 fn use_zos_select_cache() -> bool {
     env::var("DB2_ZOS_SELECT_CACHE")
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            !(value == "0" || value == "false" || value == "off" || value == "no")
-        })
-        .unwrap_or(true)
-}
-
-fn use_zos_non_lob_limited_block_open() -> bool {
-    env::var("DB2_ZOS_NON_LOB_LIMITED_BLOCK_OPEN")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
