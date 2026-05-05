@@ -891,6 +891,10 @@ impl ClientInner {
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
             && !has_zos_lobs
             && use_zos_non_lob_extra_blocks();
+        let use_zos_non_lob_limited_query_protocol = self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && !has_zos_lobs
+            && use_zos_non_lob_limited_query_protocol();
         let opnqry_data = {
             let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
             ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
@@ -898,7 +902,9 @@ impl ClientInner {
                 codepoints::QRYBLKSZ,
                 db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
             );
-            if has_zos_lobs && use_native_zos_lob_strategy() {
+            if (has_zos_lobs && use_native_zos_lob_strategy())
+                || use_zos_non_lob_limited_query_protocol
+            {
                 ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
                 ddm.add_u16(codepoints::QRYPRCTYP, codepoints::QRYPRCTYP_LMTBLKPRC);
             } else if use_extended_materialized_blocks || use_zos_non_lob_extra_blocks {
@@ -2996,6 +3002,15 @@ fn zos_lob_chunk_window_target() -> usize {
 
 fn use_zos_non_lob_extra_blocks() -> bool {
     env::var("DB2_ZOS_NON_LOB_EXTRA_BLOCKS")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn use_zos_non_lob_limited_query_protocol() -> bool {
+    env::var("DB2_ZOS_NON_LOB_QRYPRCTYP_LMTBLKPRC")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
