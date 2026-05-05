@@ -1839,12 +1839,20 @@ impl ClientInner {
                         pending_row_bytes.len()
                     );
                 }
+                let close_after_next_fetch = fetch_size_override.is_some()
+                    && rows.is_empty()
+                    && pending_row_bytes.is_empty()
+                    && self.zos_lob_internal_depth == 0
+                    && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+                    && !descriptors_need_lob_materialization(&cursor_column_info, &descriptors)
+                    && use_zos_non_lob_close_with_limited_fetch();
                 let mut cursor = Cursor::new(
                     cursor_column_info,
                     descriptors,
                     query_instance_id,
                     self.build_pkgnamcsn_for(self.package_id, self.section_number),
                     fetch_size_override.unwrap_or(self.config.fetch_size),
+                    close_after_next_fetch,
                 );
                 cursor.pending_row_bytes = std::mem::take(&mut pending_row_bytes);
 
@@ -3032,6 +3040,15 @@ fn use_zos_non_lob_extra_blocks() -> bool {
 
 fn use_zos_non_lob_sql_rowset_cap() -> bool {
     env::var("DB2_ZOS_NON_LOB_SQL_ROWSET_CAP")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn use_zos_non_lob_close_with_limited_fetch() -> bool {
+    env::var("DB2_ZOS_NON_LOB_CLOSE_WITH_LIMITED_FETCH")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")

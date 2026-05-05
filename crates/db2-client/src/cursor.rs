@@ -22,6 +22,7 @@ pub(crate) struct Cursor {
     query_instance_id: Option<Vec<u8>>,
     pkgnamcsn: Vec<u8>,
     fetch_size: u32,
+    close_after_next_fetch: bool,
     fetch_calls: usize,
     pub(crate) pending_row_bytes: Vec<u8>,
     pub(crate) last_fetch_diagnostics: Vec<String>,
@@ -36,6 +37,7 @@ impl Cursor {
         query_instance_id: Option<Vec<u8>>,
         pkgnamcsn: Vec<u8>,
         fetch_size: u32,
+        close_after_next_fetch: bool,
     ) -> Self {
         let column_names = column_info
             .iter()
@@ -50,6 +52,7 @@ impl Cursor {
             query_instance_id,
             pkgnamcsn,
             fetch_size,
+            close_after_next_fetch,
             fetch_calls: 0,
             pending_row_bytes: Vec::new(),
             last_fetch_diagnostics: Vec::new(),
@@ -126,8 +129,21 @@ impl Cursor {
         };
         self.fetch_calls += 1;
 
+        let close_after_this_fetch = self.close_after_next_fetch && !has_lobs;
+        if close_after_this_fetch {
+            self.close_after_next_fetch = false;
+        }
+        let close_corr_id = close_after_this_fetch.then(|| inner.next_correlation_id());
+
         let mut writer = DssWriter::new(corr_id);
-        writer.write_request(&cntqry_data, false);
+        if close_after_this_fetch {
+            let clsqry_data = db2_proto::commands::clsqry::build_clsqry(&self.pkgnamcsn);
+            writer.write_request(&cntqry_data, true);
+            writer.set_correlation_id(close_corr_id.expect("close correlation id"));
+            writer.write_request(&clsqry_data, false);
+        } else {
+            writer.write_request(&cntqry_data, false);
+        }
         let send_buf = writer.finish();
         if collect_diagnostics && has_lobs {
             self.last_fetch_diagnostics.push(format!(
@@ -173,6 +189,11 @@ impl Cursor {
         let mut rows = Vec::new();
         let mut extdta_payloads = Vec::new();
         let mut end_of_query = false;
+        let mut close_reply_seen = close_corr_id.is_some_and(|close_corr_id| {
+            frames
+                .iter()
+                .any(|frame| frame.header.correlation_id == close_corr_id)
+        });
 
         self.process_fetch_frames(
             &frames,
@@ -182,6 +203,45 @@ impl Cursor {
             collect_diagnostics,
         )?;
         apply_extdta_payloads_to_rows(&mut rows, &self.descriptors, &extdta_payloads);
+
+        if close_after_this_fetch && !close_reply_seen {
+            let drain_timeout = zos_non_lob_fetch_end_drain_timeout();
+            if !drain_timeout.is_zero() {
+                let previous_end_of_query = end_of_query;
+                end_of_query = true;
+                match timeout(drain_timeout, inner.read_reply_frames()).await {
+                    Ok(Ok(more_frames)) => {
+                        close_reply_seen = close_corr_id.is_some_and(|close_corr_id| {
+                            more_frames
+                                .iter()
+                                .any(|frame| frame.header.correlation_id == close_corr_id)
+                        });
+                        if collect_diagnostics {
+                            self.last_fetch_diagnostics.push(format!(
+                                "non_lob_close_drain frames={} close_reply_seen={}",
+                                more_frames.len(),
+                                close_reply_seen
+                            ));
+                        }
+                        self.process_fetch_frames(
+                            &more_frames,
+                            &mut rows,
+                            &mut extdta_payloads,
+                            &mut end_of_query,
+                            collect_diagnostics,
+                        )?;
+                    }
+                    Ok(Err(err)) => return Err(err),
+                    Err(_) => {
+                        end_of_query = previous_end_of_query;
+                        if collect_diagnostics {
+                            self.last_fetch_diagnostics
+                                .push("non_lob_close_drain timed_out".to_string());
+                        }
+                    }
+                }
+            }
+        }
 
         if has_lobs && crate::connection::use_native_zos_lob_strategy() {
             while native_fetch_needs_more_frames(
@@ -267,6 +327,15 @@ impl Cursor {
                 if end_of_query {
                     break;
                 }
+            }
+        }
+
+        if close_after_this_fetch && !end_of_query && !rows.is_empty() {
+            end_of_query = true;
+            self.closed = true;
+            if collect_diagnostics {
+                self.last_fetch_diagnostics
+                    .push("non_lob_fetch_closed_with_bounded_rowset=true".to_string());
             }
         }
 
