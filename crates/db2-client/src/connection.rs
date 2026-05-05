@@ -939,6 +939,11 @@ impl ClientInner {
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
             && !has_zos_lobs
             && use_zos_non_lob_pipelined_first_fetch();
+        let early_first_fetch = self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && !has_zos_lobs
+            && !pipeline_first_fetch
+            && use_zos_non_lob_early_first_fetch();
         let opnqry_data = {
             let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
             ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
@@ -984,6 +989,30 @@ impl ClientInner {
         if pipeline_first_fetch {
             self.drain_zos_pipelined_open_fetch_reply_frames(&mut frames)
                 .await?;
+        } else if early_first_fetch && !query_frames_have_data_or_terminal_reply(&frames) {
+            if let Some(qryinsid) = query_instance_id_from_frames(&frames)? {
+                let qryrowset = use_zos_non_lob_extra_blocks.then_some(
+                    fetch_size_override
+                        .unwrap_or(self.config.fetch_size)
+                        .clamp(1, 32_767),
+                );
+                let cntqry_data = db2_proto::commands::cntqry::build_cntqry(
+                    pkgnamcsn,
+                    Some(&qryinsid),
+                    db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
+                    use_zos_non_lob_extra_blocks.then_some(-1),
+                    qryrowset,
+                );
+                let corr_id = self.next_correlation_id();
+                let mut writer = DssWriter::new(corr_id);
+                writer.write_request(&cntqry_data, false);
+                let send_buf = writer.finish();
+                self.send_bytes(&send_buf).await?;
+                self.drain_zos_pipelined_open_fetch_reply_frames(&mut frames)
+                    .await?;
+            } else if use_zos_non_lob_extra_blocks {
+                self.drain_zos_open_reply_frames(&mut frames).await?;
+            }
         } else if (use_extended_materialized_blocks || use_zos_non_lob_extra_blocks)
             && !has_zos_lobs
         {
@@ -3101,6 +3130,15 @@ fn use_zos_non_lob_sql_rowset_cap() -> bool {
 
 fn use_zos_non_lob_pipelined_first_fetch() -> bool {
     env::var("DB2_ZOS_NON_LOB_PIPELINE_FIRST_FETCH")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(false)
+}
+
+fn use_zos_non_lob_early_first_fetch() -> bool {
+    env::var("DB2_ZOS_NON_LOB_EARLY_FIRST_FETCH")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
@@ -5407,6 +5445,24 @@ fn query_frames_have_data_or_terminal_reply(frames: &[DssFrame]) -> bool {
                 })
             })
     })
+}
+
+fn query_instance_id_from_frames(frames: &[DssFrame]) -> Result<Option<Vec<u8>>, Error> {
+    for frame in frames {
+        for obj in ClientInner::parse_ddm_objects(&frame.payload)? {
+            if obj.code_point == codepoints::OPNQRYRM {
+                let reply = db2_proto::replies::opnqryrm::parse_opnqryrm(&obj)
+                    .map_err(|e| Error::Protocol(e.to_string()))?;
+                if reply.is_success() {
+                    if let Some(query_instance_id) = reply.query_instance_id {
+                        return Ok(Some(query_instance_id));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 fn apply_extdta_payloads_to_rows(
