@@ -918,8 +918,24 @@ impl ClientInner {
         if (use_extended_materialized_blocks || use_zos_non_lob_extra_blocks) && !has_zos_lobs {
             self.drain_zos_open_reply_frames(&mut frames).await?;
         }
+        let fetch_size_override = if self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && !has_zos_lobs
+            && use_zos_non_lob_sql_rowset_cap()
+        {
+            parse_fetch_first_row_limit(sql)
+                .and_then(|limit| u32::try_from(limit).ok())
+                .map(|limit| limit.min(self.config.fetch_size.max(1)))
+        } else {
+            None
+        };
         let result = self
-            .process_query_reply(&frames, column_info, Some(result_descriptors))
+            .process_query_reply_with_fetch_size(
+                &frames,
+                column_info,
+                Some(result_descriptors),
+                fetch_size_override,
+            )
             .await;
         if use_native_zos_lob_strategy() {
             return result;
@@ -1632,6 +1648,17 @@ impl ClientInner {
         column_info: &[ColumnInfo],
         initial_descriptors: Option<&[db2_proto::fdoca::ColumnDescriptor]>,
     ) -> Result<QueryResult, Error> {
+        self.process_query_reply_with_fetch_size(frames, column_info, initial_descriptors, None)
+            .await
+    }
+
+    async fn process_query_reply_with_fetch_size(
+        &mut self,
+        frames: &[DssFrame],
+        column_info: &[ColumnInfo],
+        initial_descriptors: Option<&[db2_proto::fdoca::ColumnDescriptor]>,
+        fetch_size_override: Option<u32>,
+    ) -> Result<QueryResult, Error> {
         let mut rows = Vec::new();
         let mut sqldard_descriptors = initial_descriptors
             .filter(|descriptors| !descriptors.is_empty())
@@ -1817,7 +1844,7 @@ impl ClientInner {
                     descriptors,
                     query_instance_id,
                     self.build_pkgnamcsn_for(self.package_id, self.section_number),
-                    self.config.fetch_size,
+                    fetch_size_override.unwrap_or(self.config.fetch_size),
                 );
                 cursor.pending_row_bytes = std::mem::take(&mut pending_row_bytes);
 
@@ -2996,6 +3023,15 @@ fn zos_lob_chunk_window_target() -> usize {
 
 fn use_zos_non_lob_extra_blocks() -> bool {
     env::var("DB2_ZOS_NON_LOB_EXTRA_BLOCKS")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn use_zos_non_lob_sql_rowset_cap() -> bool {
+    env::var("DB2_ZOS_NON_LOB_SQL_ROWSET_CAP")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
@@ -5697,6 +5733,17 @@ mod tests {
         let parsed = parse_simple_select_star("SELECT * FROM INSP_RPT", Some("FIREINSP")).unwrap();
         assert_eq!(parsed.schema, "FIREINSP");
         assert_eq!(parsed.table, "INSP_RPT");
+    }
+
+    #[test]
+    fn parse_fetch_first_row_limit_works_for_full_select() {
+        assert_eq!(
+            parse_fetch_first_row_limit(
+                "SELECT * FROM FIREINSP.PLCY_SNPST FETCH FIRST 3 ROWS ONLY"
+            ),
+            Some(3)
+        );
+        assert_eq!(parse_fetch_first_row_limit("SELECT * FROM T"), None);
     }
 
     #[test]

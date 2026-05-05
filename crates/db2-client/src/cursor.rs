@@ -95,7 +95,7 @@ impl Cursor {
                 && use_zos_non_lob_cntqry_extra_blocks();
             let use_extra_blocks = use_extended_materialized_blocks || use_zos_non_lob_extra_blocks;
             let qryrowset = use_zos_non_lob_extra_blocks
-                .then(zos_non_lob_cntqry_rowset)
+                .then(|| zos_non_lob_cntqry_rowset(self.fetch_size))
                 .flatten();
             if collect_diagnostics {
                 self.last_fetch_diagnostics.push(format!(
@@ -430,8 +430,9 @@ fn use_zos_non_lob_cntqry_extra_blocks() -> bool {
         .unwrap_or(true)
 }
 
-fn zos_non_lob_cntqry_rowset() -> Option<u32> {
-    let value = env_u64("DB2_ZOS_NON_LOB_CNTQRY_ROWSET", 100, 0, 32_767);
+fn zos_non_lob_cntqry_rowset(fetch_size: u32) -> Option<u32> {
+    let default = u64::from(fetch_size.clamp(1, 32_767));
+    let value = env_u64("DB2_ZOS_NON_LOB_CNTQRY_ROWSET", default, 0, 32_767);
     (value > 0).then_some(value as u32)
 }
 
