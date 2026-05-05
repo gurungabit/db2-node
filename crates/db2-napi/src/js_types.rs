@@ -289,32 +289,48 @@ fn parse_enum_length(type_name: &str, variant: &str) -> Option<u16> {
 /// which would cause integers and floats to be returned as JSON strings
 /// instead of JSON numbers.
 fn row_to_json(row: &db2_client::Row, col_names: &[String]) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    for name in col_names {
-        let is_null = row.is_null(name);
-        if is_null {
-            map.insert(name.clone(), serde_json::Value::Null);
-        } else if let Some(v) = row.get::<i64>(name) {
-            map.insert(name.clone(), serde_json::Value::Number(v.into()));
-        } else if let Some(v) = row.get::<f64>(name) {
-            let num =
-                serde_json::Number::from_f64(v).unwrap_or_else(|| serde_json::Number::from(0));
-            map.insert(name.clone(), serde_json::Value::Number(num));
-        } else if let Some(v) = row.get::<bool>(name) {
-            map.insert(name.clone(), serde_json::Value::Bool(v));
-        } else if let Some(v) = row.get::<Vec<u8>>(name) {
-            let arr: Vec<serde_json::Value> = v
-                .into_iter()
-                .map(|b| serde_json::Value::Number(b.into()))
-                .collect();
-            map.insert(name.clone(), serde_json::Value::Array(arr));
-        } else if let Some(v) = row.get::<String>(name) {
-            map.insert(name.clone(), serde_json::Value::String(v));
-        } else {
-            map.insert(name.clone(), serde_json::Value::Null);
-        }
+    let mut map = serde_json::Map::with_capacity(col_names.len());
+    for (index, name) in col_names.iter().enumerate() {
+        let value = row
+            .values()
+            .get(index)
+            .map(db2_value_to_json)
+            .unwrap_or(serde_json::Value::Null);
+        map.insert(name.clone(), value);
     }
     serde_json::Value::Object(map)
+}
+
+fn db2_value_to_json(value: &db2_proto::types::Db2Value) -> serde_json::Value {
+    use db2_proto::types::Db2Value;
+
+    match value {
+        Db2Value::Null => serde_json::Value::Null,
+        Db2Value::SmallInt(v) => serde_json::Value::Number((*v as i64).into()),
+        Db2Value::Integer(v) => serde_json::Value::Number((*v as i64).into()),
+        Db2Value::BigInt(v) => serde_json::Value::Number((*v).into()),
+        Db2Value::Real(v) => serde_json::Number::from_f64(*v as f64)
+            .map(serde_json::Value::Number)
+            .unwrap_or_else(|| serde_json::Value::Number(0.into())),
+        Db2Value::Double(v) => serde_json::Number::from_f64(*v)
+            .map(serde_json::Value::Number)
+            .unwrap_or_else(|| serde_json::Value::Number(0.into())),
+        Db2Value::Boolean(v) => serde_json::Value::Bool(*v),
+        Db2Value::Binary(v) | Db2Value::Blob(v) => serde_json::Value::Array(
+            v.iter()
+                .map(|b| serde_json::Value::Number((*b).into()))
+                .collect(),
+        ),
+        Db2Value::Decimal(v)
+        | Db2Value::Char(v)
+        | Db2Value::VarChar(v)
+        | Db2Value::Clob(v)
+        | Db2Value::RowId(v)
+        | Db2Value::Date(v)
+        | Db2Value::Time(v)
+        | Db2Value::Timestamp(v)
+        | Db2Value::Xml(v) => serde_json::Value::String(v.clone()),
+    }
 }
 
 /// Convert JavaScript parameter values (passed as serde_json::Value) to Vec<Db2Value>.

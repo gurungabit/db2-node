@@ -1,32 +1,50 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// A single row from a DB2 query result set.
 #[derive(Debug, Clone)]
 pub struct Row {
-    columns: Vec<String>,
+    columns: Arc<[String]>,
     values: Vec<db2_proto::types::Db2Value>,
-    column_map: HashMap<String, usize>,
+    column_map: OnceLock<HashMap<String, usize>>,
 }
 
 impl Row {
     /// Create a new Row from column names and values.
     pub fn new(columns: Vec<String>, values: Vec<db2_proto::types::Db2Value>) -> Self {
-        let column_map = columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.to_uppercase(), i))
-            .collect();
+        Row {
+            columns: columns.into(),
+            values,
+            column_map: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn new_shared(
+        columns: Arc<[String]>,
+        values: Vec<db2_proto::types::Db2Value>,
+    ) -> Self {
         Row {
             columns,
             values,
-            column_map,
+            column_map: OnceLock::new(),
         }
+    }
+
+    fn column_map(&self) -> &HashMap<String, usize> {
+        self.column_map.get_or_init(|| {
+            self.columns
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.to_uppercase(), i))
+                .collect()
+        })
     }
 
     /// Get a value by column name, converting to the requested type.
     /// Column name matching is case-insensitive.
     pub fn get<T: FromDb2Value>(&self, column: &str) -> Option<T> {
-        let idx = self.column_map.get(&column.to_uppercase())?;
+        let idx = self.column_map().get(&column.to_uppercase())?;
         self.values.get(*idx).and_then(T::from_db2_value)
     }
 
@@ -37,7 +55,7 @@ impl Row {
 
     /// Check if a column value is NULL. Column name matching is case-insensitive.
     pub fn is_null(&self, column: &str) -> bool {
-        match self.column_map.get(&column.to_uppercase()) {
+        match self.column_map().get(&column.to_uppercase()) {
             Some(idx) => matches!(
                 self.values.get(*idx),
                 Some(db2_proto::types::Db2Value::Null)

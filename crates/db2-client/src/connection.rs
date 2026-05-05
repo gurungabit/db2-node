@@ -1058,9 +1058,10 @@ impl ClientInner {
             }
         }
 
+        let output_names: Arc<[String]> = output_names.into();
         let output_rows = output_values
             .into_iter()
-            .map(|values| Row::new(output_names.clone(), values))
+            .map(|values| Row::new_shared(output_names.clone(), values))
             .collect::<Vec<_>>();
 
         let mut diagnostics = base_result.diagnostics;
@@ -1137,9 +1138,10 @@ impl ClientInner {
             .iter()
             .map(|column| column.name.clone())
             .collect::<Vec<_>>();
+        let output_names: Arc<[String]> = output_names.into();
         let output_rows = output_values
             .into_iter()
-            .map(|values| Row::new(output_names.clone(), values))
+            .map(|values| Row::new_shared(output_names.clone(), values))
             .collect::<Vec<_>>();
 
         let mut diagnostics = initial_result.diagnostics;
@@ -4926,9 +4928,12 @@ fn process_query_frames(
                         )
                         .map_err(|e| Error::Protocol(e.to_string()))?;
                         let decoded_count = decoded_rows.len();
-                        for values in decoded_rows {
-                            let col_names = row_column_names(column_info, values.len());
-                            rows.push(Row::new(col_names, values));
+                        if let Some(row_width) = decoded_rows.first().map(|values| values.len()) {
+                            let col_names: Arc<[String]> =
+                                row_column_names(column_info, row_width).into();
+                            for values in decoded_rows {
+                                rows.push(Row::new_shared(col_names.clone(), values));
+                            }
                         }
                         if collect_diagnostics {
                             diagnostics.push(format!(
@@ -5086,9 +5091,11 @@ fn decode_pending_query_data(
     let decoded_rows = db2_proto::fdoca::decode_rows_with_tail(&[], descs, &mut buffered)
         .map_err(|e| Error::Protocol(e.to_string()))?;
     let decoded_count = decoded_rows.len();
-    for values in decoded_rows {
-        let col_names = row_column_names(column_info, values.len());
-        rows.push(Row::new(col_names, values));
+    if let Some(row_width) = decoded_rows.first().map(|values| values.len()) {
+        let col_names: Arc<[String]> = row_column_names(column_info, row_width).into();
+        for values in decoded_rows {
+            rows.push(Row::new_shared(col_names.clone(), values));
+        }
     }
     *pending_row_bytes = buffered;
     if collect_diagnostics {

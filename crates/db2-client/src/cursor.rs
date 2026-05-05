@@ -1,4 +1,5 @@
 use std::env;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::trace;
@@ -297,10 +298,16 @@ impl Cursor {
                             &mut self.pending_row_bytes,
                         )
                         .map_err(|e| Error::Protocol(e.to_string()))?;
-                        for values in decoded_rows {
-                            let col_names: Vec<String> =
-                                self.column_info.iter().map(|c| c.name.clone()).collect();
-                            rows.push(Row::new(col_names, values));
+                        if !decoded_rows.is_empty() {
+                            let col_names: Arc<[String]> = self
+                                .column_info
+                                .iter()
+                                .map(|c| c.name.clone())
+                                .collect::<Vec<_>>()
+                                .into();
+                            for values in decoded_rows {
+                                rows.push(Row::new_shared(col_names.clone(), values));
+                            }
                         }
                     }
                     codepoints::EXTDTA => {
