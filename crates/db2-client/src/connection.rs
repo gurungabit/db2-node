@@ -638,7 +638,7 @@ impl ClientInner {
                     );
                     if has_zos_lobs && use_native_zos_lob_strategy() {
                         ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
-                        ddm.add_u32(codepoints::QRYROWSET, native_zos_lob_qryrowset());
+                        ddm.add_u16(codepoints::QRYPRCTYP, codepoints::QRYPRCTYP_LMTBLKPRC);
                     } else if use_extended_materialized_blocks {
                         ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
                     }
@@ -3729,17 +3729,12 @@ fn summarize_sql_for_diagnostics(sql: &str) -> String {
 
 pub(crate) fn use_native_zos_lob_strategy() -> bool {
     env::var("DB2_ZOS_LOB_STRATEGY")
-        .map(|value| value.eq_ignore_ascii_case("native"))
-        .unwrap_or(false)
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "sql" || value == "substr" || value == "fallback" || value == "off")
+        })
+        .unwrap_or(true)
         || env::var_os("DB2_ZOS_NATIVE_LOB_ONLY").is_some()
-}
-
-pub(crate) fn native_zos_lob_qryrowset() -> u32 {
-    env::var("DB2_ZOS_NATIVE_LOB_QRYROWSET")
-        .ok()
-        .and_then(|value| value.trim().parse::<u32>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -4994,11 +4989,32 @@ fn value_needs_extdta(value: &db2_proto::types::Db2Value) -> bool {
 }
 
 fn extdta_value_payload(payload: &[u8], nullable: bool) -> &[u8] {
+    let payload = unwrap_extdta_payload(payload);
     if nullable && matches!(payload.first(), Some(0x00 | 0xFF)) {
-        &payload[1..]
+        unwrap_extdta_payload(&payload[1..])
     } else {
         payload
     }
+}
+
+fn unwrap_extdta_payload(payload: &[u8]) -> &[u8] {
+    if payload.len() >= 4 {
+        let object_len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+        let code_point = u16::from_be_bytes([payload[2], payload[3]]);
+        if object_len == payload.len() && code_point == codepoints::FDODTA {
+            return &payload[4..];
+        }
+    }
+
+    if payload.len() >= 4 {
+        let declared_len =
+            u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        if declared_len == payload.len() - 4 {
+            return &payload[4..];
+        }
+    }
+
+    payload
 }
 
 fn frame_diagnostics(frames: &[DssFrame]) -> Vec<String> {

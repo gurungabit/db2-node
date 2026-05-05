@@ -62,19 +62,16 @@ impl Cursor {
 
         self.last_fetch_diagnostics.clear();
         let cntqry_data = if has_lobs && crate::connection::use_native_zos_lob_strategy() {
-            let qryrowset = crate::connection::native_zos_lob_qryrowset();
             self.last_fetch_diagnostics.push(
-                format!(
-                    "cntqry_request has_lobs=true rdbnam=false maxblkext=-1 qryrowset={} rtnextdta=RTNEXTALL",
-                    qryrowset
-                ),
+                "cntqry_request has_lobs=true native_limited_block=true rdbnam=false maxblkext=-1 qryrowset=none rtnextdta=RTNEXTALL"
+                    .to_string(),
             );
             db2_proto::commands::cntqry::build_cntqry_with_rtnextdta(
                 &pkgnamcsn,
                 self.query_instance_id.as_deref(),
                 db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
                 Some(-1),
-                Some(qryrowset),
+                None,
                 Some(codepoints::RTNEXTALL),
             )
         } else {
@@ -126,7 +123,7 @@ impl Cursor {
         } else {
             inner.config.query_timeout
         };
-        let frames = match timeout(read_timeout, inner.read_reply_frames()).await {
+        let mut frames = match timeout(read_timeout, inner.read_reply_frames()).await {
             Ok(result) => result?,
             Err(_) => {
                 return Err(Error::Timeout(format!(
@@ -139,6 +136,24 @@ impl Cursor {
                 )));
             }
         };
+        if has_lobs && crate::connection::use_native_zos_lob_strategy() {
+            loop {
+                match timeout(native_lob_frame_drain_timeout(), inner.read_reply_frames()).await {
+                    Ok(Ok(mut more_frames)) => {
+                        if more_frames.is_empty() {
+                            break;
+                        }
+                        self.last_fetch_diagnostics.push(format!(
+                            "native_lob_drain extra_frames={}",
+                            more_frames.len()
+                        ));
+                        frames.append(&mut more_frames);
+                    }
+                    Ok(Err(err)) => return Err(err),
+                    Err(_) => break,
+                }
+            }
+        }
         if debug_hex_enabled() && self.fetch_calls <= 5 {
             eprintln!("[db2-wire] CNTQRY received {} frame(s)", frames.len());
         }
@@ -376,11 +391,42 @@ fn value_needs_extdta(value: &db2_proto::types::Db2Value) -> bool {
 }
 
 fn extdta_value_payload(payload: &[u8], nullable: bool) -> &[u8] {
+    let payload = unwrap_extdta_payload(payload);
     if nullable && matches!(payload.first(), Some(0x00 | 0xFF)) {
-        &payload[1..]
+        unwrap_extdta_payload(&payload[1..])
     } else {
         payload
     }
+}
+
+fn unwrap_extdta_payload(payload: &[u8]) -> &[u8] {
+    if payload.len() >= 4 {
+        let object_len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+        let code_point = u16::from_be_bytes([payload[2], payload[3]]);
+        if object_len == payload.len() && code_point == codepoints::FDODTA {
+            return &payload[4..];
+        }
+    }
+
+    if payload.len() >= 4 {
+        let declared_len =
+            u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        if declared_len == payload.len() - 4 {
+            return &payload[4..];
+        }
+    }
+
+    payload
+}
+
+fn native_lob_frame_drain_timeout() -> Duration {
+    Duration::from_millis(
+        env::var("DB2_ZOS_NATIVE_LOB_FRAME_DRAIN_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(|value| value.clamp(25, 2_000))
+            .unwrap_or(250),
+    )
 }
 
 fn debug_hex_enabled() -> bool {
