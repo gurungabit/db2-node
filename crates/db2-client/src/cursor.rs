@@ -208,45 +208,6 @@ impl Cursor {
             }
         }
 
-        if should_drain_zos_non_lob_fetch_end(inner, has_lobs, &rows, end_of_query) {
-            let drain_timeout = zos_non_lob_fetch_end_drain_timeout();
-            loop {
-                let more_frames = match timeout(drain_timeout, inner.read_reply_frames()).await {
-                    Ok(Ok(frames)) => frames,
-                    Ok(Err(err)) => return Err(err),
-                    Err(_) => {
-                        if collect_diagnostics {
-                            self.last_fetch_diagnostics.push(format!(
-                                "non_lob_end_drain timed_out rows={} pending_tail={}",
-                                rows.len(),
-                                self.pending_row_bytes.len()
-                            ));
-                        }
-                        break;
-                    }
-                };
-                if more_frames.is_empty() {
-                    break;
-                }
-                if collect_diagnostics {
-                    self.last_fetch_diagnostics.push(format!(
-                        "non_lob_end_drain extra_frames={}",
-                        more_frames.len()
-                    ));
-                }
-                self.process_fetch_frames(
-                    &more_frames,
-                    &mut rows,
-                    &mut extdta_payloads,
-                    &mut end_of_query,
-                    collect_diagnostics,
-                )?;
-                if end_of_query {
-                    break;
-                }
-            }
-        }
-
         if debug_hex_enabled() && self.fetch_calls <= 5 {
             eprintln!(
                 "[db2-wire] CNTQRY fetch#{} rows={} end={} pending_tail={}",
@@ -387,35 +348,6 @@ impl Cursor {
 
         Ok(())
     }
-}
-
-fn should_drain_zos_non_lob_fetch_end(
-    inner: &ClientInner,
-    has_lobs: bool,
-    rows: &[Row],
-    end_of_query: bool,
-) -> bool {
-    !has_lobs
-        && !rows.is_empty()
-        && !end_of_query
-        && inner.zos_lob_internal_depth == 0
-        && inner
-            .server_info
-            .as_ref()
-            .map_or(false, crate::connection::is_db2_zos_server)
-        && !zos_non_lob_fetch_end_drain_timeout().is_zero()
-}
-
-fn zos_non_lob_fetch_end_drain_timeout() -> Duration {
-    Duration::from_millis(env_u64("DB2_ZOS_NON_LOB_FETCH_END_DRAIN_MS", 1, 0, 25))
-}
-
-fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
-    env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(|value| value.clamp(min, max))
-        .unwrap_or(default)
 }
 
 fn native_fetch_needs_more_frames(
