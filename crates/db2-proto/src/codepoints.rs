@@ -117,6 +117,7 @@ pub const RDBCOLID: u16 = 0x2108; // RDB Collection Identifier
 pub const OUTOVR: u16 = 0x2415; // Output Override
 pub const OUTEXP: u16 = 0x2111; // Output Expected
 pub const QRYBLKSZ: u16 = 0x2114; // Query Block Size
+pub const QRYBLKCTL: u16 = 0x2132; // Query Block Protocol Control
 pub const MAXBLKEXT: u16 = 0x2141; // Maximum Number of Extra Blocks
 pub const QRYPRCTYP: u16 = 0x2102; // Query Protocol Type
 pub const NBRROW: u16 = 0x213A; // Number of Fetch or Insert Rows
@@ -162,6 +163,7 @@ pub const SRVCOD_SESRM: u16 = 0x0020;
 // ============================================================
 pub const QRYPRCTYP_FIXROWPRC: u16 = 0x0002; // Fixed Row Query Protocol
 pub const QRYPRCTYP_LMTBLKPRC: u16 = 0x0003; // Limited Block Query Protocol
+pub const LMTBLKPRC: u16 = 0x2417; // Limited Block Query Protocol
 
 // ============================================================
 // TYPSQLDA Values
