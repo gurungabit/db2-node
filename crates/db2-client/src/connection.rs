@@ -856,10 +856,6 @@ impl ClientInner {
         let has_zos_lobs = result_metadata_needs_zos_lob_route(column_info, result_descriptors);
         let use_extended_materialized_blocks = self.zos_lob_internal_depth > 0
             && self.server_info.as_ref().map_or(false, is_db2_zos_server);
-        let use_pipelined_fetch = self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
-            && !has_zos_lobs
-            && use_zos_pipelined_non_lob_fetch();
         let opnqry_data = {
             let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
             ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
@@ -880,40 +876,10 @@ impl ClientInner {
         let corr_id = self.next_correlation_id();
         let mut writer = DssWriter::new(corr_id);
         writer.write_request(&opnqry_data, false);
-        if use_pipelined_fetch {
-            let cntqry_corr_id = self.next_correlation_id();
-            let cntqry_data = db2_proto::commands::cntqry::build_cntqry(
-                pkgnamcsn,
-                None,
-                db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
-                None,
-                None,
-            );
-            writer.set_correlation_id(cntqry_corr_id);
-            writer.write_request(&cntqry_data, false);
-        }
         let send_buf = writer.finish();
         self.send_bytes(&send_buf).await?;
 
-        let mut frames = self.read_reply_frames().await?;
-        while use_pipelined_fetch && !frames_have_query_data_or_end(&frames) {
-            let more_frames = match timeout(
-                zos_pipelined_fetch_reply_timeout(),
-                self.read_reply_frames(),
-            )
-            .await
-            {
-                Ok(Ok(frames)) => frames,
-                Ok(Err(err)) => return Err(err),
-                Err(_) => {
-                    return Err(Error::Timeout(format!(
-                        "z/OS pipelined CNTQRY reply timed out after {:?}",
-                        zos_pipelined_fetch_reply_timeout()
-                    )))
-                }
-            };
-            frames.extend(more_frames);
-        }
+        let frames = self.read_reply_frames().await?;
         let result = self
             .process_query_reply(&frames, column_info, Some(result_descriptors))
             .await;
@@ -3965,19 +3931,6 @@ fn use_zos_select_cache() -> bool {
         .unwrap_or(true)
 }
 
-fn use_zos_pipelined_non_lob_fetch() -> bool {
-    env::var("DB2_ZOS_PIPELINE_NON_LOB_FETCH")
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            !(value == "0" || value == "false" || value == "off" || value == "no")
-        })
-        .unwrap_or(true)
-}
-
-fn zos_pipelined_fetch_reply_timeout() -> Duration {
-    Duration::from_millis(env_usize("DB2_ZOS_PIPELINED_FETCH_REPLY_MS", 1_000, 50, 30_000) as u64)
-}
-
 fn should_reprepare_cached_zos_select(err: &Error) -> bool {
     matches!(
         err,
@@ -5332,18 +5285,6 @@ fn frame_diagnostics(frames: &[DssFrame]) -> Vec<String> {
         }
     }
     diagnostics
-}
-
-fn frames_have_query_data_or_end(frames: &[DssFrame]) -> bool {
-    frames.iter().any(|frame| {
-        ClientInner::parse_ddm_objects(&frame.payload)
-            .ok()
-            .is_some_and(|objects| {
-                objects
-                    .iter()
-                    .any(|obj| matches!(obj.code_point, codepoints::QRYDTA | codepoints::ENDQRYRM))
-            })
-    })
 }
 
 fn ddm_codepoint_name(code_point: u16) -> String {
