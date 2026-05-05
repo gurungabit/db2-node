@@ -86,6 +86,10 @@ impl Row {
         &mut self.values
     }
 
+    pub fn into_values(self) -> Vec<db2_proto::types::Db2Value> {
+        self.values
+    }
+
     /// Return the number of columns.
     pub fn len(&self) -> usize {
         self.columns.len()

@@ -205,8 +205,14 @@ fn parse_type_definition_name(value: Option<String>) -> napi::Result<Option<Stri
 
 /// Convert a db2_client::QueryResult into our JS-facing QueryResult struct.
 pub fn query_result_to_js(result: db2_client::types::QueryResult) -> JsQueryResult {
-    let columns: Vec<JsColumnInfo> = result
-        .columns
+    let db2_client::types::QueryResult {
+        rows,
+        row_count,
+        columns: result_columns,
+        diagnostics,
+    } = result;
+
+    let columns: Vec<JsColumnInfo> = result_columns
         .iter()
         .map(|col| {
             let type_name = public_type_name(&col.type_name);
@@ -221,18 +227,17 @@ pub fn query_result_to_js(result: db2_client::types::QueryResult) -> JsQueryResu
         })
         .collect();
 
-    let col_names: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
-    let rows: Vec<serde_json::Value> = result
-        .rows
-        .iter()
-        .map(|row| row_to_json(row, &col_names))
+    let col_names: Vec<String> = result_columns.iter().map(|c| c.name.clone()).collect();
+    let rows: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|row| row_to_json_owned(row, &col_names))
         .collect();
 
     JsQueryResult {
         rows,
-        row_count: result.row_count,
+        row_count,
         columns,
-        diagnostics: result.diagnostics,
+        diagnostics,
     }
 }
 
@@ -282,43 +287,37 @@ fn parse_enum_length(type_name: &str, variant: &str) -> Option<u16> {
     inner.parse::<u16>().ok()
 }
 
-/// Convert a single Row to a JSON object using column names as keys.
-///
-/// Type resolution order matters: numeric types are tried before String
-/// because `FromDb2Value for String` can convert numeric values to strings,
-/// which would cause integers and floats to be returned as JSON strings
-/// instead of JSON numbers.
-fn row_to_json(row: &db2_client::Row, col_names: &[String]) -> serde_json::Value {
+fn row_to_json_owned(row: db2_client::Row, col_names: &[String]) -> serde_json::Value {
     let mut map = serde_json::Map::with_capacity(col_names.len());
-    for (index, name) in col_names.iter().enumerate() {
-        let value = row
-            .values()
-            .get(index)
-            .map(db2_value_to_json)
+    let mut values = row.into_values().into_iter();
+    for name in col_names {
+        let value = values
+            .next()
+            .map(db2_value_to_json_owned)
             .unwrap_or(serde_json::Value::Null);
         map.insert(name.clone(), value);
     }
     serde_json::Value::Object(map)
 }
 
-fn db2_value_to_json(value: &db2_proto::types::Db2Value) -> serde_json::Value {
+fn db2_value_to_json_owned(value: db2_proto::types::Db2Value) -> serde_json::Value {
     use db2_proto::types::Db2Value;
 
     match value {
         Db2Value::Null => serde_json::Value::Null,
-        Db2Value::SmallInt(v) => serde_json::Value::Number((*v as i64).into()),
-        Db2Value::Integer(v) => serde_json::Value::Number((*v as i64).into()),
-        Db2Value::BigInt(v) => serde_json::Value::Number((*v).into()),
-        Db2Value::Real(v) => serde_json::Number::from_f64(*v as f64)
+        Db2Value::SmallInt(v) => serde_json::Value::Number((v as i64).into()),
+        Db2Value::Integer(v) => serde_json::Value::Number((v as i64).into()),
+        Db2Value::BigInt(v) => serde_json::Value::Number(v.into()),
+        Db2Value::Real(v) => serde_json::Number::from_f64(v as f64)
             .map(serde_json::Value::Number)
             .unwrap_or_else(|| serde_json::Value::Number(0.into())),
-        Db2Value::Double(v) => serde_json::Number::from_f64(*v)
+        Db2Value::Double(v) => serde_json::Number::from_f64(v)
             .map(serde_json::Value::Number)
             .unwrap_or_else(|| serde_json::Value::Number(0.into())),
-        Db2Value::Boolean(v) => serde_json::Value::Bool(*v),
+        Db2Value::Boolean(v) => serde_json::Value::Bool(v),
         Db2Value::Binary(v) | Db2Value::Blob(v) => serde_json::Value::Array(
-            v.iter()
-                .map(|b| serde_json::Value::Number((*b).into()))
+            v.into_iter()
+                .map(|b| serde_json::Value::Number(b.into()))
                 .collect(),
         ),
         Db2Value::Decimal(v)
@@ -329,7 +328,7 @@ fn db2_value_to_json(value: &db2_proto::types::Db2Value) -> serde_json::Value {
         | Db2Value::Date(v)
         | Db2Value::Time(v)
         | Db2Value::Timestamp(v)
-        | Db2Value::Xml(v) => serde_json::Value::String(v.clone()),
+        | Db2Value::Xml(v) => serde_json::Value::String(v),
     }
 }
 
