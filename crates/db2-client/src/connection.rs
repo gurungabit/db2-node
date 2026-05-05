@@ -624,8 +624,8 @@ impl ClientInner {
         sql: &str,
         params: &[&dyn ToSql],
     ) -> Result<QueryResult, Error> {
-        ensure_sqlstt_sql_len(sql)?;
         if params.is_empty() && !sql_is_query(sql) {
+            ensure_sqlstt_sql_len(sql)?;
             return self.execute_immediate(sql).await;
         }
 
@@ -633,6 +633,13 @@ impl ClientInner {
 
         let is_query = sql_is_query(sql);
         let use_zos_sqlstt = self.server_info.as_ref().map_or(false, is_db2_zos_server);
+        let optimized_sql = if params.is_empty() && is_query && use_zos_sqlstt {
+            append_zos_optimize_for_rows(sql)
+        } else {
+            None
+        };
+        let sql_for_prepare = optimized_sql.as_deref().unwrap_or(sql);
+        ensure_sqlstt_sql_len(sql_for_prepare)?;
         let use_zos_cursor_attributes =
             is_query && use_zos_sqlstt && use_zos_read_only_cursor_attributes();
         let pkgnamcsn = self.direct_query_pkgnamcsn();
@@ -645,7 +652,7 @@ impl ClientInner {
             let corr_id = self.next_correlation_id();
             let prpsqlstt_data =
                 db2_proto::commands::prpsqlstt::build_prpsqlstt_with_sqlda(&pkgnamcsn);
-            let sqlstt_data = build_sqlstt_for_server(sql, use_zos_sqlstt);
+            let sqlstt_data = build_sqlstt_for_server(sql_for_prepare, use_zos_sqlstt);
             let qryblksz: u32 = 0x0000FFFF;
 
             if params.is_empty() && use_zos_sqlstt {
@@ -3003,6 +3010,15 @@ fn use_zos_non_lob_extra_blocks() -> bool {
         .unwrap_or(true)
 }
 
+fn use_zos_optimize_for_rows() -> bool {
+    env::var("DB2_ZOS_OPTIMIZE_FOR_ROWS")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
 fn zos_non_lob_open_drain_timeout() -> Duration {
     Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_OPEN_DRAIN_MS", 2, 0, 25) as u64)
 }
@@ -3774,6 +3790,49 @@ fn parse_fetch_first_row_limit(suffix: &str) -> Option<usize> {
         }
     }
     None
+}
+
+fn append_zos_optimize_for_rows(sql: &str) -> Option<String> {
+    if !use_zos_optimize_for_rows()
+        || sql_has_keyword_pair(sql, "OPTIMIZE", "FOR")
+        || sql_has_keyword_pair(sql, "FOR", "UPDATE")
+        || sql_ends_with_isolation_clause(sql)
+    {
+        return None;
+    }
+
+    let row_limit = parse_fetch_first_row_limit(sql)?;
+    let trimmed = sql.trim_end();
+    let (body, suffix) = if let Some(body) = trimmed.strip_suffix(';') {
+        (body.trim_end(), ";")
+    } else {
+        (trimmed, "")
+    };
+    if body.is_empty() {
+        return None;
+    }
+
+    Some(format!("{body} OPTIMIZE FOR {} ROWS{suffix}", row_limit))
+}
+
+fn sql_has_keyword_pair(sql: &str, first: &str, second: &str) -> bool {
+    sql_keyword_tokens(sql)
+        .windows(2)
+        .any(|window| window[0] == first && window[1] == second)
+}
+
+fn sql_ends_with_isolation_clause(sql: &str) -> bool {
+    let tokens = sql_keyword_tokens(sql);
+    tokens.windows(2).last().is_some_and(|window| {
+        window[0] == "WITH" && matches!(window[1].as_str(), "UR" | "CS" | "RS" | "RR")
+    })
+}
+
+fn sql_keyword_tokens(sql: &str) -> Vec<String> {
+    sql.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_uppercase())
+        .collect()
 }
 
 fn find_from_keyword(input: &str, mut offset: usize) -> Option<usize> {
@@ -5697,6 +5756,41 @@ mod tests {
         let parsed = parse_simple_select_star("SELECT * FROM INSP_RPT", Some("FIREINSP")).unwrap();
         assert_eq!(parsed.schema, "FIREINSP");
         assert_eq!(parsed.table, "INSP_RPT");
+    }
+
+    #[test]
+    fn append_zos_optimize_for_rows_adds_hint_for_fetch_first() {
+        assert_eq!(
+            append_zos_optimize_for_rows(
+                "SELECT * FROM FIREINSP.PLCY_SNPST FETCH FIRST 3 ROWS ONLY"
+            )
+            .as_deref(),
+            Some("SELECT * FROM FIREINSP.PLCY_SNPST FETCH FIRST 3 ROWS ONLY OPTIMIZE FOR 3 ROWS")
+        );
+    }
+
+    #[test]
+    fn append_zos_optimize_for_rows_preserves_trailing_semicolon() {
+        assert_eq!(
+            append_zos_optimize_for_rows("SELECT * FROM T FETCH FIRST 10 ROWS ONLY;").as_deref(),
+            Some("SELECT * FROM T FETCH FIRST 10 ROWS ONLY OPTIMIZE FOR 10 ROWS;")
+        );
+    }
+
+    #[test]
+    fn append_zos_optimize_for_rows_leaves_explicit_clauses_alone() {
+        assert!(append_zos_optimize_for_rows(
+            "SELECT * FROM T FETCH FIRST 10 ROWS ONLY OPTIMIZE FOR 1 ROW"
+        )
+        .is_none());
+        assert!(append_zos_optimize_for_rows(
+            "SELECT * FROM T FOR UPDATE FETCH FIRST 10 ROWS ONLY"
+        )
+        .is_none());
+        assert!(
+            append_zos_optimize_for_rows("SELECT * FROM T FETCH FIRST 10 ROWS ONLY WITH UR")
+                .is_none()
+        );
     }
 
     #[test]
