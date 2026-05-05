@@ -94,11 +94,17 @@ impl Cursor {
                     .map_or(false, crate::connection::is_db2_zos_server)
                 && use_zos_non_lob_cntqry_extra_blocks();
             let use_extra_blocks = use_extended_materialized_blocks || use_zos_non_lob_extra_blocks;
+            let qryrowset = use_zos_non_lob_extra_blocks
+                .then(zos_non_lob_cntqry_rowset)
+                .flatten();
             if collect_diagnostics {
                 self.last_fetch_diagnostics.push(format!(
-                    "cntqry_request has_lobs={} native_lobs=false rdbnam=false maxblkext={} qryrowset=none rtnextdta=none non_lob_extra_blocks={}",
+                    "cntqry_request has_lobs={} native_lobs=false rdbnam=false maxblkext={} qryrowset={} rtnextdta=none non_lob_extra_blocks={}",
                     has_lobs,
                     if use_extra_blocks { "-1" } else { "none" },
+                    qryrowset
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
                     use_zos_non_lob_extra_blocks
                 ));
             }
@@ -107,7 +113,7 @@ impl Cursor {
                 self.query_instance_id.as_deref(),
                 db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
                 use_extra_blocks.then_some(-1),
-                None,
+                qryrowset,
             )
         };
         self.fetch_calls += 1;
@@ -422,6 +428,11 @@ fn use_zos_non_lob_cntqry_extra_blocks() -> bool {
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
         .unwrap_or(true)
+}
+
+fn zos_non_lob_cntqry_rowset() -> Option<u32> {
+    let value = env_u64("DB2_ZOS_NON_LOB_CNTQRY_ROWSET", 100, 0, 32_767);
+    (value > 0).then_some(value as u32)
 }
 
 fn zos_non_lob_fetch_end_drain_timeout() -> Duration {
