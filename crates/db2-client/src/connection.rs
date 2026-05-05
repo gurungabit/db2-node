@@ -27,6 +27,7 @@ pub(crate) const ZOS_DIRECT_QUERY_SECTION: u16 = 1;
 // the one-shot section we keep for direct query()/execute() calls.
 pub(crate) const PREPARED_STATEMENT_PKGID: &str = "SYSLH200";
 pub(crate) const PREPARED_STATEMENT_MAX_SECTION: u16 = 385;
+const ZOS_SELECT_CACHE_MAX_ENTRIES: usize = 64;
 
 pub(crate) struct PoolCheckoutEntry {
     pub(crate) created_at: std::time::Instant,
@@ -38,6 +39,14 @@ pub(crate) type PoolCheckoutMap = HashMap<usize, PoolCheckoutEntry>;
 struct PoolCheckoutHandle {
     key: usize,
     checked_out: Weak<Mutex<PoolCheckoutMap>>,
+}
+
+#[derive(Clone)]
+struct CachedZosSelect {
+    package_id: &'static str,
+    section_number: u16,
+    column_info: Vec<ColumnInfo>,
+    result_descriptors: Vec<db2_proto::fdoca::ColumnDescriptor>,
 }
 
 /// Internal shared state for a DB2 connection.
@@ -57,6 +66,7 @@ pub(crate) struct ClientInner {
     pub next_prepared_section: u16,
     pub free_prepared_sections: Vec<u16>,
     pub zos_lob_internal_depth: usize,
+    zos_select_cache: HashMap<String, CachedZosSelect>,
 }
 
 impl ClientInner {
@@ -113,6 +123,15 @@ impl ClientInner {
         let section_number = self.next_prepared_section;
         self.next_prepared_section += 1;
         Ok(section_number)
+    }
+
+    fn allocate_zos_cached_select_section(&mut self) -> Option<u16> {
+        loop {
+            let section_number = self.allocate_prepared_section().ok()?;
+            if section_number != ZOS_DIRECT_QUERY_SECTION {
+                return Some(section_number);
+            }
+        }
     }
 
     pub fn release_prepared_section(&mut self, section_number: u16) {
@@ -255,6 +274,7 @@ impl ClientInner {
         self.next_prepared_section = 1;
         self.free_prepared_sections.clear();
         self.zos_lob_internal_depth = 0;
+        self.zos_select_cache.clear();
 
         if let Some(mut transport) = self.transport.take() {
             let _ = transport.close().await;
@@ -496,6 +516,7 @@ impl ClientInner {
         self.recv_buf.clear();
         self.next_prepared_section = 1;
         self.free_prepared_sections.clear();
+        self.zos_select_cache.clear();
         self.session_generation = self.session_generation.wrapping_add(1);
         if self.session_generation == 0 {
             self.session_generation = 1;
@@ -601,100 +622,103 @@ impl ClientInner {
             let qryblksz: u32 = 0x0000FFFF;
 
             if params.is_empty() && use_zos_sqlstt {
+                if self.zos_lob_internal_depth == 0 && use_zos_select_cache() {
+                    if let Some(cached) = self.zos_select_cache.get(sql).cloned() {
+                        self.activate_section(cached.package_id, cached.section_number);
+                        let cached_pkgnamcsn =
+                            self.build_pkgnamcsn_for(cached.package_id, cached.section_number);
+                        let result = self
+                            .open_zos_select(
+                                sql,
+                                &cached_pkgnamcsn,
+                                &cached.column_info,
+                                &cached.result_descriptors,
+                            )
+                            .await;
+                        match result {
+                            Ok(result) => return Ok(result),
+                            Err(err) if should_reprepare_cached_zos_select(&err) => {
+                                self.zos_select_cache.remove(sql);
+                                self.release_prepared_section(cached.section_number);
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    }
+                }
+
+                let cache_section = if self.zos_lob_internal_depth == 0
+                    && use_zos_select_cache()
+                    && self.zos_select_cache.len() < ZOS_SELECT_CACHE_MAX_ENTRIES
+                {
+                    self.allocate_zos_cached_select_section()
+                } else {
+                    None
+                };
+                let (package_id, section_number) = cache_section
+                    .map(|section| (DIRECT_QUERY_PKGID, section))
+                    .unwrap_or((DIRECT_QUERY_PKGID, ZOS_DIRECT_QUERY_SECTION));
+                self.activate_section(package_id, section_number);
+                let pkgnamcsn = self.build_pkgnamcsn_for(package_id, section_number);
+                let prpsqlstt_data =
+                    db2_proto::commands::prpsqlstt::build_prpsqlstt_with_sqlda(&pkgnamcsn);
+
                 let mut writer = DssWriter::new(corr_id);
                 writer.write_request_next_same_corr(&prpsqlstt_data, true);
                 writer.write_object(&sqlstt_data, false);
 
                 let send_buf = writer.finish();
-                self.send_bytes(&send_buf).await?;
+                if let Err(err) = self.send_bytes(&send_buf).await {
+                    if let Some(section_number) = cache_section {
+                        self.release_prepared_section(section_number);
+                    }
+                    return Err(err);
+                }
 
-                let frames = self.read_zos_select_prepare_reply_frames().await?;
-                let column_info = self.parse_prepare_reply(&frames)?;
+                let frames = match self.read_zos_select_prepare_reply_frames().await {
+                    Ok(frames) => frames,
+                    Err(err) => {
+                        if let Some(section_number) = cache_section {
+                            self.release_prepared_section(section_number);
+                        }
+                        return Err(err);
+                    }
+                };
+                let column_info = match self.parse_prepare_reply(&frames) {
+                    Ok(column_info) => column_info,
+                    Err(err) => {
+                        if let Some(section_number) = cache_section {
+                            self.release_prepared_section(section_number);
+                        }
+                        return Err(err);
+                    }
+                };
                 let result_descriptors = self.parse_prepare_result_descriptors(&frames);
 
-                if self.zos_lob_internal_depth == 0 && !use_native_zos_lob_strategy() {
-                    let current_schema = self.config.current_schema.clone();
-                    let prepare_columns =
-                        catalog_columns_from_prepare_metadata(&column_info, &result_descriptors);
-                    if let Some(result) = self
-                        .execute_zos_select_lobs_chunked_with_catalog(
-                            sql,
-                            current_schema.as_deref(),
-                            &prepare_columns,
-                            "prepare",
-                        )
-                        .await?
-                    {
+                let result = self
+                    .open_zos_select(sql, &pkgnamcsn, &column_info, &result_descriptors)
+                    .await;
+                match result {
+                    Ok(result) => {
+                        if let Some(section_number) = cache_section {
+                            self.zos_select_cache.insert(
+                                sql.to_string(),
+                                CachedZosSelect {
+                                    package_id,
+                                    section_number,
+                                    column_info,
+                                    result_descriptors,
+                                },
+                            );
+                        }
                         return Ok(result);
                     }
-
-                    if result_metadata_needs_zos_lob_route(&column_info, &result_descriptors) {
-                        if let Some(metadata_sql) =
-                            build_zos_select_star_metadata_query(sql, current_schema.as_deref())
-                        {
-                            let metadata = self
-                                .execute_zos_lob_internal_query(
-                                    "metadata-after-prepare",
-                                    &metadata_sql,
-                                )
-                                .await?;
-                            if let Some(result) = self
-                                .execute_zos_select_star_lobs_chunked(
-                                    sql,
-                                    current_schema.as_deref(),
-                                    &metadata,
-                                )
-                                .await?
-                            {
-                                return Ok(result);
-                            }
+                    Err(err) => {
+                        if let Some(section_number) = cache_section {
+                            self.release_prepared_section(section_number);
                         }
+                        return Err(err);
                     }
                 }
-
-                let has_zos_lobs =
-                    result_metadata_needs_zos_lob_route(&column_info, &result_descriptors);
-                let use_extended_materialized_blocks =
-                    self.zos_lob_internal_depth > 0 && use_zos_sqlstt;
-                let opnqry_data = {
-                    let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
-                    ddm.add_code_point(codepoints::PKGNAMCSN, &pkgnamcsn);
-                    ddm.add_u32(
-                        codepoints::QRYBLKSZ,
-                        db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
-                    );
-                    if has_zos_lobs && use_native_zos_lob_strategy() {
-                        ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
-                        ddm.add_u16(codepoints::QRYPRCTYP, codepoints::QRYPRCTYP_LMTBLKPRC);
-                    } else if use_extended_materialized_blocks {
-                        ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
-                    }
-                    ddm.add_code_point(0x215D, &[0x01]); // QRYCLSIMP = 1 (close on endqry)
-                    ddm.build()
-                };
-
-                let corr_id = self.next_correlation_id();
-                let mut writer = DssWriter::new(corr_id);
-                writer.write_request(&opnqry_data, false);
-                let send_buf = writer.finish();
-                self.send_bytes(&send_buf).await?;
-
-                let frames = self.read_reply_frames().await?;
-                let result = self
-                    .process_query_reply(&frames, &column_info, Some(&result_descriptors))
-                    .await;
-                if use_native_zos_lob_strategy() {
-                    return result;
-                }
-                return self
-                    .retry_zos_lob_chunking_after_decode_error(
-                        sql,
-                        result,
-                        &column_info,
-                        &result_descriptors,
-                        "direct-decode-error",
-                    )
-                    .await;
             }
 
             let mut writer = DssWriter::new(corr_id);
@@ -783,6 +807,93 @@ impl ClientInner {
             self.execute_with_params(&pkgnamcsn, params, &input_descriptors)
                 .await
         }
+    }
+
+    async fn open_zos_select(
+        &mut self,
+        sql: &str,
+        pkgnamcsn: &[u8],
+        column_info: &[ColumnInfo],
+        result_descriptors: &[db2_proto::fdoca::ColumnDescriptor],
+    ) -> Result<QueryResult, Error> {
+        if self.zos_lob_internal_depth == 0 && !use_native_zos_lob_strategy() {
+            let current_schema = self.config.current_schema.clone();
+            let prepare_columns =
+                catalog_columns_from_prepare_metadata(column_info, result_descriptors);
+            if let Some(result) = self
+                .execute_zos_select_lobs_chunked_with_catalog(
+                    sql,
+                    current_schema.as_deref(),
+                    &prepare_columns,
+                    "prepare",
+                )
+                .await?
+            {
+                return Ok(result);
+            }
+
+            if result_metadata_needs_zos_lob_route(column_info, result_descriptors) {
+                if let Some(metadata_sql) =
+                    build_zos_select_star_metadata_query(sql, current_schema.as_deref())
+                {
+                    let metadata = self
+                        .execute_zos_lob_internal_query("metadata-after-prepare", &metadata_sql)
+                        .await?;
+                    if let Some(result) = self
+                        .execute_zos_select_star_lobs_chunked(
+                            sql,
+                            current_schema.as_deref(),
+                            &metadata,
+                        )
+                        .await?
+                    {
+                        return Ok(result);
+                    }
+                }
+            }
+        }
+
+        let has_zos_lobs = result_metadata_needs_zos_lob_route(column_info, result_descriptors);
+        let use_extended_materialized_blocks = self.zos_lob_internal_depth > 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server);
+        let opnqry_data = {
+            let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
+            ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
+            ddm.add_u32(
+                codepoints::QRYBLKSZ,
+                db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
+            );
+            if has_zos_lobs && use_native_zos_lob_strategy() {
+                ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
+                ddm.add_u16(codepoints::QRYPRCTYP, codepoints::QRYPRCTYP_LMTBLKPRC);
+            } else if use_extended_materialized_blocks {
+                ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
+            }
+            ddm.add_code_point(0x215D, &[0x01]); // QRYCLSIMP = 1 (close on endqry)
+            ddm.build()
+        };
+
+        let corr_id = self.next_correlation_id();
+        let mut writer = DssWriter::new(corr_id);
+        writer.write_request(&opnqry_data, false);
+        let send_buf = writer.finish();
+        self.send_bytes(&send_buf).await?;
+
+        let frames = self.read_reply_frames().await?;
+        let result = self
+            .process_query_reply(&frames, column_info, Some(result_descriptors))
+            .await;
+        if use_native_zos_lob_strategy() {
+            return result;
+        }
+        self.retry_zos_lob_chunking_after_decode_error(
+            sql,
+            result,
+            column_info,
+            result_descriptors,
+            "direct-decode-error",
+        )
+        .await
     }
 
     async fn execute_query_with_reconnect_retry(
@@ -2100,6 +2211,7 @@ impl Client {
                 next_prepared_section: 1,
                 free_prepared_sections: Vec::new(),
                 zos_lob_internal_depth: 0,
+                zos_select_cache: HashMap::new(),
             })),
             pool_checkout: StdMutex::new(None),
         }
@@ -2308,6 +2420,7 @@ impl Client {
         guard.recv_buf.clear();
         guard.next_prepared_section = 1;
         guard.free_prepared_sections.clear();
+        guard.zos_select_cache.clear();
         drop(guard);
 
         if let Some(err) = close_error {
@@ -3807,6 +3920,25 @@ pub(crate) fn use_native_zos_lob_strategy() -> bool {
         })
         .unwrap_or(true)
         || env::var_os("DB2_ZOS_NATIVE_LOB_ONLY").is_some()
+}
+
+fn use_zos_select_cache() -> bool {
+    env::var("DB2_ZOS_SELECT_CACHE")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn should_reprepare_cached_zos_select(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Sql {
+            sqlcode: -514 | -518 | -805,
+            ..
+        }
+    )
 }
 
 #[cfg(test)]
