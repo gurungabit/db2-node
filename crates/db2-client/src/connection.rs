@@ -1757,6 +1757,9 @@ impl ClientInner {
         .is_some_and(|descriptors| descriptors_need_lob_materialization(column_info, descriptors));
 
         if has_lobs {
+            if use_native_zos_lob_strategy() {
+                return timeout.max(native_zos_lob_frame_drain_timeout());
+            }
             timeout.max(zos_lob_frame_drain_timeout())
         } else {
             timeout
@@ -2282,6 +2285,7 @@ const ZOS_DBCLOB_CHUNK_LIMIT: usize = ZOS_CLOB_CHUNK_LIMIT / 2;
 const ZOS_LOB_BATCH_REPLY_TARGET: usize = 4_000_000;
 const ZOS_LOB_CHUNK_WINDOW_TARGET: usize = 160_000;
 const ZOS_LOB_FRAME_DRAIN_TIMEOUT_MS: usize = 250;
+const ZOS_NATIVE_LOB_FRAME_DRAIN_TIMEOUT_MS: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SimpleSelectStar {
@@ -2745,6 +2749,15 @@ fn zos_lob_frame_drain_timeout() -> Duration {
         "DB2_ZOS_LOB_FRAME_DRAIN_MS",
         ZOS_LOB_FRAME_DRAIN_TIMEOUT_MS,
         25,
+        2_000,
+    ) as u64)
+}
+
+pub(crate) fn native_zos_lob_frame_drain_timeout() -> Duration {
+    Duration::from_millis(env_usize(
+        "DB2_ZOS_NATIVE_LOB_FRAME_DRAIN_MS",
+        ZOS_NATIVE_LOB_FRAME_DRAIN_TIMEOUT_MS,
+        5,
         2_000,
     ) as u64)
 }

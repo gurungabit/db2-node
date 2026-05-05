@@ -138,7 +138,12 @@ impl Cursor {
         };
         if has_lobs && crate::connection::use_native_zos_lob_strategy() {
             loop {
-                match timeout(native_lob_frame_drain_timeout(), inner.read_reply_frames()).await {
+                match timeout(
+                    crate::connection::native_zos_lob_frame_drain_timeout(),
+                    inner.read_reply_frames(),
+                )
+                .await
+                {
                     Ok(Ok(mut more_frames)) => {
                         if more_frames.is_empty() {
                             break;
@@ -417,16 +422,6 @@ fn unwrap_extdta_payload(payload: &[u8]) -> &[u8] {
     }
 
     payload
-}
-
-fn native_lob_frame_drain_timeout() -> Duration {
-    Duration::from_millis(
-        env::var("DB2_ZOS_NATIVE_LOB_FRAME_DRAIN_MS")
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .map(|value| value.clamp(25, 2_000))
-            .unwrap_or(250),
-    )
 }
 
 fn debug_hex_enabled() -> bool {
