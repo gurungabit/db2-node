@@ -45,6 +45,7 @@ struct PoolCheckoutHandle {
 struct CachedZosSelect {
     package_id: &'static str,
     section_number: u16,
+    pkgnamcsn: Arc<[u8]>,
     column_info: Vec<ColumnInfo>,
     result_descriptors: Vec<db2_proto::fdoca::ColumnDescriptor>,
 }
@@ -625,12 +626,10 @@ impl ClientInner {
                 if self.zos_lob_internal_depth == 0 && use_zos_select_cache() {
                     if let Some(cached) = self.zos_select_cache.get(sql).cloned() {
                         self.activate_section(cached.package_id, cached.section_number);
-                        let cached_pkgnamcsn =
-                            self.build_pkgnamcsn_for(cached.package_id, cached.section_number);
                         let result = self
                             .open_zos_select(
                                 sql,
-                                &cached_pkgnamcsn,
+                                &cached.pkgnamcsn,
                                 &cached.column_info,
                                 &cached.result_descriptors,
                             )
@@ -705,6 +704,7 @@ impl ClientInner {
                                 CachedZosSelect {
                                     package_id,
                                     section_number,
+                                    pkgnamcsn: pkgnamcsn.clone().into(),
                                     column_info,
                                     result_descriptors,
                                 },
@@ -1778,6 +1778,7 @@ impl ClientInner {
                     cursor_column_info,
                     descriptors,
                     query_instance_id,
+                    self.build_pkgnamcsn_for(self.package_id, self.section_number),
                     self.config.fetch_size,
                 );
                 cursor.pending_row_bytes = std::mem::take(&mut pending_row_bytes);
@@ -3109,14 +3110,15 @@ fn append_zos_lob_combined_chunk_grid_rows(
             let chunk = row
                 .values()
                 .get(first_chunk_value_index + spec_index)
-                .and_then(db2_value_to_string)
-                .unwrap_or_default();
+                .and_then(db2_value_as_str)
+                .unwrap_or("");
             append_zos_lob_chunk_to_value(
                 output_values,
                 row_index,
                 spec.column_index,
                 lob_len,
-                &chunk,
+                spec.start,
+                chunk,
             );
         }
     }
@@ -3179,22 +3181,24 @@ fn append_zos_lob_chunk_to_value(
     row_index: usize,
     column_index: usize,
     lob_len: usize,
+    chunk_start: usize,
     chunk: &str,
 ) {
+    let remaining = lob_len.saturating_sub(chunk_start.saturating_sub(1));
+    let chunk = trim_zos_lob_chunk_to_remaining(chunk, remaining);
+    if chunk.is_empty() {
+        return;
+    }
+
     match output_values
         .get_mut(row_index)
         .and_then(|values| values.get_mut(column_index))
     {
         Some(db2_proto::types::Db2Value::Clob(text)) => {
-            let remaining = lob_len.saturating_sub(text.chars().count());
-            let chunk = trim_zos_lob_chunk_to_remaining(chunk, remaining);
             text.push_str(chunk);
         }
-        Some(value @ db2_proto::types::Db2Value::Null) if !chunk.is_empty() => {
-            let chunk = trim_zos_lob_chunk_to_remaining(chunk, lob_len);
-            if !chunk.is_empty() {
-                *value = db2_proto::types::Db2Value::Clob(chunk.to_string());
-            }
+        Some(value @ db2_proto::types::Db2Value::Null) => {
+            *value = db2_proto::types::Db2Value::Clob(chunk.to_string());
         }
         _ => {}
     }
@@ -3420,6 +3424,22 @@ fn db2_value_to_string(value: &db2_proto::types::Db2Value) -> Option<String> {
         | db2_proto::types::Db2Value::RowId(v)
         | db2_proto::types::Db2Value::Xml(v) => Some(v.clone()),
         db2_proto::types::Db2Value::Null => Some(String::new()),
+        _ => None,
+    }
+}
+
+fn db2_value_as_str(value: &db2_proto::types::Db2Value) -> Option<&str> {
+    match value {
+        db2_proto::types::Db2Value::Char(v)
+        | db2_proto::types::Db2Value::VarChar(v)
+        | db2_proto::types::Db2Value::Clob(v)
+        | db2_proto::types::Db2Value::Date(v)
+        | db2_proto::types::Db2Value::Time(v)
+        | db2_proto::types::Db2Value::Timestamp(v)
+        | db2_proto::types::Db2Value::Decimal(v)
+        | db2_proto::types::Db2Value::RowId(v)
+        | db2_proto::types::Db2Value::Xml(v) => Some(v.as_str()),
+        db2_proto::types::Db2Value::Null => Some(""),
         _ => None,
     }
 }

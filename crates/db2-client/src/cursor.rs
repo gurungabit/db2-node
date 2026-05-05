@@ -19,6 +19,7 @@ pub(crate) struct Cursor {
     column_info: Vec<ColumnInfo>,
     pub(crate) descriptors: Vec<db2_proto::fdoca::ColumnDescriptor>,
     query_instance_id: Option<Vec<u8>>,
+    pkgnamcsn: Vec<u8>,
     fetch_size: u32,
     fetch_calls: usize,
     pub(crate) pending_row_bytes: Vec<u8>,
@@ -32,12 +33,14 @@ impl Cursor {
         column_info: Vec<ColumnInfo>,
         descriptors: Vec<db2_proto::fdoca::ColumnDescriptor>,
         query_instance_id: Option<Vec<u8>>,
+        pkgnamcsn: Vec<u8>,
         fetch_size: u32,
     ) -> Self {
         Cursor {
             column_info,
             descriptors,
             query_instance_id,
+            pkgnamcsn,
             fetch_size,
             fetch_calls: 0,
             pending_row_bytes: Vec::new(),
@@ -57,7 +60,6 @@ impl Cursor {
         }
 
         let corr_id = inner.next_correlation_id();
-        let pkgnamcsn = inner.build_pkgnamcsn_for(inner.package_id, inner.section_number);
         let has_lobs = descriptors_need_lob_fetch(&self.descriptors)
             || column_info_needs_lob_fetch(&self.column_info);
         let collect_diagnostics = crate::connection::query_diagnostics_enabled();
@@ -71,7 +73,7 @@ impl Cursor {
                 );
             }
             db2_proto::commands::cntqry::build_cntqry_with_rtnextdta(
-                &pkgnamcsn,
+                &self.pkgnamcsn,
                 self.query_instance_id.as_deref(),
                 db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
                 Some(-1),
@@ -92,7 +94,7 @@ impl Cursor {
                 ));
             }
             db2_proto::commands::cntqry::build_cntqry(
-                &pkgnamcsn,
+                &self.pkgnamcsn,
                 self.query_instance_id.as_deref(),
                 db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
                 use_extended_materialized_blocks.then_some(-1),
