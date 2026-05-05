@@ -58,6 +58,14 @@ pub(crate) struct ClientInner {
     pub free_prepared_sections: Vec<u16>,
     pub zos_lob_internal_depth: usize,
     zos_lob_catalog_cache: HashMap<(String, String), Vec<CatalogColumn>>,
+    zos_lob_prepared_query_cache: HashMap<String, ZosPreparedQuery>,
+}
+
+#[derive(Clone)]
+struct ZosPreparedQuery {
+    section_number: u16,
+    column_info: Vec<ColumnInfo>,
+    result_descriptors: Vec<db2_proto::fdoca::ColumnDescriptor>,
 }
 
 impl ClientInner {
@@ -229,6 +237,7 @@ impl ClientInner {
         self.next_prepared_section = 1;
         self.free_prepared_sections.clear();
         self.zos_lob_internal_depth = 0;
+        self.zos_lob_prepared_query_cache.clear();
 
         if let Some(mut transport) = self.transport.take() {
             let _ = transport.close().await;
@@ -470,6 +479,7 @@ impl ClientInner {
         self.recv_buf.clear();
         self.next_prepared_section = 1;
         self.free_prepared_sections.clear();
+        self.zos_lob_prepared_query_cache.clear();
         self.session_generation = self.session_generation.wrapping_add(1);
         if self.session_generation == 0 {
             self.session_generation = 1;
@@ -1239,7 +1249,11 @@ impl ClientInner {
         };
 
         self.zos_lob_internal_depth += 1;
-        let result = timeout(step_timeout, Box::pin(self.execute_query(sql, &[]))).await;
+        let result = timeout(
+            step_timeout,
+            Box::pin(self.execute_zos_lob_internal_query_inner(sql)),
+        )
+        .await;
         self.zos_lob_internal_depth = self.zos_lob_internal_depth.saturating_sub(1);
 
         match result {
@@ -1260,6 +1274,106 @@ impl ClientInner {
                 summarize_sql_for_diagnostics(sql)
             ))
         })
+    }
+
+    async fn execute_zos_lob_internal_query_inner(
+        &mut self,
+        sql: &str,
+    ) -> Result<QueryResult, Error> {
+        if !use_zos_lob_prepared_cache()
+            || !sql_is_query(sql)
+            || (!self.zos_lob_prepared_query_cache.contains_key(sql)
+                && self.zos_lob_prepared_query_cache.len() >= ZOS_LOB_PREPARED_CACHE_LIMIT)
+        {
+            return self.execute_query(sql, &[]).await;
+        }
+
+        let prepared = self.prepare_zos_lob_internal_cached_query(sql).await?;
+        let pkgnamcsn = self.build_pkgnamcsn_for(PREPARED_STATEMENT_PKGID, prepared.section_number);
+        self.activate_section(PREPARED_STATEMENT_PKGID, prepared.section_number);
+
+        let corr_id = self.next_correlation_id();
+        let opnqry_data = {
+            let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
+            ddm.add_code_point(codepoints::PKGNAMCSN, &pkgnamcsn);
+            ddm.add_u32(
+                codepoints::QRYBLKSZ,
+                db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
+            );
+            ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
+            ddm.add_code_point(0x215D, &[0x01]); // QRYCLSIMP = 1
+            ddm.build()
+        };
+
+        let mut writer = DssWriter::new(corr_id);
+        writer.write_request(&opnqry_data, false);
+        let send_buf = writer.finish();
+        self.send_bytes(&send_buf).await?;
+
+        let frames = self.read_reply_frames().await?;
+        let result = self
+            .process_query_reply(
+                &frames,
+                &prepared.column_info,
+                Some(&prepared.result_descriptors),
+            )
+            .await;
+        if result.is_err() {
+            self.zos_lob_prepared_query_cache.remove(sql);
+            self.release_prepared_section(prepared.section_number);
+        }
+        result
+    }
+
+    async fn prepare_zos_lob_internal_cached_query(
+        &mut self,
+        sql: &str,
+    ) -> Result<ZosPreparedQuery, Error> {
+        if let Some(prepared) = self.zos_lob_prepared_query_cache.get(sql) {
+            return Ok(prepared.clone());
+        }
+
+        let section_number = self.allocate_prepared_section()?;
+        let corr_id = self.next_correlation_id();
+        let pkgnamcsn = self.build_pkgnamcsn_for(PREPARED_STATEMENT_PKGID, section_number);
+        let prpsqlstt_data = db2_proto::commands::prpsqlstt::build_prpsqlstt_with_sqlda(&pkgnamcsn);
+        let use_zos_sqlstt = self.server_info.as_ref().map_or(false, is_db2_zos_server);
+        let sqlstt_data = build_sqlstt_for_server(sql, use_zos_sqlstt);
+
+        let mut writer = DssWriter::new(corr_id);
+        writer.write_request_next_same_corr(&prpsqlstt_data, true);
+        writer.write_object(&sqlstt_data, false);
+        let send_buf = writer.finish();
+
+        if let Err(err) = self.send_bytes(&send_buf).await {
+            self.release_prepared_section(section_number);
+            return Err(err);
+        }
+
+        let frames = match self.read_prepare_reply_frames().await {
+            Ok(frames) => frames,
+            Err(err) => {
+                self.release_prepared_section(section_number);
+                return Err(err);
+            }
+        };
+        let column_info = match self.parse_prepare_reply(&frames) {
+            Ok(column_info) => column_info,
+            Err(err) => {
+                self.release_prepared_section(section_number);
+                return Err(err);
+            }
+        };
+        let result_descriptors = self.parse_prepare_result_descriptors(&frames);
+
+        let prepared = ZosPreparedQuery {
+            section_number,
+            column_info,
+            result_descriptors,
+        };
+        self.zos_lob_prepared_query_cache
+            .insert(sql.to_string(), prepared.clone());
+        Ok(prepared)
     }
 
     fn cached_zos_lob_catalog_columns(
@@ -2100,6 +2214,7 @@ impl Client {
                 free_prepared_sections: Vec::new(),
                 zos_lob_internal_depth: 0,
                 zos_lob_catalog_cache: HashMap::new(),
+                zos_lob_prepared_query_cache: HashMap::new(),
             })),
             pool_checkout: StdMutex::new(None),
         }
@@ -2339,11 +2454,12 @@ const SQLSTT_SQL_TEXT_LEN_LIMIT: usize = u16::MAX as usize;
 const ZOS_CLOB_INLINE_LIMIT: usize = 32704;
 #[cfg(test)]
 const ZOS_DBCLOB_INLINE_LIMIT: usize = ZOS_CLOB_INLINE_LIMIT / 2;
-const ZOS_CLOB_CHUNK_LIMIT: usize = 16_000;
+const ZOS_CLOB_CHUNK_LIMIT: usize = 30_000;
 const ZOS_DBCLOB_CHUNK_LIMIT: usize = ZOS_CLOB_CHUNK_LIMIT / 2;
 const ZOS_LOB_BATCH_REPLY_TARGET: usize = 4_000_000;
-const ZOS_LOB_CHUNK_WINDOW_TARGET: usize = 160_000;
+const ZOS_LOB_CHUNK_WINDOW_TARGET: usize = 192_000;
 const ZOS_LOB_FRAME_DRAIN_TIMEOUT_MS: usize = 250;
+const ZOS_LOB_PREPARED_CACHE_LIMIT: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SimpleSelectStar {
@@ -2589,22 +2705,14 @@ fn build_zos_lob_combined_chunk_grid_query(
         })
         .collect::<Vec<_>>();
     let mut idents = Vec::<String>::new();
-    let mut length_exprs = Vec::<(String, String)>::new();
     for spec in specs {
         let column = &columns[spec.column_index];
         let ident = quote_sql_identifier(&column.name);
         if !idents.iter().any(|existing| existing == &ident) {
             idents.push(ident.clone());
         }
-        let len_alias = quote_sql_identifier(&lob_len_alias(spec.column_index));
-        if !length_exprs
-            .iter()
-            .any(|(_expr, alias)| alias == &len_alias)
-        {
-            length_exprs.push((format!("LENGTH({ident})"), len_alias));
-        }
     }
-    let source_sql = build_zos_numbered_multi_column_source_sql(parsed, &idents, &length_exprs);
+    let source_sql = build_zos_numbered_multi_column_source_sql(parsed, &idents, &[]);
     format!(
         "SELECT \"DB2NODE_RN\", {} FROM ({source_sql}) AS DB2NODE_LOB_SRC WHERE \"DB2NODE_RN\" BETWEEN {} AND {}",
         projection.join(", "),
@@ -2618,31 +2726,16 @@ fn build_zos_lob_initial_combined_grid_query(
     columns: &[CatalogColumn],
     specs: &[LobChunkSpec],
 ) -> String {
-    let source_idents = columns
-        .iter()
-        .map(|column| quote_sql_identifier(&column.name))
-        .collect::<Vec<_>>();
-    let source_lengths = columns
-        .iter()
-        .enumerate()
-        .filter_map(|(index, column)| {
-            column.is_lob().then(|| {
-                let ident = quote_sql_identifier(&column.name);
-                (
-                    format!("LENGTH({ident})"),
-                    quote_sql_identifier(&lob_len_alias(index)),
-                )
-            })
-        })
-        .collect::<Vec<_>>();
     let base_projection = columns
         .iter()
         .enumerate()
         .map(|(index, column)| {
             let ident = quote_sql_identifier(&column.name);
             if column.is_lob() {
-                let len_ident = quote_sql_identifier(&lob_len_alias(index));
-                format!("CAST({len_ident} AS VARCHAR(32)) AS {len_ident}")
+                format!(
+                    "CAST(LENGTH({ident}) AS VARCHAR(32)) AS {}",
+                    quote_sql_identifier(&lob_len_alias(index))
+                )
             } else if column.is_rowid() {
                 format!("HEX({ident}) AS {ident}")
             } else {
@@ -2673,12 +2766,16 @@ fn build_zos_lob_initial_combined_grid_query(
         .into_iter()
         .chain(chunk_projection)
         .collect::<Vec<_>>();
-    let source_sql =
-        build_zos_numbered_multi_column_source_sql(parsed, &source_idents, &source_lengths);
-    format!(
-        "SELECT \"DB2NODE_RN\", {} FROM ({source_sql}) AS DB2NODE_LOB_SRC",
-        projection.join(", ")
-    )
+    if parsed.suffix.trim().is_empty() {
+        format!("SELECT {} FROM {}", projection.join(", "), parsed.table_ref)
+    } else {
+        format!(
+            "SELECT {} FROM {} {}",
+            projection.join(", "),
+            parsed.table_ref,
+            parsed.suffix
+        )
+    }
 }
 
 #[cfg(test)]
@@ -2695,7 +2792,7 @@ fn build_zos_lob_chunk_projection(
 
 fn build_zos_lob_chunk_projection_with_len(
     ident: &str,
-    len_expr: &str,
+    _len_expr: &str,
     column: &CatalogColumn,
     start: usize,
     len: usize,
@@ -2707,7 +2804,7 @@ fn build_zos_lob_chunk_projection_with_len(
         format!("VARCHAR({len})")
     };
     format!(
-        "CASE WHEN {len_expr} >= {start} THEN CAST(SUBSTR({ident}, {start}, {len}) AS {cast_type}) ELSE CAST(NULL AS {cast_type}) END AS {}",
+        "CAST(SUBSTR({ident}, {start}, {len}) AS {cast_type}) AS {}",
         quote_sql_identifier(alias)
     )
 }
@@ -2810,9 +2907,19 @@ fn zos_lob_initial_chunk_specs(columns: &[CatalogColumn]) -> Vec<LobChunkSpec> {
 
 fn zos_lob_chunk_limit(column: &CatalogColumn) -> usize {
     if column.is_dbclob() {
-        ZOS_DBCLOB_CHUNK_LIMIT
+        env_usize(
+            "DB2_ZOS_DBCLOB_CHUNK_CHARS",
+            ZOS_DBCLOB_CHUNK_LIMIT,
+            4_000,
+            15_000,
+        )
     } else {
-        ZOS_CLOB_CHUNK_LIMIT
+        env_usize(
+            "DB2_ZOS_CLOB_CHUNK_CHARS",
+            ZOS_CLOB_CHUNK_LIMIT,
+            8_000,
+            30_000,
+        )
     }
 }
 
@@ -2841,6 +2948,15 @@ fn zos_lob_frame_drain_timeout() -> Duration {
         25,
         2_000,
     ) as u64)
+}
+
+fn use_zos_lob_prepared_cache() -> bool {
+    env::var("DB2_ZOS_LOB_PREPARED_CACHE")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
 }
 
 fn env_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
@@ -3023,7 +3139,7 @@ fn materialize_zos_lob_initial_grid_rows(
         for (column_index, column) in catalog_columns.iter().enumerate() {
             let value = row
                 .values()
-                .get(1 + column_index)
+                .get(column_index)
                 .cloned()
                 .unwrap_or(db2_proto::types::Db2Value::Null);
             if column.is_lob() {
@@ -3047,7 +3163,7 @@ fn materialize_zos_lob_initial_grid_rows(
         specs,
         &lob_lengths_by_column,
         &mut output_values,
-        1 + catalog_columns.len(),
+        catalog_columns.len(),
     )?;
 
     Ok((output_values, lob_lengths_by_column))
@@ -3127,18 +3243,7 @@ fn build_zos_numbered_multi_column_source_sql(
     idents: &[String],
     length_exprs: &[(String, String)],
 ) -> String {
-    let mut projection_parts = Vec::new();
-    projection_parts.extend(idents.iter().cloned());
-    projection_parts.extend(
-        length_exprs
-            .iter()
-            .map(|(expr, alias)| format!("{expr} AS {alias}")),
-    );
-    let projection = if projection_parts.is_empty() {
-        "1".to_string()
-    } else {
-        projection_parts.join(", ")
-    };
+    let projection = build_zos_source_projection(idents, length_exprs);
     if parsed.suffix.trim().is_empty() {
         format!(
             "SELECT {projection}, ROW_NUMBER() OVER() AS \"DB2NODE_RN\" FROM {}",
@@ -3149,6 +3254,21 @@ fn build_zos_numbered_multi_column_source_sql(
             "SELECT {projection}, ROW_NUMBER() OVER() AS \"DB2NODE_RN\" FROM {} {}",
             parsed.table_ref, parsed.suffix
         )
+    }
+}
+
+fn build_zos_source_projection(idents: &[String], length_exprs: &[(String, String)]) -> String {
+    let mut projection_parts = Vec::new();
+    projection_parts.extend(idents.iter().cloned());
+    projection_parts.extend(
+        length_exprs
+            .iter()
+            .map(|(expr, alias)| format!("{expr} AS {alias}")),
+    );
+    if projection_parts.is_empty() {
+        "1".to_string()
+    } else {
+        projection_parts.join(", ")
     }
 }
 
@@ -5704,13 +5824,13 @@ mod tests {
 
         assert!(sql.starts_with("SELECT \"DB2NODE_RN\", "));
         assert!(sql.contains(
-            "CASE WHEN LENGTH(\"INSP_RPT_DETL_DOC\") >= 1 THEN CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_CHUNK_1\""
+            "CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 1, 16000) AS VARCHAR(16000)) AS \"DB2NODE_LOB_CHUNK_1\""
         ));
         assert!(sql.contains(
-            "CASE WHEN LENGTH(\"INSP_RPT_DETL_DOC\") >= 16001 THEN CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 16001, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_CHUNK_2\""
+            "CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 16001, 16000) AS VARCHAR(16000)) AS \"DB2NODE_LOB_CHUNK_2\""
         ));
         assert!(sql.contains(
-            "CASE WHEN LENGTH(\"INSP_RPT_DETL_DOC\") >= 32001 THEN CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 32001, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_CHUNK_3\""
+            "CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 32001, 16000) AS VARCHAR(16000)) AS \"DB2NODE_LOB_CHUNK_3\""
         ));
         assert!(sql.contains("WHERE \"DB2NODE_RN\" BETWEEN 1 AND 3"));
         assert!(!sql.contains("OFFSET"));
@@ -5756,13 +5876,13 @@ mod tests {
 
         assert!(sql.starts_with("SELECT \"DB2NODE_RN\", "));
         assert!(sql.contains(
-            "CASE WHEN \"DB2NODE_LOB_LEN_2\" >= 1 THEN CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_C2_K1\""
+            "CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 1, 16000) AS VARCHAR(16000)) AS \"DB2NODE_LOB_C2_K1\""
         ));
         assert!(sql.contains(
-            "CASE WHEN \"DB2NODE_LOB_LEN_3\" >= 1 THEN CAST(SUBSTR(\"UNDWR_ACTN_DETL_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_C3_K1\""
+            "CAST(SUBSTR(\"UNDWR_ACTN_DETL_DOC\", 1, 16000) AS VARCHAR(16000)) AS \"DB2NODE_LOB_C3_K1\""
         ));
         assert!(sql.contains(
-            "SELECT \"INSP_RPT_DETL_DOC\", \"UNDWR_ACTN_DETL_DOC\", LENGTH(\"INSP_RPT_DETL_DOC\") AS \"DB2NODE_LOB_LEN_2\", LENGTH(\"UNDWR_ACTN_DETL_DOC\") AS \"DB2NODE_LOB_LEN_3\", ROW_NUMBER() OVER() AS \"DB2NODE_RN\""
+            "SELECT \"INSP_RPT_DETL_DOC\", \"UNDWR_ACTN_DETL_DOC\", ROW_NUMBER() OVER() AS \"DB2NODE_RN\""
         ));
         assert!(sql.contains("WHERE \"DB2NODE_RN\" BETWEEN 1 AND 10"));
         assert!(!sql.contains("OFFSET"));
@@ -5794,13 +5914,17 @@ mod tests {
 
         let sql = build_zos_lob_initial_combined_grid_query(&parsed, &columns, &specs);
 
-        assert!(sql.starts_with("SELECT \"DB2NODE_RN\", "));
+        assert!(sql.starts_with("SELECT "));
+        assert!(!sql.starts_with("SELECT \"DB2NODE_RN\", "));
         assert!(sql.contains("CAST(\"INSP_RPT_ID\" AS VARCHAR(128)) AS \"INSP_RPT_ID\""));
-        assert!(sql.contains("CAST(\"DB2NODE_LOB_LEN_2\" AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_2\""));
         assert!(sql.contains(
-            "CASE WHEN \"DB2NODE_LOB_LEN_2\" >= 1 THEN CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_C2_K1\""
+            "CAST(LENGTH(\"INSP_RPT_DETL_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_2\""
         ));
-        assert!(sql.contains("LENGTH(\"INSP_RPT_DETL_DOC\") AS \"DB2NODE_LOB_LEN_2\""));
+        assert!(sql.contains(
+            "CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 1, 16000) AS VARCHAR(16000)) AS \"DB2NODE_LOB_C2_K1\""
+        ));
+        assert!(sql.contains("LENGTH(\"INSP_RPT_DETL_DOC\")"));
+        assert!(!sql.contains("ROW_NUMBER() OVER() AS \"DB2NODE_RN\""));
         assert!(sql.contains("FETCH FIRST 10 ROWS ONLY"));
         assert!(!sql.contains("OFFSET"));
     }
