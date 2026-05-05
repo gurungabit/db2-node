@@ -1,6 +1,6 @@
 {
   "name": "@gurungabit/db2-node",
-  "version": "0.1.7-zos.124",
+  "version": "0.1.7-zos.125",
   "description": "Zero-dependency DB2 driver for Node.js, built with pure Rust",
   "main": "index.cjs",
   "types": "types.d.ts",

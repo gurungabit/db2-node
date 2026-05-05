@@ -250,6 +250,31 @@ impl ClientInner {
         Ok(frames)
     }
 
+    async fn drain_zos_open_reply_frames(
+        &mut self,
+        frames: &mut Vec<DssFrame>,
+    ) -> Result<(), Error> {
+        let drain_timeout = zos_non_lob_open_drain_timeout();
+        if drain_timeout.is_zero() {
+            return Ok(());
+        }
+
+        loop {
+            let more_frames = match timeout(drain_timeout, self.read_reply_frames()).await {
+                Ok(Ok(frames)) => frames,
+                Ok(Err(err)) => return Err(err),
+                Err(_) => break,
+            };
+
+            if more_frames.is_empty() {
+                break;
+            }
+            frames.extend(more_frames);
+        }
+
+        Ok(())
+    }
+
     fn frame_drain_timeout(&self) -> Duration {
         let timeout = self.config.frame_drain_timeout;
         if self.zos_lob_internal_depth > 0
@@ -856,6 +881,10 @@ impl ClientInner {
         let has_zos_lobs = result_metadata_needs_zos_lob_route(column_info, result_descriptors);
         let use_extended_materialized_blocks = self.zos_lob_internal_depth > 0
             && self.server_info.as_ref().map_or(false, is_db2_zos_server);
+        let use_zos_non_lob_extra_blocks = self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && !has_zos_lobs
+            && use_zos_non_lob_extra_blocks();
         let opnqry_data = {
             let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
             ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
@@ -866,7 +895,7 @@ impl ClientInner {
             if has_zos_lobs && use_native_zos_lob_strategy() {
                 ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
                 ddm.add_u16(codepoints::QRYPRCTYP, codepoints::QRYPRCTYP_LMTBLKPRC);
-            } else if use_extended_materialized_blocks {
+            } else if use_extended_materialized_blocks || use_zos_non_lob_extra_blocks {
                 ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
             }
             ddm.add_code_point(0x215D, &[0x01]); // QRYCLSIMP = 1 (close on endqry)
@@ -879,7 +908,10 @@ impl ClientInner {
         let send_buf = writer.finish();
         self.send_bytes(&send_buf).await?;
 
-        let frames = self.read_reply_frames().await?;
+        let mut frames = self.read_reply_frames().await?;
+        if (use_extended_materialized_blocks || use_zos_non_lob_extra_blocks) && !has_zos_lobs {
+            self.drain_zos_open_reply_frames(&mut frames).await?;
+        }
         let result = self
             .process_query_reply(&frames, column_info, Some(result_descriptors))
             .await;
@@ -2945,6 +2977,19 @@ fn zos_lob_chunk_window_target() -> usize {
         8_000,
         512_000,
     )
+}
+
+fn use_zos_non_lob_extra_blocks() -> bool {
+    env::var("DB2_ZOS_NON_LOB_EXTRA_BLOCKS")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn zos_non_lob_open_drain_timeout() -> Duration {
+    Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_OPEN_DRAIN_MS", 2, 0, 25) as u64)
 }
 
 fn zos_lob_frame_drain_timeout() -> Duration {
