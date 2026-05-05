@@ -86,18 +86,27 @@ impl Cursor {
                     .server_info
                     .as_ref()
                     .map_or(false, crate::connection::is_db2_zos_server);
+            let use_zos_non_lob_extra_blocks = !has_lobs
+                && inner.zos_lob_internal_depth == 0
+                && inner
+                    .server_info
+                    .as_ref()
+                    .map_or(false, crate::connection::is_db2_zos_server)
+                && use_zos_non_lob_cntqry_extra_blocks();
+            let use_extra_blocks = use_extended_materialized_blocks || use_zos_non_lob_extra_blocks;
             if collect_diagnostics {
                 self.last_fetch_diagnostics.push(format!(
-                    "cntqry_request has_lobs={} native_lobs=false rdbnam=false maxblkext={} qryrowset=none rtnextdta=none",
+                    "cntqry_request has_lobs={} native_lobs=false rdbnam=false maxblkext={} qryrowset=none rtnextdta=none non_lob_extra_blocks={}",
                     has_lobs,
-                    if use_extended_materialized_blocks { "-1" } else { "none" }
+                    if use_extra_blocks { "-1" } else { "none" },
+                    use_zos_non_lob_extra_blocks
                 ));
             }
             db2_proto::commands::cntqry::build_cntqry(
                 &self.pkgnamcsn,
                 self.query_instance_id.as_deref(),
                 db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
-                use_extended_materialized_blocks.then_some(-1),
+                use_extra_blocks.then_some(-1),
                 None,
             )
         };
@@ -205,6 +214,45 @@ impl Cursor {
                     collect_diagnostics,
                 )?;
                 apply_extdta_payloads_to_rows(&mut rows, &self.descriptors, &extdta_payloads);
+            }
+        }
+
+        if should_drain_zos_non_lob_fetch_end(inner, has_lobs, &rows, end_of_query) {
+            let drain_timeout = zos_non_lob_fetch_end_drain_timeout();
+            loop {
+                let more_frames = match timeout(drain_timeout, inner.read_reply_frames()).await {
+                    Ok(Ok(frames)) => frames,
+                    Ok(Err(err)) => return Err(err),
+                    Err(_) => {
+                        if collect_diagnostics {
+                            self.last_fetch_diagnostics.push(format!(
+                                "non_lob_end_drain timed_out rows={} pending_tail={}",
+                                rows.len(),
+                                self.pending_row_bytes.len()
+                            ));
+                        }
+                        break;
+                    }
+                };
+                if more_frames.is_empty() {
+                    break;
+                }
+                if collect_diagnostics {
+                    self.last_fetch_diagnostics.push(format!(
+                        "non_lob_end_drain extra_frames={}",
+                        more_frames.len()
+                    ));
+                }
+                self.process_fetch_frames(
+                    &more_frames,
+                    &mut rows,
+                    &mut extdta_payloads,
+                    &mut end_of_query,
+                    collect_diagnostics,
+                )?;
+                if end_of_query {
+                    break;
+                }
             }
         }
 
@@ -348,6 +396,44 @@ impl Cursor {
 
         Ok(())
     }
+}
+
+fn should_drain_zos_non_lob_fetch_end(
+    inner: &ClientInner,
+    has_lobs: bool,
+    rows: &[Row],
+    end_of_query: bool,
+) -> bool {
+    !has_lobs
+        && !rows.is_empty()
+        && !end_of_query
+        && inner.zos_lob_internal_depth == 0
+        && inner
+            .server_info
+            .as_ref()
+            .map_or(false, crate::connection::is_db2_zos_server)
+        && !zos_non_lob_fetch_end_drain_timeout().is_zero()
+}
+
+fn use_zos_non_lob_cntqry_extra_blocks() -> bool {
+    env::var("DB2_ZOS_NON_LOB_CNTQRY_EXTRA_BLOCKS")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn zos_non_lob_fetch_end_drain_timeout() -> Duration {
+    Duration::from_millis(env_u64("DB2_ZOS_NON_LOB_FETCH_END_DRAIN_MS", 2, 0, 25))
+}
+
+fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(default)
 }
 
 fn native_fetch_needs_more_frames(
