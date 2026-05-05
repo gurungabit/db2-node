@@ -203,6 +203,33 @@ impl ClientInner {
         Ok(frames)
     }
 
+    async fn read_zos_select_prepare_reply_frames(&mut self) -> Result<Vec<DssFrame>, Error> {
+        let mut frames = self.read_reply_frames().await?;
+        if prepare_frames_have_result_metadata(&frames) {
+            return Ok(frames);
+        }
+
+        let frame_drain_timeout = self.frame_drain_timeout();
+        loop {
+            let more_frames = match timeout(frame_drain_timeout, self.read_reply_frames()).await {
+                Ok(Ok(frames)) => frames,
+                Ok(Err(err)) => return Err(err),
+                Err(_) => break,
+            };
+
+            if more_frames.is_empty() {
+                break;
+            }
+
+            frames.extend(more_frames);
+            if prepare_frames_have_result_metadata(&frames) {
+                break;
+            }
+        }
+
+        Ok(frames)
+    }
+
     fn frame_drain_timeout(&self) -> Duration {
         let timeout = self.config.frame_drain_timeout;
         if self.zos_lob_internal_depth > 0
@@ -581,7 +608,7 @@ impl ClientInner {
                 let send_buf = writer.finish();
                 self.send_bytes(&send_buf).await?;
 
-                let frames = self.read_prepare_reply_frames().await?;
+                let frames = self.read_zos_select_prepare_reply_frames().await?;
                 let column_info = self.parse_prepare_reply(&frames)?;
                 let result_descriptors = self.parse_prepare_result_descriptors(&frames);
 
@@ -1486,7 +1513,18 @@ impl ClientInner {
         // DB2 LUW can stream additional QRYDTA blocks immediately after OPNQRY.
         // Drain those frames before sending CNTQRY, otherwise the server may reject
         // the fetch request as out-of-sequence while the original reply is still active.
-        while !end_of_query {
+        //
+        // Db2 for z/OS non-LOB cursors have proven happier and much faster when
+        // we move straight to CNTQRY instead of spending a speculative drain
+        // timeout here. Keep the drain for LOB cursors, where EXTDTA may arrive
+        // as follow-up frames.
+        let should_drain_initial_query_frames = self.should_drain_initial_query_frames(
+            column_info,
+            sqldard_descriptors.as_ref(),
+            qrydsc_descriptors.as_ref(),
+            prefer_sqldard_descriptors,
+        );
+        while !end_of_query && should_drain_initial_query_frames {
             let drain_timeout = self.query_frame_drain_timeout(
                 column_info,
                 sqldard_descriptors.as_ref(),
@@ -1764,6 +1802,27 @@ impl ClientInner {
         } else {
             timeout
         }
+    }
+
+    fn should_drain_initial_query_frames(
+        &self,
+        column_info: &[ColumnInfo],
+        sqldard_descriptors: Option<&Vec<db2_proto::fdoca::ColumnDescriptor>>,
+        qrydsc_descriptors: Option<&Vec<db2_proto::fdoca::ColumnDescriptor>>,
+        prefer_sqldard_descriptors: bool,
+    ) -> bool {
+        let has_lobs = preferred_descriptor_vec(
+            sqldard_descriptors,
+            qrydsc_descriptors,
+            prefer_sqldard_descriptors,
+        )
+        .is_some_and(|descriptors| descriptors_need_lob_materialization(column_info, descriptors));
+
+        if self.server_info.as_ref().map_or(false, is_db2_zos_server) && !has_lobs {
+            return false;
+        }
+
+        true
     }
 
     /// Process reply frames from an execute (non-query) statement.
@@ -4903,6 +4962,18 @@ fn preferred_descriptor_vec<'a>(
     } else {
         qrydsc_descriptors.or(sqldard_descriptors)
     }
+}
+
+fn prepare_frames_have_result_metadata(frames: &[DssFrame]) -> bool {
+    frames.iter().any(|frame| {
+        ClientInner::parse_ddm_objects(&frame.payload)
+            .ok()
+            .is_some_and(|objects| {
+                objects
+                    .iter()
+                    .any(|obj| obj.code_point == codepoints::SQLDARD)
+            })
+    })
 }
 
 fn apply_extdta_payloads_to_rows(
