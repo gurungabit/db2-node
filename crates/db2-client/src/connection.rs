@@ -2285,7 +2285,7 @@ const ZOS_DBCLOB_CHUNK_LIMIT: usize = ZOS_CLOB_CHUNK_LIMIT / 2;
 const ZOS_LOB_BATCH_REPLY_TARGET: usize = 4_000_000;
 const ZOS_LOB_CHUNK_WINDOW_TARGET: usize = 160_000;
 const ZOS_LOB_FRAME_DRAIN_TIMEOUT_MS: usize = 250;
-const ZOS_NATIVE_LOB_FRAME_DRAIN_TIMEOUT_MS: usize = 25;
+const ZOS_NATIVE_LOB_FRAME_DRAIN_TIMEOUT_MS: usize = 250;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SimpleSelectStar {
@@ -2757,7 +2757,7 @@ pub(crate) fn native_zos_lob_frame_drain_timeout() -> Duration {
     Duration::from_millis(env_usize(
         "DB2_ZOS_NATIVE_LOB_FRAME_DRAIN_MS",
         ZOS_NATIVE_LOB_FRAME_DRAIN_TIMEOUT_MS,
-        5,
+        25,
         2_000,
     ) as u64)
 }
