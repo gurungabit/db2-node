@@ -46,3 +46,60 @@ test('memory ODBCResult supports fetch APIs', () => {
 test('sync database APIs fail loudly instead of pretending to block', () => {
   assert.throws(() => ibmdb.openSync('DATABASE=D;HOSTNAME=h;UID=u;PWD=p'), /not supported/)
 })
+
+test('compat Pool.connect propagates async errors to callback and promise callers', async () => {
+  const pool = new ibmdb.Pool()
+  const failure = new Error('bad credentials')
+  pool._native = {
+    connect: async () => {
+      throw failure
+    },
+  }
+
+  await assert.rejects(pool.connect(), /bad credentials/)
+
+  await new Promise((resolve, reject) => {
+    pool.connect((error) => {
+      try {
+        assert.equal(error, failure)
+        resolve()
+      } catch (assertionError) {
+        reject(assertionError)
+      }
+    })
+  })
+})
+
+test('compat Pool.open simple query uses native Pool.query fast path', async () => {
+  const pool = new ibmdb.Pool()
+  const calls = []
+  pool._native = {
+    acquire: async () => {
+      calls.push('acquire')
+      return {
+        query: async () => {
+          throw new Error('sticky client query should not be used for simple pool queries')
+        },
+      }
+    },
+    release: async () => {
+      calls.push('release')
+    },
+    query: async (sql, params) => {
+      calls.push(['query', sql, params])
+      return {
+        rows: [{ A: 1 }],
+        columns: [{ name: 'A', typeName: 'INTEGER', nullable: false }],
+        rowCount: 1,
+        diagnostics: [],
+      }
+    },
+  }
+
+  const db = await pool.open('unused')
+  const rows = await db.query('VALUES ?', [1])
+
+  assert.deepEqual(rows, [{ A: 1 }])
+  assert.deepEqual(calls, ['acquire', 'release', ['query', 'VALUES ?', [1]]])
+  await db.close()
+})

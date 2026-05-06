@@ -327,9 +327,10 @@ class ODBCStatement {
 }
 
 class Database {
-  constructor(client, onClose) {
+  constructor(client, onClose, pool) {
     this._client = client
     this._onClose = onClose
+    this._pool = pool
     this._closed = false
     this._transaction = null
   }
@@ -338,11 +339,21 @@ class Database {
     return this._transaction || this._client
   }
 
+  async _ensureClient() {
+    if (this._client) return this._client
+    if (!this._pool) throw new Error('Database is not connected')
+    this._client = await this._pool.acquire()
+    return this._client
+  }
+
   query(sqlQuery, bindingParameters, callback) {
     const args = normalizeQueryArgs(sqlQuery, bindingParameters, callback)
     return callbackOrPromiseMany(
       async () => {
-        const result = await this._executor().query(args.sql, args.params || null)
+        const executor = this._executor()
+        const result = executor
+          ? await executor.query(args.sql, args.params || null)
+          : await this._pool.query(args.sql, args.params || null)
         const rows = args.noResults ? [] : result.rows
         return { rows, sqlca: sqlcaFromResult(result) }
       },
@@ -359,7 +370,10 @@ class Database {
     const args = normalizeQueryArgs(sqlQuery, bindingParameters, callback)
     return callbackOrPromiseMany(
       async () => {
-        const result = await this._executor().query(args.sql, args.params || null)
+        const executor = this._executor()
+        const result = executor
+          ? await executor.query(args.sql, args.params || null)
+          : await this._pool.query(args.sql, args.params || null)
         return new ODBCResult(result)
       },
       args.callback,
@@ -384,7 +398,10 @@ class Database {
 
   prepare(sql, callback) {
     return callbackOrPromise(
-      async () => new ODBCStatement(await this._executor().prepare(sql)),
+      async () => {
+        const client = await this._ensureClient()
+        return new ODBCStatement(await client.prepare(sql))
+      },
       callback
     )
   }
@@ -395,7 +412,8 @@ class Database {
 
   beginTransaction(callback) {
     return callbackOrPromise(async () => {
-      this._transaction = await this._client.beginTransaction()
+      const client = await this._ensureClient()
+      this._transaction = await client.beginTransaction()
     }, callback)
   }
 
@@ -439,9 +457,10 @@ class Database {
       }
       if (this._onClose) {
         await this._onClose(this._client)
-      } else {
+      } else if (this._client) {
         await this._client.close()
       }
+      this._client = null
     }, callback)
   }
 
@@ -465,7 +484,10 @@ class Database {
 
   getInfo(infoType, infoLength, callback) {
     if (typeof infoLength === 'function') callback = infoLength
-    return callbackOrPromise(async () => this._client.serverInfo(), callback)
+    return callbackOrPromise(async () => {
+      const client = await this._ensureClient()
+      return client.serverInfo()
+    }, callback)
   }
 
   getInfoSync() {
@@ -482,9 +504,13 @@ function open(connectionString, options, callback) {
   return callbackOrPromise(
     async () => {
       const config = parseConnectionString(connectionString, options)
-      const client = new JsClient(config)
-      await client.connect()
-      return new Database(client)
+      const pool = new JsPool({ ...config, maxConnections: 1 })
+      const validationClient = await pool.acquire()
+      await pool.release(validationClient)
+      return new Database(null, async (releasedClient) => {
+        if (releasedClient) await pool.release(releasedClient)
+        await pool.close()
+      }, pool)
     },
     callback
   )
@@ -506,40 +532,54 @@ class Pool {
     }
   }
 
-  connect() {
-    return this._native.connect()
+  _requireNative() {
+    if (!this._native) {
+      throw new Error('Pool is not initialized; pass a config to new Pool(config) or call init/initAsync/open first')
+    }
+    return this._native
   }
 
-  warmup() {
-    return this._native.warmup()
+  connect(callback) {
+    return callbackOrPromise(() => this._requireNative().connect(), callback)
   }
 
-  query(sql, params) {
-    return this._native.query(sql, params)
+  warmup(callback) {
+    return callbackOrPromise(() => this._requireNative().warmup(), callback)
   }
 
-  acquire() {
-    return this._native.acquire()
+  query(sql, params, callback) {
+    if (typeof params === 'function') {
+      callback = params
+      params = undefined
+    }
+    return callbackOrPromise(() => this._requireNative().query(sql, params || null), callback)
   }
 
-  release(client) {
-    return this._native.release(client)
+  acquire(callback) {
+    return callbackOrPromise(() => this._requireNative().acquire(), callback)
   }
 
-  idleCount() {
-    return this._native.idleCount()
+  release(client, callback) {
+    return callbackOrPromise(() => this._requireNative().release(client), callback)
   }
 
-  activeCount() {
-    return this._native.activeCount()
+  idleCount(callback) {
+    return callbackOrPromise(() => this._requireNative().idleCount(), callback)
   }
 
-  totalCount() {
-    return this._native.totalCount()
+  activeCount(callback) {
+    return callbackOrPromise(() => this._requireNative().activeCount(), callback)
   }
 
-  maxConnections() {
-    return this._native.maxConnections()
+  totalCount(callback) {
+    return callbackOrPromise(() => this._requireNative().totalCount(), callback)
+  }
+
+  maxConnections(callback) {
+    if (typeof callback === 'function') {
+      return callbackOrPromise(() => this._requireNative().maxConnections(), callback)
+    }
+    return this._requireNative().maxConnections()
   }
 
   setMaxPoolSize(size) {
@@ -560,7 +600,7 @@ class Pool {
   initAsync(size, connectionString, callback) {
     return callbackOrPromise(async () => {
       this.init(size, connectionString)
-      await this._native.connect()
+      await this._requireNative().connect()
     }, callback)
   }
 
@@ -573,11 +613,13 @@ class Pool {
           this._native = new JsPool(config)
         }
 
-        const client = await this._native.acquire()
-        const db = new Database(client, async (releasedClient) => {
-          await this._native.release(releasedClient)
+        const validationClient = await this._native.acquire()
+        await this._native.release(validationClient)
+
+        const db = new Database(null, async (releasedClient) => {
+          if (releasedClient) await this._native.release(releasedClient)
           this._connections.delete(db)
-        })
+        }, this._native)
         this._connections.add(db)
         return db
       },
@@ -591,7 +633,7 @@ class Pool {
 
   close(callback) {
     if (this._nativeMode) {
-      return callbackOrPromise(() => this._native.close(), callback)
+      return callbackOrPromise(() => this._requireNative().close(), callback)
     }
     return callbackOrPromise(async () => {
       for (const connection of Array.from(this._connections)) {

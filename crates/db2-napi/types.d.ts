@@ -109,17 +109,20 @@ export class Database {
 
 export class Pool {
   constructor(config?: JsPoolConfig)
-  connect(): Promise<void>
-  warmup(): Promise<number>
+  connect(callback?: (err?: Error | null) => void): Promise<void> | void
+  warmup(callback?: (err: Error | null, created?: number) => void): Promise<number> | void
   query(sql: string, params?: any[]): Promise<any>
+  query(sql: string, callback: (err: Error | null, result: any) => void): void
+  query(sql: string, params: any[], callback: (err: Error | null, result: any) => void): void
   acquire(): Promise<JsClient>
-  release(client: JsClient): Promise<void>
+  acquire(callback: (err: Error | null, client: JsClient) => void): void
+  release(client: JsClient, callback?: (err?: Error | null) => void): Promise<void> | void
   close(callback?: (err?: Error | null) => void): Promise<void> | void
   closeSync(): boolean
-  idleCount(): Promise<number>
-  activeCount(): Promise<number>
-  totalCount(): Promise<number>
-  maxConnections(): number
+  idleCount(callback?: (err: Error | null, count?: number) => void): Promise<number> | void
+  activeCount(callback?: (err: Error | null, count?: number) => void): Promise<number> | void
+  totalCount(callback?: (err: Error | null, count?: number) => void): Promise<number> | void
+  maxConnections(callback?: (err: Error | null, count?: number) => void): number | void
   open(connectionString: ConnectionString, callback: (err: Error | null, conn: Database) => void): void
   open(connectionString: ConnectionString): Promise<Database>
   openSync(connectionString: ConnectionString): never
