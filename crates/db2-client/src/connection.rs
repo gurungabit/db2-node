@@ -50,6 +50,7 @@ struct CachedZosSelect {
     column_info: Vec<ColumnInfo>,
     result_descriptors: Vec<db2_proto::fdoca::ColumnDescriptor>,
     query_instance_id: Option<Arc<[u8]>>,
+    pipeline_fetch_after_open: bool,
 }
 
 #[derive(Clone)]
@@ -61,6 +62,7 @@ struct CachedZosSelectMetadata {
 struct ZosSelectOpenResult {
     result: QueryResult,
     query_instance_id: Option<Vec<u8>>,
+    pipeline_fetch_after_open: bool,
 }
 
 static ZOS_SELECT_METADATA_CACHE: OnceLock<StdMutex<HashMap<String, CachedZosSelectMetadata>>> =
@@ -719,14 +721,17 @@ impl ClientInner {
                                 &cached.column_info,
                                 &cached.result_descriptors,
                                 cached_query_instance_id.as_deref(),
+                                cached.pipeline_fetch_after_open,
                             )
                             .await;
                         match result {
                             Ok(opened) => {
-                                if let Some(query_instance_id) = opened.query_instance_id {
-                                    if let Some(cached) = self.zos_select_cache.get_mut(sql) {
+                                if let Some(cached) = self.zos_select_cache.get_mut(sql) {
+                                    if let Some(query_instance_id) = opened.query_instance_id {
                                         cached.query_instance_id = Some(query_instance_id.into());
                                     }
+                                    cached.pipeline_fetch_after_open =
+                                        opened.pipeline_fetch_after_open;
                                 }
                                 return Ok(opened.result);
                             }
@@ -825,7 +830,14 @@ impl ClientInner {
                     },
                 };
                 let result = self
-                    .open_zos_select(sql, &pkgnamcsn, &column_info, &result_descriptors, None)
+                    .open_zos_select(
+                        sql,
+                        &pkgnamcsn,
+                        &column_info,
+                        &result_descriptors,
+                        None,
+                        false,
+                    )
                     .await;
                 match result {
                     Ok(opened) => {
@@ -843,6 +855,7 @@ impl ClientInner {
                                     column_info,
                                     result_descriptors,
                                     query_instance_id,
+                                    pipeline_fetch_after_open: opened.pipeline_fetch_after_open,
                                 },
                             );
                         }
@@ -952,6 +965,7 @@ impl ClientInner {
         column_info: &[ColumnInfo],
         result_descriptors: &[db2_proto::fdoca::ColumnDescriptor],
         cached_query_instance_id: Option<&[u8]>,
+        cached_pipeline_fetch_after_open: bool,
     ) -> Result<ZosSelectOpenResult, Error> {
         if self.zos_lob_internal_depth == 0 && !use_native_zos_lob_strategy() {
             let current_schema = self.config.current_schema.clone();
@@ -969,6 +983,7 @@ impl ClientInner {
                 return Ok(ZosSelectOpenResult {
                     result,
                     query_instance_id: None,
+                    pipeline_fetch_after_open: false,
                 });
             }
 
@@ -990,6 +1005,7 @@ impl ClientInner {
                         return Ok(ZosSelectOpenResult {
                             result,
                             query_instance_id: None,
+                            pipeline_fetch_after_open: false,
                         });
                     }
                 }
@@ -1047,7 +1063,7 @@ impl ClientInner {
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
             && !has_zos_lobs
             && cached_query_instance_id.is_some()
-            && zos_non_lob_open_rowset.is_some()
+            && (zos_non_lob_open_rowset.is_some() || cached_pipeline_fetch_after_open)
             && use_zos_non_lob_cached_open_fetch_pipeline();
         let wait_for_open_data = self.zos_lob_internal_depth == 0
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
@@ -1098,6 +1114,13 @@ impl ClientInner {
             self.drain_zos_open_reply_frames(&mut frames, wait_for_open_data)
                 .await?;
         }
+        let pipeline_fetch_after_open = if pipeline_cached_fetch {
+            cached_pipeline_fetch_after_open
+        } else {
+            zos_non_lob_limited_block_open
+                && !frames_have_query_data(&frames)
+                && !frames_have_data_or_terminal_reply(&frames)
+        };
         let query_instance_id = query_instance_id_from_frames(&frames)?;
         let result = self
             .process_query_reply_with_fetch_size(
@@ -1111,6 +1134,7 @@ impl ClientInner {
             return result.map(|result| ZosSelectOpenResult {
                 result,
                 query_instance_id,
+                pipeline_fetch_after_open,
             });
         }
         self.retry_zos_lob_chunking_after_decode_error(
@@ -1124,6 +1148,7 @@ impl ClientInner {
         .map(|result| ZosSelectOpenResult {
             result,
             query_instance_id,
+            pipeline_fetch_after_open,
         })
     }
 
@@ -1162,6 +1187,7 @@ impl ClientInner {
         Ok(ZosSelectOpenResult {
             result,
             query_instance_id,
+            pipeline_fetch_after_open: false,
         })
     }
 
@@ -2022,6 +2048,34 @@ impl ClientInner {
                     || !rows.is_empty()
                 {
                     break;
+                }
+            }
+        }
+
+        if !end_of_query
+            && pending_row_bytes.is_empty()
+            && extdta_payloads.is_empty()
+            && self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && fetch_size_override.is_some_and(|limit| limit > 0 && rows.len() >= limit as usize)
+        {
+            let cursor_descriptors = preferred_descriptor_vec(
+                sqldard_descriptors.as_ref(),
+                qrydsc_descriptors.as_ref(),
+                prefer_sqldard_descriptors,
+            );
+            let can_assume_complete = cursor_descriptors.is_none_or(|descriptors| {
+                let cursor_column_info = column_info_for_cursor_fetch(column_info, descriptors);
+                !descriptors_need_lob_materialization(&cursor_column_info, descriptors)
+            });
+            if can_assume_complete {
+                end_of_query = true;
+                if collect_diagnostics {
+                    diagnostics.push(format!(
+                        "zos_bounded_fetch_complete rows={} limit={}",
+                        rows.len(),
+                        fetch_size_override.unwrap_or_default()
+                    ));
                 }
             }
         }
@@ -5723,6 +5777,18 @@ fn frames_have_data_or_terminal_reply(frames: &[DssFrame]) -> bool {
                             | codepoints::QRYNOPRM
                     )
                 })
+            })
+    })
+}
+
+fn frames_have_query_data(frames: &[DssFrame]) -> bool {
+    frames.iter().any(|frame| {
+        ClientInner::parse_ddm_objects(&frame.payload)
+            .ok()
+            .is_some_and(|objects| {
+                objects
+                    .iter()
+                    .any(|obj| obj.code_point == codepoints::QRYDTA)
             })
     })
 }
