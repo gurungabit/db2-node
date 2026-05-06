@@ -633,6 +633,13 @@ impl ClientInner {
 
         let is_query = sql_is_query(sql);
         let use_zos_sqlstt = self.server_info.as_ref().map_or(false, is_db2_zos_server);
+        let optimized_zos_sql = if params.is_empty() && is_query && use_zos_sqlstt {
+            optimize_zos_select_sql(sql)
+        } else {
+            None
+        };
+        let sql = optimized_zos_sql.as_deref().unwrap_or(sql);
+        ensure_sqlstt_sql_len(sql)?;
         let use_zos_cursor_attributes =
             is_query && use_zos_sqlstt && use_zos_read_only_cursor_attributes();
         let pkgnamcsn = self.direct_query_pkgnamcsn();
@@ -2642,6 +2649,70 @@ pub(crate) fn build_sqlstt_for_server(sql: &str, use_zos_format: bool) -> Vec<u8
     }
 }
 
+fn optimize_zos_select_sql(sql: &str) -> Option<String> {
+    if !use_zos_select_sql_optimization() || !sql_is_plain_select(sql) {
+        return None;
+    }
+
+    let trimmed = sql.trim();
+    let semicolon = trimmed.ends_with(';');
+    let body = trimmed.trim_end_matches(';').trim_end();
+    let upper = body.to_ascii_uppercase();
+
+    if upper.contains(" FOR UPDATE")
+        || upper.contains(" FOR READ ONLY")
+        || upper.contains(" FOR FETCH ONLY")
+        || upper.contains(" OPTIMIZE FOR")
+    {
+        return None;
+    }
+
+    let isolation_start = trailing_isolation_clause_start(body);
+    let (select_part, trailing_part) = isolation_start
+        .map(|idx| (body[..idx].trim_end(), &body[idx..]))
+        .unwrap_or((body, ""));
+
+    let mut optimized = String::with_capacity(body.len() + 48);
+    optimized.push_str(select_part);
+    optimized.push_str(" FOR READ ONLY");
+    if let Some(limit) = parse_fetch_first_row_limit(select_part) {
+        optimized.push_str(" OPTIMIZE FOR ");
+        optimized.push_str(&limit.to_string());
+        optimized.push_str(" ROWS");
+    }
+    if !trailing_part.is_empty() {
+        optimized.push(' ');
+        optimized.push_str(trailing_part.trim_start());
+    }
+    if semicolon {
+        optimized.push(';');
+    }
+
+    (optimized != trimmed).then_some(optimized)
+}
+
+fn sql_is_plain_select(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    trimmed
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("SELECT"))
+        && trimmed
+            .as_bytes()
+            .get(6)
+            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+}
+
+fn trailing_isolation_clause_start(sql: &str) -> Option<usize> {
+    let trimmed_end = sql.trim_end();
+    let upper = trimmed_end.to_ascii_uppercase();
+    for suffix in [" WITH UR", " WITH CS", " WITH RS", " WITH RR"] {
+        if upper.ends_with(suffix) {
+            return Some(trimmed_end.len().saturating_sub(suffix.len()) + 1);
+        }
+    }
+    None
+}
+
 fn build_zos_select_star_metadata_query(sql: &str, current_schema: Option<&str>) -> Option<String> {
     let parsed = parse_simple_select_for_zos_lobs(sql, current_schema)?;
     if parsed.schema.eq_ignore_ascii_case("SYSIBM")
@@ -3054,6 +3125,15 @@ fn use_zos_non_lob_close_with_limited_fetch() -> bool {
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
         .unwrap_or(false)
+}
+
+fn use_zos_select_sql_optimization() -> bool {
+    env::var("DB2_ZOS_SELECT_SQL_OPTIMIZATION")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
 }
 
 fn zos_non_lob_open_drain_timeout() -> Duration {
@@ -5761,6 +5841,33 @@ mod tests {
             Some(3)
         );
         assert_eq!(parse_fetch_first_row_limit("SELECT * FROM T"), None);
+    }
+
+    #[test]
+    fn optimize_zos_select_sql_adds_read_only_and_optimize_for_fetch_first() {
+        assert_eq!(
+            optimize_zos_select_sql(
+                "SELECT * FROM FIREINSP.PLCY_SNPST FETCH FIRST 3 ROWS ONLY"
+            )
+            .as_deref(),
+            Some(
+                "SELECT * FROM FIREINSP.PLCY_SNPST FETCH FIRST 3 ROWS ONLY FOR READ ONLY OPTIMIZE FOR 3 ROWS"
+            )
+        );
+    }
+
+    #[test]
+    fn optimize_zos_select_sql_preserves_isolation_clause() {
+        assert_eq!(
+            optimize_zos_select_sql("SELECT * FROM T FETCH FIRST 2 ROWS ONLY WITH UR").as_deref(),
+            Some("SELECT * FROM T FETCH FIRST 2 ROWS ONLY FOR READ ONLY OPTIMIZE FOR 2 ROWS WITH UR")
+        );
+    }
+
+    #[test]
+    fn optimize_zos_select_sql_skips_existing_cursor_clauses() {
+        assert!(optimize_zos_select_sql("SELECT * FROM T FOR READ ONLY").is_none());
+        assert!(optimize_zos_select_sql("SELECT * FROM T OPTIMIZE FOR 1 ROW").is_none());
     }
 
     #[test]
