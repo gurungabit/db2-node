@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -71,6 +71,7 @@ struct ZosSelectOpenResult {
 
 static ZOS_SELECT_METADATA_CACHE: OnceLock<StdMutex<HashMap<String, CachedZosSelectMetadata>>> =
     OnceLock::new();
+static ZOS_SELECT_LOB_CACHE_DENYLIST: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 
 /// Internal shared state for a DB2 connection.
 pub(crate) struct ClientInner {
@@ -809,7 +810,21 @@ impl ClientInner {
             if params.is_empty() && use_zos_sqlstt {
                 let collect_diagnostics = query_diagnostics_enabled();
                 let mut deferred_zos_prepare_diagnostics = Vec::new();
-                if self.zos_lob_internal_depth == 0 && use_zos_select_cache() {
+                let global_metadata_cache_key = (self.zos_lob_internal_depth == 0
+                    && use_zos_select_metadata_cache())
+                .then(|| self.zos_select_metadata_cache_key(sql));
+                let zos_select_lob_cache_denied = global_metadata_cache_key
+                    .as_deref()
+                    .is_some_and(zos_select_lob_cache_denied);
+                if zos_select_lob_cache_denied {
+                    if let Some(cached) = self.zos_select_cache.remove(sql) {
+                        self.release_prepared_section(cached.section_number);
+                    }
+                }
+                if self.zos_lob_internal_depth == 0
+                    && use_zos_select_cache()
+                    && !zos_select_lob_cache_denied
+                {
                     if let Some(cached) = self.zos_select_cache.get(sql).cloned() {
                         if !zos_select_section_cacheable(
                             &cached.column_info,
@@ -834,14 +849,15 @@ impl ClientInner {
                             match result {
                                 Ok(opened) => {
                                     let cached_result_has_lobs =
-                                        result_columns_need_zos_lob_route(&opened.result.columns);
+                                        result_has_zos_lob_materialization(&opened.result);
                                     if cached_result_has_lobs {
                                         self.zos_select_cache.remove(sql);
                                         self.release_prepared_section(cached.section_number);
-                                        if use_zos_select_metadata_cache() {
-                                            let metadata_key =
-                                                self.zos_select_metadata_cache_key(sql);
-                                            remove_zos_select_metadata(&metadata_key);
+                                        if let Some(metadata_key) =
+                                            global_metadata_cache_key.as_deref()
+                                        {
+                                            mark_zos_select_lob_cache_denied(metadata_key);
+                                            remove_zos_select_metadata(metadata_key);
                                         }
                                         if opened.result.rows.is_empty() {
                                             if collect_diagnostics {
@@ -893,6 +909,7 @@ impl ClientInner {
 
                 let cache_section = if self.zos_lob_internal_depth == 0
                     && use_zos_select_cache()
+                    && !zos_select_lob_cache_denied
                     && self.zos_select_cache.len() < ZOS_SELECT_CACHE_MAX_ENTRIES
                 {
                     self.allocate_zos_cached_select_section()
@@ -904,22 +921,24 @@ impl ClientInner {
                     .unwrap_or((DIRECT_QUERY_PKGID, ZOS_DIRECT_QUERY_SECTION));
                 self.activate_section(package_id, section_number);
                 let pkgnamcsn = self.build_pkgnamcsn_for(package_id, section_number);
-                let global_metadata_cache_key = (self.zos_lob_internal_depth == 0
-                    && use_zos_select_metadata_cache())
-                .then(|| self.zos_select_metadata_cache_key(sql));
-                let global_cached_metadata = global_metadata_cache_key
-                    .as_deref()
-                    .and_then(lookup_zos_select_metadata);
+                let global_cached_metadata = (!zos_select_lob_cache_denied)
+                    .then(|| {
+                        global_metadata_cache_key
+                            .as_deref()
+                            .and_then(lookup_zos_select_metadata)
+                    })
+                    .flatten();
                 let global_metadata_cache_hit = global_cached_metadata.is_some();
                 let prepare_total_started = collect_diagnostics.then(Instant::now);
                 let mut zos_prepare_diagnostics = Vec::new();
                 if collect_diagnostics {
                     zos_prepare_diagnostics.push(format!(
-                        "zos_prepare_plan section={} cache_section={} metadata_cache_hit={} request_sqlda={}",
+                        "zos_prepare_plan section={} cache_section={} metadata_cache_hit={} request_sqlda={} lob_cache_denied={}",
                         section_number,
                         cache_section.is_some(),
                         global_metadata_cache_hit,
-                        !global_metadata_cache_hit
+                        !global_metadata_cache_hit,
+                        zos_select_lob_cache_denied
                     ));
                     zos_prepare_diagnostics.extend(deferred_zos_prepare_diagnostics);
                 }
@@ -1043,12 +1062,13 @@ impl ClientInner {
                 match result {
                     Ok(opened) => {
                         let mut result = opened.result;
-                        let opened_result_has_lobs =
-                            result_columns_need_zos_lob_route(&result.columns);
+                        let opened_result_has_lobs = result_has_zos_lob_materialization(&result);
                         if opened_result_has_lobs {
-                            let metadata_cache_evicted = global_metadata_cache_key
-                                .as_deref()
-                                .is_some_and(remove_zos_select_metadata);
+                            let metadata_cache_evicted =
+                                global_metadata_cache_key.as_deref().is_some_and(|key| {
+                                    mark_zos_select_lob_cache_denied(key);
+                                    remove_zos_select_metadata(key)
+                                });
                             if collect_diagnostics {
                                 result.diagnostics.push(format!(
                                     "zos_prepare_metadata_cache_evict_lob={}",
@@ -4376,6 +4396,18 @@ fn result_columns_need_zos_lob_route(columns: &[ColumnInfo]) -> bool {
     !columns.is_empty() && result_metadata_needs_zos_lob_route(columns, &[])
 }
 
+fn result_has_zos_lob_materialization(result: &QueryResult) -> bool {
+    result_columns_need_zos_lob_route(&result.columns)
+        || result.rows.iter().any(|row| {
+            row.values().iter().any(|value| {
+                matches!(
+                    value,
+                    db2_proto::types::Db2Value::Blob(_) | db2_proto::types::Db2Value::Clob(_)
+                )
+            })
+        })
+}
+
 fn descriptors_need_zos_lob_materialization(
     columns: &[ColumnInfo],
     descriptors: &[db2_proto::fdoca::ColumnDescriptor],
@@ -4916,6 +4948,22 @@ fn remove_zos_select_metadata(key: &str) -> bool {
         .ok()
         .and_then(|mut cache| cache.remove(key))
         .is_some()
+}
+
+fn zos_select_lob_cache_denied(key: &str) -> bool {
+    ZOS_SELECT_LOB_CACHE_DENYLIST
+        .get_or_init(|| StdMutex::new(HashSet::new()))
+        .lock()
+        .ok()
+        .is_some_and(|cache| cache.contains(key))
+}
+
+fn mark_zos_select_lob_cache_denied(key: &str) -> bool {
+    ZOS_SELECT_LOB_CACHE_DENYLIST
+        .get_or_init(|| StdMutex::new(HashSet::new()))
+        .lock()
+        .ok()
+        .is_some_and(|mut cache| cache.insert(key.to_string()))
 }
 
 fn store_zos_select_metadata(
@@ -7266,6 +7314,23 @@ mod tests {
     }
 
     #[test]
+    fn result_lob_materialization_detects_extdta_clob_values() {
+        let result = QueryResult::with_rows(
+            vec![Row::new(
+                vec!["INSP_RPT_DETL_DOC".to_string()],
+                vec![Db2Value::Clob("materialized clob".to_string())],
+            )],
+            vec![ColumnInfo::new(
+                "INSP_RPT_DETL_DOC".to_string(),
+                "VARCHAR".to_string(),
+                true,
+            )],
+        );
+
+        assert!(result_has_zos_lob_materialization(&result));
+    }
+
+    #[test]
     fn zos_select_metadata_cache_can_evict_lobs_discovered_after_open() {
         let key = format!("unit:opened-lob-evict:{}", line!());
         let prepare_columns = vec![ColumnInfo::new(
@@ -7278,6 +7343,15 @@ mod tests {
         assert!(lookup_zos_select_metadata(&key).is_some());
         assert!(remove_zos_select_metadata(&key));
         assert!(lookup_zos_select_metadata(&key).is_none());
+    }
+
+    #[test]
+    fn zos_select_lob_cache_denylist_marks_sql_after_open_lob_discovery() {
+        let key = format!("unit:lob-denylist:{}", line!());
+
+        assert!(!zos_select_lob_cache_denied(&key));
+        assert!(mark_zos_select_lob_cache_denied(&key));
+        assert!(zos_select_lob_cache_denied(&key));
     }
 
     #[test]
