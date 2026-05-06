@@ -305,14 +305,23 @@ pub fn decode_rows_with_tail(
     columns: &[ColumnDescriptor],
     tail: &mut Vec<u8>,
 ) -> Result<Vec<Vec<Db2Value>>> {
-    let mut rows = Vec::new();
-    let mut buffer = Vec::new();
-    if !tail.is_empty() {
-        buffer.extend_from_slice(tail);
-        tail.clear();
+    if tail.is_empty() {
+        return decode_rows_from_buffer(data, columns, tail);
     }
-    buffer.extend_from_slice(data);
 
+    let mut buffer = Vec::with_capacity(tail.len() + data.len());
+    buffer.extend_from_slice(tail);
+    tail.clear();
+    buffer.extend_from_slice(data);
+    decode_rows_from_buffer(&buffer, columns, tail)
+}
+
+fn decode_rows_from_buffer(
+    buffer: &[u8],
+    columns: &[ColumnDescriptor],
+    tail: &mut Vec<u8>,
+) -> Result<Vec<Vec<Db2Value>>> {
+    let mut rows = Vec::new();
     let mut offset = 0;
 
     while offset < buffer.len() {

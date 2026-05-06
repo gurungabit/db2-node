@@ -2,6 +2,7 @@ use crate::js_connection::{JsColumnInfo, JsQueryResult};
 use napi::bindgen_prelude::{
     Env, FromNapiValue, Null, ToNapiValue, TypeName, ValidateNapiValue, ValueType,
 };
+use napi::{sys, JsString, NapiRaw};
 
 /// Convert a db2_client::Config from our JS-facing connection config.
 #[allow(clippy::too_many_arguments)]
@@ -321,15 +322,23 @@ impl ToNapiValue for JsRows {
     ) -> napi::Result<napi::bindgen_prelude::sys::napi_value> {
         let env_wrapper = Env::from(env);
         let mut js_rows = env_wrapper.create_array_with_length(val.rows.len())?;
+        let property_keys: napi::Result<Vec<JsString>> = val
+            .col_names
+            .iter()
+            .map(|name| env_wrapper.create_string(name))
+            .collect();
+        let property_keys = property_keys?;
 
         for (row_index, row) in val.rows.into_iter().enumerate() {
-            let mut js_row = env_wrapper.create_object()?;
+            let js_row = env_wrapper.create_object()?;
             let mut values = row.into_values().into_iter();
-            for name in &val.col_names {
-                match values.next() {
-                    Some(value) => set_db2_value_property(&mut js_row, name, value)?,
-                    None => js_row.set_named_property(name, Null)?,
-                }
+            let raw_row = js_row.raw();
+            for key in &property_keys {
+                let raw_value = match values.next() {
+                    Some(value) => db2_value_to_napi_value(env, value)?,
+                    None => ToNapiValue::to_napi_value(env, Null)?,
+                };
+                set_raw_property(env, raw_row, key.raw(), raw_value)?;
             }
             js_rows.set_element(row_index as u32, js_row)?;
         }
@@ -338,34 +347,49 @@ impl ToNapiValue for JsRows {
     }
 }
 
-fn set_db2_value_property(
-    object: &mut napi::bindgen_prelude::Object,
-    name: &str,
+fn db2_value_to_napi_value(
+    env: sys::napi_env,
     value: db2_proto::types::Db2Value,
-) -> napi::Result<()> {
+) -> napi::Result<sys::napi_value> {
     use db2_proto::types::Db2Value;
 
-    match value {
-        Db2Value::Null => object.set_named_property(name, Null),
-        Db2Value::SmallInt(v) => object.set_named_property(name, v as i64),
-        Db2Value::Integer(v) => object.set_named_property(name, v as i64),
-        Db2Value::BigInt(v) => object.set_named_property(name, v),
-        Db2Value::Real(v) => {
-            object.set_named_property(name, if v.is_finite() { v as f64 } else { 0.0 })
+    unsafe {
+        match value {
+            Db2Value::Null => ToNapiValue::to_napi_value(env, Null),
+            Db2Value::SmallInt(v) => ToNapiValue::to_napi_value(env, v as i64),
+            Db2Value::Integer(v) => ToNapiValue::to_napi_value(env, v as i64),
+            Db2Value::BigInt(v) => ToNapiValue::to_napi_value(env, v),
+            Db2Value::Real(v) => {
+                ToNapiValue::to_napi_value(env, if v.is_finite() { v as f64 } else { 0.0 })
+            }
+            Db2Value::Double(v) => {
+                ToNapiValue::to_napi_value(env, if v.is_finite() { v } else { 0.0 })
+            }
+            Db2Value::Boolean(v) => ToNapiValue::to_napi_value(env, v),
+            Db2Value::Binary(v) | Db2Value::Blob(v) => ToNapiValue::to_napi_value(env, v),
+            Db2Value::Decimal(v)
+            | Db2Value::Char(v)
+            | Db2Value::VarChar(v)
+            | Db2Value::Clob(v)
+            | Db2Value::RowId(v)
+            | Db2Value::Date(v)
+            | Db2Value::Time(v)
+            | Db2Value::Timestamp(v)
+            | Db2Value::Xml(v) => ToNapiValue::to_napi_value(env, v),
         }
-        Db2Value::Double(v) => object.set_named_property(name, if v.is_finite() { v } else { 0.0 }),
-        Db2Value::Boolean(v) => object.set_named_property(name, v),
-        Db2Value::Binary(v) | Db2Value::Blob(v) => object.set_named_property(name, v),
-        Db2Value::Decimal(v)
-        | Db2Value::Char(v)
-        | Db2Value::VarChar(v)
-        | Db2Value::Clob(v)
-        | Db2Value::RowId(v)
-        | Db2Value::Date(v)
-        | Db2Value::Time(v)
-        | Db2Value::Timestamp(v)
-        | Db2Value::Xml(v) => object.set_named_property(name, v),
     }
+}
+
+fn set_raw_property(
+    env: sys::napi_env,
+    object: sys::napi_value,
+    key: sys::napi_value,
+    value: sys::napi_value,
+) -> napi::Result<()> {
+    napi::check_status!(
+        unsafe { sys::napi_set_property(env, object, key, value) },
+        "Failed to set DB2 row property"
+    )
 }
 
 /// Convert JavaScript parameter values (passed as serde_json::Value) to Vec<Db2Value>.
