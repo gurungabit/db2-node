@@ -105,9 +105,11 @@ impl Cursor {
                     .map_or(false, crate::connection::is_db2_zos_server)
                 && use_zos_non_lob_cntqry_extra_blocks();
             let use_extra_blocks = use_extended_materialized_blocks || use_zos_non_lob_extra_blocks;
-            let qryrowset = use_zos_non_lob_extra_blocks
-                .then(|| zos_non_lob_cntqry_rowset(self.fetch_size))
-                .flatten();
+            let qryrowset = if use_zos_non_lob_extra_blocks {
+                zos_non_lob_cntqry_rowset(self.fetch_size)
+            } else {
+                None
+            };
             if collect_diagnostics {
                 self.last_fetch_diagnostics.push(format!(
                     "cntqry_request has_lobs={} native_lobs=false rdbnam=false maxblkext={} qryrowset={} rtnextdta=none non_lob_extra_blocks={}",
@@ -502,8 +504,13 @@ fn use_zos_non_lob_cntqry_extra_blocks() -> bool {
 }
 
 fn zos_non_lob_cntqry_rowset(fetch_size: u32) -> Option<u32> {
-    let default = u64::from(fetch_size.clamp(1, 32_767));
-    let value = env_u64("DB2_ZOS_NON_LOB_CNTQRY_ROWSET", default, 0, 32_767);
+    let Ok(value) = env::var("DB2_ZOS_NON_LOB_CNTQRY_ROWSET") else {
+        return None;
+    };
+    let value = value
+        .parse::<u64>()
+        .unwrap_or_else(|_| u64::from(fetch_size.clamp(1, 32_767)))
+        .clamp(0, 32_767);
     (value > 0).then_some(value as u32)
 }
 
