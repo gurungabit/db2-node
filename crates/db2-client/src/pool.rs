@@ -294,7 +294,7 @@ impl Pool {
 
         // Try to reuse an idle connection.
         loop {
-            let maybe_conn = { self.connections.lock().await.pop_front() };
+            let maybe_conn = { self.connections.lock().await.pop_back() };
             let Some(conn) = maybe_conn else {
                 break;
             };

@@ -3353,7 +3353,7 @@ fn use_zos_non_lob_open_data_drain() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn use_zos_non_lob_close_with_limited_fetch() -> bool {
