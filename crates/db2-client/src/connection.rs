@@ -128,7 +128,13 @@ impl ClientInner {
         let server = self
             .server_info
             .as_ref()
-            .map(|info| format!("{}:{}", info.server_class.trim(), info.server_release.trim()))
+            .map(|info| {
+                format!(
+                    "{}:{}",
+                    info.server_class.trim(),
+                    info.server_release.trim()
+                )
+            })
             .unwrap_or_default();
         format!(
             "{}\n{}\n{}\n{}",
@@ -735,9 +741,9 @@ impl ClientInner {
                     .unwrap_or((DIRECT_QUERY_PKGID, ZOS_DIRECT_QUERY_SECTION));
                 self.activate_section(package_id, section_number);
                 let pkgnamcsn = self.build_pkgnamcsn_for(package_id, section_number);
-                let global_metadata_cache_key =
-                    (self.zos_lob_internal_depth == 0 && use_zos_select_metadata_cache())
-                        .then(|| self.zos_select_metadata_cache_key(sql));
+                let global_metadata_cache_key = (self.zos_lob_internal_depth == 0
+                    && use_zos_select_metadata_cache())
+                .then(|| self.zos_select_metadata_cache_key(sql));
                 let global_cached_metadata = global_metadata_cache_key
                     .as_deref()
                     .and_then(lookup_zos_select_metadata);
@@ -980,6 +986,21 @@ impl ClientInner {
         }
 
         let has_zos_lobs = result_metadata_needs_zos_lob_route(column_info, result_descriptors);
+        if self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && !has_zos_lobs
+            && use_zos_non_lob_excsqlstt_output()
+        {
+            return self
+                .execute_zos_select_with_excsqlstt_output(
+                    sql,
+                    pkgnamcsn,
+                    column_info,
+                    result_descriptors,
+                )
+                .await;
+        }
+
         let use_extended_materialized_blocks = self.zos_lob_internal_depth > 0
             && self.server_info.as_ref().map_or(false, is_db2_zos_server);
         let use_zos_non_lob_extra_blocks = self.zos_lob_internal_depth == 0
@@ -1078,6 +1099,44 @@ impl ClientInner {
         )
         .await
         .map(|result| ZosSelectOpenResult {
+            result,
+            query_instance_id,
+        })
+    }
+
+    async fn execute_zos_select_with_excsqlstt_output(
+        &mut self,
+        sql: &str,
+        pkgnamcsn: &[u8],
+        column_info: &[ColumnInfo],
+        result_descriptors: &[db2_proto::fdoca::ColumnDescriptor],
+    ) -> Result<ZosSelectOpenResult, Error> {
+        let corr_id = self.next_correlation_id();
+        let excsqlstt_data = db2_proto::commands::excsqlstt::build_excsqlstt_output(pkgnamcsn);
+        let mut writer = DssWriter::new(corr_id);
+        writer.write_request(&excsqlstt_data, false);
+        let send_buf = writer.finish();
+        self.send_bytes(&send_buf).await?;
+
+        let frames = self.read_reply_frames().await?;
+        let query_instance_id = query_instance_id_from_frames(&frames)?;
+        let fetch_size_override = if use_zos_non_lob_sql_rowset_cap() {
+            parse_fetch_first_row_limit(sql)
+                .and_then(|limit| u32::try_from(limit).ok())
+                .map(|limit| limit.min(self.config.fetch_size.max(1)))
+        } else {
+            None
+        };
+        let result = self
+            .process_query_reply_with_fetch_size(
+                &frames,
+                column_info,
+                Some(result_descriptors),
+                fetch_size_override,
+            )
+            .await?;
+
+        Ok(ZosSelectOpenResult {
             result,
             query_instance_id,
         })
@@ -3255,6 +3314,15 @@ fn use_zos_non_lob_open_rowset() -> bool {
 
 fn use_zos_non_lob_cached_open_fetch_pipeline() -> bool {
     env::var("DB2_ZOS_NON_LOB_CACHED_OPEN_FETCH_PIPELINE")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn use_zos_non_lob_excsqlstt_output() -> bool {
+    env::var("DB2_ZOS_NON_LOB_EXCSQLSTT")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
