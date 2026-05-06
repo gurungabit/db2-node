@@ -325,6 +325,34 @@ impl ClientInner {
         Ok(())
     }
 
+    async fn drain_zos_cached_fetch_reply_frames(
+        &mut self,
+        frames: &mut Vec<DssFrame>,
+    ) -> Result<(), Error> {
+        let drain_timeout = zos_non_lob_cached_fetch_drain_timeout();
+        if drain_timeout.is_zero() || frames_have_query_data_or_query_end_reply(frames) {
+            return Ok(());
+        }
+
+        loop {
+            let more_frames = match timeout(drain_timeout, self.read_reply_frames()).await {
+                Ok(Ok(frames)) => frames,
+                Ok(Err(err)) => return Err(err),
+                Err(_) => break,
+            };
+
+            if more_frames.is_empty() {
+                break;
+            }
+            frames.extend(more_frames);
+            if frames_have_query_data_or_query_end_reply(frames) {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
     fn frame_drain_timeout(&self) -> Duration {
         let timeout = self.config.frame_drain_timeout;
         if self.zos_lob_internal_depth > 0
@@ -1146,7 +1174,25 @@ impl ClientInner {
                 frames.len()
             ));
         }
-        if (use_extended_materialized_blocks || use_zos_non_lob_extra_blocks) && !has_zos_lobs {
+        let mut cached_fetch_pipeline_observed = false;
+        if pipeline_cached_fetch {
+            let frames_before_drain = frames.len();
+            let drain_started = collect_diagnostics.then(Instant::now);
+            self.drain_zos_cached_fetch_reply_frames(&mut frames)
+                .await?;
+            cached_fetch_pipeline_observed = frames_have_query_data_or_query_end_reply(&frames);
+            if let Some(started) = drain_started {
+                open_diagnostics.push(format!(
+                    "zos_open_cached_fetch_drain_ms={:.3} frames_before={} frames_after={} has_query_reply={}",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    frames_before_drain,
+                    frames.len(),
+                    cached_fetch_pipeline_observed
+                ));
+            }
+        } else if (use_extended_materialized_blocks || use_zos_non_lob_extra_blocks)
+            && !has_zos_lobs
+        {
             let frames_before_drain = frames.len();
             let drain_started = collect_diagnostics.then(Instant::now);
             self.drain_zos_open_reply_frames(&mut frames, wait_for_open_data)
@@ -1163,7 +1209,7 @@ impl ClientInner {
             }
         }
         let pipeline_fetch_after_open = if pipeline_cached_fetch {
-            cached_pipeline_fetch_after_open
+            cached_pipeline_fetch_after_open && cached_fetch_pipeline_observed
         } else {
             zos_non_lob_limited_block_open
                 && !frames_have_query_data(&frames)
@@ -3526,6 +3572,10 @@ fn zos_non_lob_open_data_drain_timeout() -> Duration {
     Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_OPEN_DATA_DRAIN_MS", 4, 0, 100) as u64)
 }
 
+fn zos_non_lob_cached_fetch_drain_timeout() -> Duration {
+    Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_CACHED_FETCH_DRAIN_MS", 75, 0, 250) as u64)
+}
+
 fn skip_zos_native_lob_initial_drain() -> bool {
     env::var("DB2_ZOS_NATIVE_LOB_INITIAL_DRAIN")
         .map(|value| {
@@ -5851,6 +5901,30 @@ fn frames_have_data_or_terminal_reply(frames: &[DssFrame]) -> bool {
                         codepoints::QRYDTA
                             | codepoints::ENDQRYRM
                             | codepoints::SQLCARD
+                            | codepoints::SQLERRRM
+                            | codepoints::SYNTAXRM
+                            | codepoints::PRCCNVRM
+                            | codepoints::CMDNSPRM
+                            | codepoints::PRMNSPRM
+                            | codepoints::VALNSPRM
+                            | codepoints::DTAMCHRM
+                            | codepoints::QRYNOPRM
+                    )
+                })
+            })
+    })
+}
+
+fn frames_have_query_data_or_query_end_reply(frames: &[DssFrame]) -> bool {
+    frames.iter().any(|frame| {
+        ClientInner::parse_ddm_objects(&frame.payload)
+            .ok()
+            .is_some_and(|objects| {
+                objects.iter().any(|obj| {
+                    matches!(
+                        obj.code_point,
+                        codepoints::QRYDTA
+                            | codepoints::ENDQRYRM
                             | codepoints::SQLERRRM
                             | codepoints::SYNTAXRM
                             | codepoints::PRCCNVRM
