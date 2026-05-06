@@ -2790,7 +2790,8 @@ impl Client {
             return Err(Error::Connection("Not connected".into()));
         }
         let query_timeout = guard.config.query_timeout;
-        if query_timeout.is_zero() {
+        let diagnostics_started = query_diagnostics_enabled().then(Instant::now);
+        let result = if query_timeout.is_zero() {
             match guard.execute_query_with_reconnect_retry(sql, params).await {
                 Ok(result) => Ok(result),
                 Err(err) => Err(guard.finalize_operation_error("query", err).await),
@@ -2808,7 +2809,8 @@ impl Client {
                 },
                 Err(_) => Err(guard.disconnect_after_timeout("query", query_timeout).await),
             }
-        }
+        };
+        finish_query_diagnostics(sql, params.len(), diagnostics_started, result)
     }
 
     /// Execute a SQL statement with no parameters.
@@ -6393,6 +6395,62 @@ fn should_retry_query_after_session_error(sql: &str, params: &[&dyn ToSql], err:
 fn sql_is_retryable_read_query(sql: &str) -> bool {
     let trimmed = sql.trim().to_uppercase();
     trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") || trimmed.starts_with("VALUES")
+}
+
+fn finish_query_diagnostics(
+    sql: &str,
+    param_count: usize,
+    started: Option<Instant>,
+    result: Result<QueryResult, Error>,
+) -> Result<QueryResult, Error> {
+    let mut result = match result {
+        Ok(result) => result,
+        Err(err) => return Err(err),
+    };
+
+    if let Some(started) = started {
+        result.diagnostics.push(format!(
+            "driver_query_total_ms={:.3} rows={} columns={} params={} sql={}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            result.row_count,
+            result.columns.len(),
+            param_count,
+            summarize_sql_for_diagnostics(sql)
+        ));
+    }
+
+    emit_query_diagnostics(sql, &result.diagnostics);
+    Ok(result)
+}
+
+fn emit_query_diagnostics(sql: &str, diagnostics: &[String]) {
+    if diagnostics.is_empty() || !query_diagnostics_stderr_enabled() {
+        return;
+    }
+
+    eprintln!(
+        "[db2-diagnostics] sql={} entries={}",
+        summarize_sql_for_diagnostics(sql),
+        diagnostics.len()
+    );
+    for line in diagnostics {
+        eprintln!("[db2-diagnostics] {line}");
+    }
+}
+
+fn query_diagnostics_stderr_enabled() -> bool {
+    env::var("DB2_QUERY_DIAGNOSTICS")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(false)
+        || env::var("DB2_QUERY_DIAGNOSTICS_STDERR")
+            .map(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                !(value == "0" || value == "false" || value == "off" || value == "no")
+            })
+            .unwrap_or(false)
 }
 
 #[cfg(test)]
