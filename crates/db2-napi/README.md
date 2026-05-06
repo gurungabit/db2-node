@@ -94,6 +94,9 @@ const pool = new Pool({
   maxConnections: 20,
 })
 
+// Warm the first TCP/TLS/DRDA session before timed or user-facing queries.
+await pool.connect()
+
 // Simple: pool manages the connection lifecycle
 const result = await pool.query('SELECT COUNT(*) AS cnt FROM employees')
 
@@ -123,6 +126,13 @@ All connection options above, plus:
 | `maxConnections` | `number` | `10` | Maximum total connections |
 | `idleTimeout` | `number` | `600` | Close idle connections after this many seconds |
 | `maxLifetime` | `number` | `3600` | Recycle connections after this many seconds |
+| `healthCheckInterval` | `number` | `30` | Reuse an idle connection without a health-check round trip for this many seconds |
+
+`new Pool(config)` is intentionally synchronous and does not block on the network.
+Call `await pool.connect()` or `await pool.warmup()` during application startup to
+open the initial connection before measuring query latency. Without warmup, the
+first `pool.query()` includes TCP connect, TLS handshake, and DRDA authentication
+inside pool acquire time; subsequent queries reuse the idle connection.
 
 ## Prepared Statements
 

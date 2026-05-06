@@ -141,6 +141,18 @@ impl JsPool {
             refs_started,
         );
 
+        let acquire_state_before = if collect_diagnostics {
+            Some((
+                self.inner.idle_count().await,
+                self.inner.active_count().await,
+                self.inner.max_connections() as usize,
+            ))
+        } else {
+            None
+        };
+        let acquire_path = acquire_state_before
+            .as_ref()
+            .map(|(idle, active, max)| pool_acquire_path(*idle, *active, *max));
         let acquire_started = collect_diagnostics.then(Instant::now);
         let client = match self.inner.acquire().await {
             Ok(client) => client,
@@ -159,6 +171,21 @@ impl JsPool {
             "napi_pool_acquire_ms",
             acquire_started,
         );
+        if let Some((idle_before, active_before, max_connections)) = acquire_state_before {
+            let idle_after = self.inner.idle_count().await;
+            let active_after = self.inner.active_count().await;
+            napi_diagnostics.push(format!(
+                "napi_pool_acquire_state path={} idle_before={} active_before={} total_before={} idle_after={} active_after={} total_after={} max={}",
+                acquire_path.unwrap_or("unknown"),
+                idle_before,
+                active_before,
+                idle_before + active_before,
+                idle_after,
+                active_after,
+                idle_after + active_after,
+                max_connections
+            ));
+        }
 
         let query_started = collect_diagnostics.then(Instant::now);
         let result = client.query(&sql, &param_refs).await;
@@ -241,5 +268,15 @@ impl JsPool {
     #[napi(js_name = "maxConnections")]
     pub fn max_connections(&self) -> u32 {
         self.inner.max_connections()
+    }
+}
+
+fn pool_acquire_path(idle: usize, active: usize, max_connections: usize) -> &'static str {
+    if idle > 0 {
+        "idle"
+    } else if active < max_connections {
+        "new"
+    } else {
+        "wait"
     }
 }
