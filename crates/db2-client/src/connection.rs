@@ -1097,6 +1097,11 @@ impl ClientInner {
             && (cached_query_instance_id.is_some() || cached_pipeline_fetch_after_open)
             && (zos_non_lob_open_rowset.is_some() || cached_pipeline_fetch_after_open)
             && use_zos_non_lob_cached_open_fetch_pipeline();
+        // If a cached statement already proved that OPNQRY does not carry the
+        // first row block, move directly to CNTQRY on later opens.
+        let learned_cntqry_after_open = cached_pipeline_fetch_after_open
+            && !pipeline_cached_fetch
+            && zos_non_lob_open_rowset.is_none();
         let qryblksz = if self.zos_lob_internal_depth == 0
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
             && !has_zos_lobs
@@ -1110,14 +1115,16 @@ impl ClientInner {
             && !has_zos_lobs
             && fetch_size_override.is_some()
             && (zos_non_lob_limited_block_open || use_zos_non_lob_open_data_drain());
+        let wait_for_open_data = wait_for_open_data && !learned_cntqry_after_open;
         let collect_diagnostics = query_diagnostics_enabled();
         let mut open_diagnostics = Vec::new();
         if collect_diagnostics {
             open_diagnostics.push(format!(
-                "zos_open_plan has_lobs={} cached_qryinsid={} cached_pipeline_after_open={} pipeline={} fetch_size_override={} open_rowset={} limited_block_open={} wait_open_data={} non_lob_extra_blocks={} qryblksz={}",
+                "zos_open_plan has_lobs={} cached_qryinsid={} cached_pipeline_after_open={} learned_cntqry_after_open={} pipeline={} fetch_size_override={} open_rowset={} limited_block_open={} wait_open_data={} non_lob_extra_blocks={} qryblksz={}",
                 has_zos_lobs,
                 cached_query_instance_id.is_some(),
                 cached_pipeline_fetch_after_open,
+                learned_cntqry_after_open,
                 pipeline_cached_fetch,
                 fetch_size_override
                     .map(|value| value.to_string())
@@ -3606,7 +3613,7 @@ fn normalize_zos_non_lob_qryblksz(value: usize) -> usize {
 }
 
 fn zos_non_lob_open_data_drain_timeout() -> Duration {
-    Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_OPEN_DATA_DRAIN_MS", 4, 0, 100) as u64)
+    Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_OPEN_DATA_DRAIN_MS", 20, 0, 100) as u64)
 }
 
 fn zos_non_lob_cached_fetch_drain_timeout() -> Duration {
