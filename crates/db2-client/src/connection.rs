@@ -290,9 +290,17 @@ impl ClientInner {
     async fn drain_zos_open_reply_frames(
         &mut self,
         frames: &mut Vec<DssFrame>,
+        wait_for_data_or_terminal_reply: bool,
     ) -> Result<(), Error> {
-        let drain_timeout = zos_non_lob_open_drain_timeout();
+        let drain_timeout = if wait_for_data_or_terminal_reply {
+            zos_non_lob_open_data_drain_timeout()
+        } else {
+            zos_non_lob_open_drain_timeout()
+        };
         if drain_timeout.is_zero() {
+            return Ok(());
+        }
+        if wait_for_data_or_terminal_reply && frames_have_data_or_terminal_reply(frames) {
             return Ok(());
         }
 
@@ -307,6 +315,9 @@ impl ClientInner {
                 break;
             }
             frames.extend(more_frames);
+            if wait_for_data_or_terminal_reply && frames_have_data_or_terminal_reply(frames) {
+                break;
+            }
         }
 
         Ok(())
@@ -1032,6 +1043,11 @@ impl ClientInner {
             && !has_zos_lobs
             && cached_query_instance_id.is_some()
             && use_zos_non_lob_cached_open_fetch_pipeline();
+        let wait_for_open_data = self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && !has_zos_lobs
+            && fetch_size_override.is_some()
+            && use_zos_non_lob_open_data_drain();
         let opnqry_data = {
             let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
             ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
@@ -1073,7 +1089,8 @@ impl ClientInner {
 
         let mut frames = self.read_reply_frames().await?;
         if (use_extended_materialized_blocks || use_zos_non_lob_extra_blocks) && !has_zos_lobs {
-            self.drain_zos_open_reply_frames(&mut frames).await?;
+            self.drain_zos_open_reply_frames(&mut frames, wait_for_open_data)
+                .await?;
         }
         let query_instance_id = query_instance_id_from_frames(&frames)?;
         let result = self
@@ -3327,6 +3344,15 @@ fn use_zos_non_lob_excsqlstt_output() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
+        .unwrap_or(false)
+}
+
+fn use_zos_non_lob_open_data_drain() -> bool {
+    env::var("DB2_ZOS_NON_LOB_OPEN_DATA_DRAIN")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
         .unwrap_or(true)
 }
 
@@ -3350,6 +3376,10 @@ fn use_zos_select_sql_optimization() -> bool {
 
 fn zos_non_lob_open_drain_timeout() -> Duration {
     Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_OPEN_DRAIN_MS", 2, 0, 25) as u64)
+}
+
+fn zos_non_lob_open_data_drain_timeout() -> Duration {
+    Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_OPEN_DATA_DRAIN_MS", 12, 0, 100) as u64)
 }
 
 fn skip_zos_native_lob_initial_drain() -> bool {
@@ -5662,6 +5692,31 @@ fn prepare_frames_have_result_metadata(frames: &[DssFrame]) -> bool {
                 objects
                     .iter()
                     .any(|obj| obj.code_point == codepoints::SQLDARD)
+            })
+    })
+}
+
+fn frames_have_data_or_terminal_reply(frames: &[DssFrame]) -> bool {
+    frames.iter().any(|frame| {
+        ClientInner::parse_ddm_objects(&frame.payload)
+            .ok()
+            .is_some_and(|objects| {
+                objects.iter().any(|obj| {
+                    matches!(
+                        obj.code_point,
+                        codepoints::QRYDTA
+                            | codepoints::ENDQRYRM
+                            | codepoints::SQLCARD
+                            | codepoints::SQLERRRM
+                            | codepoints::SYNTAXRM
+                            | codepoints::PRCCNVRM
+                            | codepoints::CMDNSPRM
+                            | codepoints::PRMNSPRM
+                            | codepoints::VALNSPRM
+                            | codepoints::DTAMCHRM
+                            | codepoints::QRYNOPRM
+                    )
+                })
             })
     })
 }
