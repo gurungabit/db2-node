@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use std::collections::HashMap;
 use std::env;
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 use tokio::sync::{Mutex, OwnedSemaphorePermit};
 use tokio::time::timeout;
@@ -28,6 +28,7 @@ pub(crate) const ZOS_DIRECT_QUERY_SECTION: u16 = 1;
 pub(crate) const PREPARED_STATEMENT_PKGID: &str = "SYSLH200";
 pub(crate) const PREPARED_STATEMENT_MAX_SECTION: u16 = 385;
 const ZOS_SELECT_CACHE_MAX_ENTRIES: usize = 64;
+const ZOS_SELECT_METADATA_CACHE_MAX_ENTRIES: usize = 256;
 
 pub(crate) struct PoolCheckoutEntry {
     pub(crate) created_at: std::time::Instant,
@@ -49,6 +50,15 @@ struct CachedZosSelect {
     column_info: Vec<ColumnInfo>,
     result_descriptors: Vec<db2_proto::fdoca::ColumnDescriptor>,
 }
+
+#[derive(Clone)]
+struct CachedZosSelectMetadata {
+    column_info: Vec<ColumnInfo>,
+    result_descriptors: Vec<db2_proto::fdoca::ColumnDescriptor>,
+}
+
+static ZOS_SELECT_METADATA_CACHE: OnceLock<StdMutex<HashMap<String, CachedZosSelectMetadata>>> =
+    OnceLock::new();
 
 /// Internal shared state for a DB2 connection.
 pub(crate) struct ClientInner {
@@ -105,6 +115,21 @@ impl ClientInner {
             package_id,
             &db2_proto::commands::DEFAULT_PKGCNSTKN,
             section_number,
+        )
+    }
+
+    fn zos_select_metadata_cache_key(&self, sql: &str) -> String {
+        let server = self
+            .server_info
+            .as_ref()
+            .map(|info| format!("{}:{}", info.server_class.trim(), info.server_release.trim()))
+            .unwrap_or_default();
+        format!(
+            "{}\n{}\n{}\n{}",
+            server,
+            self.config.database.trim(),
+            self.config.current_schema.as_deref().unwrap_or("").trim(),
+            sql.trim()
         )
     }
 
@@ -633,7 +658,11 @@ impl ClientInner {
 
         let is_query = sql_is_query(sql);
         let use_zos_sqlstt = self.server_info.as_ref().map_or(false, is_db2_zos_server);
-        let optimized_zos_sql = if params.is_empty() && is_query && use_zos_sqlstt {
+        let optimized_zos_sql = if params.is_empty()
+            && is_query
+            && use_zos_sqlstt
+            && self.zos_lob_internal_depth == 0
+        {
             optimize_zos_select_sql(sql)
         } else {
             None
@@ -691,8 +720,17 @@ impl ClientInner {
                     .unwrap_or((DIRECT_QUERY_PKGID, ZOS_DIRECT_QUERY_SECTION));
                 self.activate_section(package_id, section_number);
                 let pkgnamcsn = self.build_pkgnamcsn_for(package_id, section_number);
-                let prpsqlstt_data =
-                    db2_proto::commands::prpsqlstt::build_prpsqlstt_with_sqlda(&pkgnamcsn);
+                let global_metadata_cache_key =
+                    (self.zos_lob_internal_depth == 0 && use_zos_select_metadata_cache())
+                        .then(|| self.zos_select_metadata_cache_key(sql));
+                let global_cached_metadata = global_metadata_cache_key
+                    .as_deref()
+                    .and_then(lookup_zos_select_metadata);
+                let prpsqlstt_data = if global_cached_metadata.is_some() {
+                    db2_proto::commands::prpsqlstt::build_prpsqlstt_without_sqlda(&pkgnamcsn)
+                } else {
+                    db2_proto::commands::prpsqlstt::build_prpsqlstt_with_sqlda(&pkgnamcsn)
+                };
 
                 let mut writer = DssWriter::new(corr_id);
                 writer.write_request_next_same_corr(&prpsqlstt_data, true);
@@ -711,7 +749,11 @@ impl ClientInner {
                     return Err(err);
                 }
 
-                let frames = match self.read_zos_select_prepare_reply_frames().await {
+                let frames = match if global_cached_metadata.is_some() {
+                    self.read_reply_frames().await
+                } else {
+                    self.read_zos_select_prepare_reply_frames().await
+                } {
                     Ok(frames) => frames,
                     Err(err) => {
                         if let Some(section_number) = cache_section {
@@ -720,16 +762,44 @@ impl ClientInner {
                         return Err(err);
                     }
                 };
-                let column_info = match self.parse_prepare_reply(&frames) {
-                    Ok(column_info) => column_info,
-                    Err(err) => {
-                        if let Some(section_number) = cache_section {
-                            self.release_prepared_section(section_number);
+                let (column_info, result_descriptors) = match global_cached_metadata {
+                    Some(metadata) => {
+                        if let Err(err) = self.parse_prepare_reply(&frames) {
+                            if let Some(section_number) = cache_section {
+                                self.release_prepared_section(section_number);
+                            }
+                            return Err(err);
                         }
-                        return Err(err);
+                        (metadata.column_info, metadata.result_descriptors)
                     }
+                    None => match self.parse_prepare_reply(&frames) {
+                        Ok(column_info) => {
+                            let result_descriptors = self.parse_prepare_result_descriptors(&frames);
+                            if let Some(cache_key) = global_metadata_cache_key.as_deref() {
+                                store_zos_select_metadata(
+                                    cache_key,
+                                    &column_info,
+                                    &result_descriptors,
+                                );
+                            }
+                            (column_info, result_descriptors)
+                        }
+                        Err(err) => {
+                            if let Some(section_number) = cache_section {
+                                self.release_prepared_section(section_number);
+                            }
+                            return Err(err);
+                        }
+                    },
                 };
-                let result_descriptors = self.parse_prepare_result_descriptors(&frames);
+                if column_info.is_empty() || result_descriptors.is_empty() {
+                    if let Some(section_number) = cache_section {
+                        self.release_prepared_section(section_number);
+                    }
+                    return Err(Error::Protocol(
+                        "z/OS prepare did not return usable result metadata".into(),
+                    ));
+                }
 
                 let result = self
                     .open_zos_select(sql, &pkgnamcsn, &column_info, &result_descriptors)
@@ -4190,6 +4260,57 @@ fn use_zos_select_cache() -> bool {
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
         .unwrap_or(true)
+}
+
+fn use_zos_select_metadata_cache() -> bool {
+    env::var("DB2_ZOS_SELECT_METADATA_CACHE")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn lookup_zos_select_metadata(key: &str) -> Option<CachedZosSelectMetadata> {
+    ZOS_SELECT_METADATA_CACHE
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(key).cloned())
+}
+
+fn store_zos_select_metadata(
+    key: &str,
+    column_info: &[ColumnInfo],
+    result_descriptors: &[db2_proto::fdoca::ColumnDescriptor],
+) {
+    if column_info.is_empty()
+        || result_descriptors.is_empty()
+        || result_metadata_needs_zos_lob_route(column_info, result_descriptors)
+    {
+        return;
+    }
+
+    let Ok(mut cache) = ZOS_SELECT_METADATA_CACHE
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+    else {
+        return;
+    };
+
+    if cache.len() >= ZOS_SELECT_METADATA_CACHE_MAX_ENTRIES && !cache.contains_key(key) {
+        if let Some(first_key) = cache.keys().next().cloned() {
+            cache.remove(&first_key);
+        }
+    }
+
+    cache.insert(
+        key.to_string(),
+        CachedZosSelectMetadata {
+            column_info: column_info.to_vec(),
+            result_descriptors: result_descriptors.to_vec(),
+        },
+    );
 }
 
 pub(crate) fn query_diagnostics_enabled() -> bool {
