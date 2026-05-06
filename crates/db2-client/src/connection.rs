@@ -792,15 +792,6 @@ impl ClientInner {
                         }
                     },
                 };
-                if column_info.is_empty() || result_descriptors.is_empty() {
-                    if let Some(section_number) = cache_section {
-                        self.release_prepared_section(section_number);
-                    }
-                    return Err(Error::Protocol(
-                        "z/OS prepare did not return usable result metadata".into(),
-                    ));
-                }
-
                 let result = self
                     .open_zos_select(sql, &pkgnamcsn, &column_info, &result_descriptors)
                     .await;
