@@ -2531,6 +2531,17 @@ impl ClientInner {
                         );
                         extdta_payloads.extend(more_extdta_payloads);
                         if !rows_need_extdta_payloads(&rows, &cursor.descriptors) {
+                            if !done {
+                                cursor.close_from(self).await?;
+                                if collect_diagnostics {
+                                    diagnostics.push(format!(
+                                        "cursor_lob_materialized_close rows={} extdta={} last_fetch=[{}]",
+                                        rows.len(),
+                                        extdta_payloads.len(),
+                                        cursor.last_fetch_diagnostics.join("; ")
+                                    ));
+                                }
+                            }
                             break;
                         }
                     }

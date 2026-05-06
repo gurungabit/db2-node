@@ -361,6 +361,57 @@ impl Cursor {
         Ok((rows, end_of_query, extdta_payloads))
     }
 
+    pub(crate) async fn close_from(&mut self, inner: &mut ClientInner) -> Result<(), Error> {
+        if self.closed {
+            return Ok(());
+        }
+
+        let collect_diagnostics = crate::connection::query_diagnostics_enabled();
+        let corr_id = inner.next_correlation_id();
+        let clsqry_data = db2_proto::commands::clsqry::build_clsqry(&self.pkgnamcsn);
+        let mut writer = DssWriter::new(corr_id);
+        writer.write_request(&clsqry_data, false);
+        let send_buf = writer.finish();
+        inner.send_bytes(&send_buf).await?;
+
+        let drain_timeout = zos_lob_close_drain_timeout();
+        match timeout(drain_timeout, inner.read_reply_frames()).await {
+            Ok(Ok(frames)) => {
+                if collect_diagnostics {
+                    self.last_fetch_diagnostics.push(format!(
+                        "lob_close_drain frames={} corr={} bytes={}",
+                        frames.len(),
+                        corr_id,
+                        send_buf.len()
+                    ));
+                }
+                let mut rows = Vec::new();
+                let mut extdta_payloads = Vec::new();
+                let mut end_of_query = false;
+                self.process_fetch_frames(
+                    &frames,
+                    &mut rows,
+                    &mut extdta_payloads,
+                    &mut end_of_query,
+                    collect_diagnostics,
+                )?;
+            }
+            Ok(Err(err)) => return Err(err),
+            Err(_) => {
+                if collect_diagnostics {
+                    self.last_fetch_diagnostics.push(format!(
+                        "lob_close_drain timed_out corr={} bytes={}",
+                        corr_id,
+                        send_buf.len()
+                    ));
+                }
+            }
+        }
+
+        self.closed = true;
+        Ok(())
+    }
+
     fn process_fetch_frames(
         &mut self,
         frames: &[db2_proto::dss::DssFrame],
@@ -523,6 +574,10 @@ fn zos_non_lob_cntqry_rowset(fetch_size: u32) -> Option<u32> {
 
 fn zos_non_lob_fetch_end_drain_timeout() -> Duration {
     Duration::from_millis(env_u64("DB2_ZOS_NON_LOB_FETCH_END_DRAIN_MS", 2, 0, 25))
+}
+
+fn zos_lob_close_drain_timeout() -> Duration {
+    Duration::from_millis(env_u64("DB2_ZOS_LOB_CLOSE_DRAIN_MS", 25, 0, 250))
 }
 
 fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
