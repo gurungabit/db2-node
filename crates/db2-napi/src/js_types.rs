@@ -3,6 +3,7 @@ use napi::bindgen_prelude::{
     Env, FromNapiValue, Null, ToNapiValue, TypeName, ValidateNapiValue, ValueType,
 };
 use napi::{sys, JsString, NapiRaw};
+use std::ptr;
 
 /// Convert a db2_client::Config from our JS-facing connection config.
 #[allow(clippy::too_many_arguments)]
@@ -333,13 +334,26 @@ impl ToNapiValue for JsRows {
             let js_row = env_wrapper.create_object()?;
             let mut values = row.into_values().into_iter();
             let raw_row = js_row.raw();
+            let mut descriptors = Vec::with_capacity(property_keys.len());
             for key in &property_keys {
                 let raw_value = match values.next() {
                     Some(value) => db2_value_to_napi_value(env, value)?,
                     None => ToNapiValue::to_napi_value(env, Null)?,
                 };
-                set_raw_property(env, raw_row, key.raw(), raw_value)?;
+                descriptors.push(sys::napi_property_descriptor {
+                    utf8name: ptr::null(),
+                    name: key.raw(),
+                    method: None,
+                    getter: None,
+                    setter: None,
+                    value: raw_value,
+                    attributes: sys::PropertyAttributes::writable
+                        | sys::PropertyAttributes::enumerable
+                        | sys::PropertyAttributes::configurable,
+                    data: ptr::null_mut(),
+                });
             }
+            define_raw_properties(env, raw_row, &descriptors)?;
             js_rows.set_element(row_index as u32, js_row)?;
         }
 
@@ -380,15 +394,16 @@ fn db2_value_to_napi_value(
     }
 }
 
-fn set_raw_property(
+fn define_raw_properties(
     env: sys::napi_env,
     object: sys::napi_value,
-    key: sys::napi_value,
-    value: sys::napi_value,
+    descriptors: &[sys::napi_property_descriptor],
 ) -> napi::Result<()> {
     napi::check_status!(
-        unsafe { sys::napi_set_property(env, object, key, value) },
-        "Failed to set DB2 row property"
+        unsafe {
+            sys::napi_define_properties(env, object, descriptors.len(), descriptors.as_ptr())
+        },
+        "Failed to define DB2 row properties"
     )
 }
 
