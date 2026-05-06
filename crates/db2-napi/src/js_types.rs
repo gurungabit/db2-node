@@ -3,7 +3,9 @@ use napi::bindgen_prelude::{
     Env, FromNapiValue, Null, ToNapiValue, TypeName, ValidateNapiValue, ValueType,
 };
 use napi::{sys, JsString, NapiRaw};
+use std::env;
 use std::ptr;
+use std::time::Instant;
 
 /// Convert a db2_client::Config from our JS-facing connection config.
 #[allow(clippy::too_many_arguments)]
@@ -321,6 +323,9 @@ impl ToNapiValue for JsRows {
         env: napi::bindgen_prelude::sys::napi_env,
         val: Self,
     ) -> napi::Result<napi::bindgen_prelude::sys::napi_value> {
+        let row_count = val.rows.len();
+        let column_count = val.col_names.len();
+        let started = query_diagnostics_enabled().then(Instant::now);
         let env_wrapper = Env::from(env);
         let mut js_rows = env_wrapper.create_array_with_length(val.rows.len())?;
         let property_keys: napi::Result<Vec<JsString>> = val
@@ -329,32 +334,43 @@ impl ToNapiValue for JsRows {
             .map(|name| env_wrapper.create_string(name))
             .collect();
         let property_keys = property_keys?;
+        let mut descriptors = property_keys
+            .iter()
+            .map(|key| sys::napi_property_descriptor {
+                utf8name: ptr::null(),
+                name: key.raw(),
+                method: None,
+                getter: None,
+                setter: None,
+                value: ptr::null_mut(),
+                attributes: sys::PropertyAttributes::writable
+                    | sys::PropertyAttributes::enumerable
+                    | sys::PropertyAttributes::configurable,
+                data: ptr::null_mut(),
+            })
+            .collect::<Vec<_>>();
 
         for (row_index, row) in val.rows.into_iter().enumerate() {
             let js_row = env_wrapper.create_object()?;
             let mut values = row.into_values().into_iter();
             let raw_row = js_row.raw();
-            let mut descriptors = Vec::with_capacity(property_keys.len());
-            for key in &property_keys {
-                let raw_value = match values.next() {
+            for descriptor in &mut descriptors {
+                descriptor.value = match values.next() {
                     Some(value) => db2_value_to_napi_value(env, value)?,
                     None => ToNapiValue::to_napi_value(env, Null)?,
                 };
-                descriptors.push(sys::napi_property_descriptor {
-                    utf8name: ptr::null(),
-                    name: key.raw(),
-                    method: None,
-                    getter: None,
-                    setter: None,
-                    value: raw_value,
-                    attributes: sys::PropertyAttributes::writable
-                        | sys::PropertyAttributes::enumerable
-                        | sys::PropertyAttributes::configurable,
-                    data: ptr::null_mut(),
-                });
             }
             define_raw_properties(env, raw_row, &descriptors)?;
             js_rows.set_element(row_index as u32, js_row)?;
+        }
+
+        if let Some(started) = started {
+            eprintln!(
+                "[db2-diagnostics] napi_rows_to_js_ms={:.3} rows={} columns={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                row_count,
+                column_count
+            );
         }
 
         napi::bindgen_prelude::Object::to_napi_value(env, js_rows)
@@ -405,6 +421,41 @@ fn define_raw_properties(
         },
         "Failed to define DB2 row properties"
     )
+}
+
+pub(crate) fn query_diagnostics_enabled() -> bool {
+    env_truthy("DB2_QUERY_DIAGNOSTICS") || env_truthy("DB2_QUERY_DIAGNOSTICS_STDERR")
+}
+
+pub(crate) fn emit_napi_diagnostics(lines: &[String]) {
+    if !query_diagnostics_enabled() {
+        return;
+    }
+    for line in lines {
+        eprintln!("[db2-diagnostics] {line}");
+    }
+}
+
+pub(crate) fn push_elapsed_diagnostic(
+    lines: &mut Vec<String>,
+    name: &str,
+    started: Option<Instant>,
+) {
+    if let Some(started) = started {
+        lines.push(format!(
+            "{name}={:.3}",
+            started.elapsed().as_secs_f64() * 1000.0
+        ));
+    }
+}
+
+fn env_truthy(name: &str) -> bool {
+    env::var(name)
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(false)
 }
 
 /// Convert JavaScript parameter values (passed as serde_json::Value) to Vec<Db2Value>.

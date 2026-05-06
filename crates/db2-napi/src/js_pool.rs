@@ -1,9 +1,13 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::js_connection::{JsClient, JsQueryResult};
-use crate::js_types::{client_error_to_napi, config_from_js, js_params_to_db2, query_result_to_js};
+use crate::js_types::{
+    client_error_to_napi, config_from_js, emit_napi_diagnostics, js_params_to_db2,
+    push_elapsed_diagnostic, query_diagnostics_enabled, query_result_to_js,
+};
 
 #[napi(object)]
 pub struct JsPoolConfig {
@@ -115,23 +119,87 @@ impl JsPool {
         sql: String,
         params: Option<Vec<serde_json::Value>>,
     ) -> Result<JsQueryResult> {
+        let collect_diagnostics = query_diagnostics_enabled();
+        let total_started = collect_diagnostics.then(Instant::now);
+        let mut napi_diagnostics = Vec::new();
+
+        let params_started = collect_diagnostics.then(Instant::now);
         let db2_params = match &params {
             Some(p) => js_params_to_db2(p),
             None => Vec::new(),
         };
+        push_elapsed_diagnostic(&mut napi_diagnostics, "napi_pool_params_ms", params_started);
 
+        let refs_started = collect_diagnostics.then(Instant::now);
         let param_refs: Vec<&dyn db2_client::ToSql> = db2_params
             .iter()
             .map(|p| p as &dyn db2_client::ToSql)
             .collect();
+        push_elapsed_diagnostic(
+            &mut napi_diagnostics,
+            "napi_pool_param_refs_ms",
+            refs_started,
+        );
 
-        let result = self
-            .inner
-            .query(&sql, &param_refs)
-            .await
-            .map_err(client_error_to_napi)?;
+        let acquire_started = collect_diagnostics.then(Instant::now);
+        let client = match self.inner.acquire().await {
+            Ok(client) => client,
+            Err(err) => {
+                push_elapsed_diagnostic(
+                    &mut napi_diagnostics,
+                    "napi_pool_acquire_ms",
+                    acquire_started,
+                );
+                emit_napi_diagnostics(&napi_diagnostics);
+                return Err(client_error_to_napi(err));
+            }
+        };
+        push_elapsed_diagnostic(
+            &mut napi_diagnostics,
+            "napi_pool_acquire_ms",
+            acquire_started,
+        );
 
-        Ok(query_result_to_js(result))
+        let query_started = collect_diagnostics.then(Instant::now);
+        let result = client.query(&sql, &param_refs).await;
+        push_elapsed_diagnostic(
+            &mut napi_diagnostics,
+            "napi_pool_client_query_ms",
+            query_started,
+        );
+
+        let release_started = collect_diagnostics.then(Instant::now);
+        self.inner.release(client).await;
+        push_elapsed_diagnostic(
+            &mut napi_diagnostics,
+            "napi_pool_release_ms",
+            release_started,
+        );
+
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => {
+                emit_napi_diagnostics(&napi_diagnostics);
+                return Err(client_error_to_napi(err));
+            }
+        };
+
+        let result_prepare_started = collect_diagnostics.then(Instant::now);
+        let mut js_result = query_result_to_js(result);
+        push_elapsed_diagnostic(
+            &mut napi_diagnostics,
+            "napi_result_prepare_ms",
+            result_prepare_started,
+        );
+        push_elapsed_diagnostic(
+            &mut napi_diagnostics,
+            "napi_pool_total_before_return_ms",
+            total_started,
+        );
+        emit_napi_diagnostics(&napi_diagnostics);
+        js_result.diagnostics.extend(napi_diagnostics);
+
+        Ok(js_result)
     }
 
     #[napi]
