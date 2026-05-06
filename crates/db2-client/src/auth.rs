@@ -1,4 +1,5 @@
 use bytes::BytesMut;
+use std::time::Instant;
 use tracing::{debug, trace, warn};
 
 use crate::config::{
@@ -36,6 +37,7 @@ pub(crate) async fn authenticate(
     transport: &mut Transport,
     config: &Config,
     accsec_rdbnam_mode: AccsecRdbnamMode,
+    mut diagnostics: Option<&mut Vec<String>>,
 ) -> Result<(ServerInfo, u16), Error> {
     debug!("Starting DRDA authentication handshake");
 
@@ -92,11 +94,18 @@ pub(crate) async fn authenticate(
     writer.write_request(&accsec_data, false); // not chained
 
     let send_buf = writer.finish();
+    let phase1_send_started = diagnostics.as_ref().map(|_| Instant::now());
     transport.write_bytes(&send_buf).await?;
+    push_auth_elapsed(
+        &mut diagnostics,
+        "db2_connect_auth_phase1_send_ms",
+        phase1_send_started,
+    );
     debug!("Sent EXCSAT + ACCSEC(secmec=0x{requested_secmec:04X})");
 
     // Read phase 1 responses
     let mut recv_buf = BytesMut::with_capacity(4096);
+    let phase1_read_started = diagnostics.as_ref().map(|_| Instant::now());
     transport.read_at_least(&mut recv_buf, 6).await?;
 
     let frames = loop {
@@ -111,7 +120,13 @@ pub(crate) async fn authenticate(
         }
         transport.read_bytes(&mut recv_buf).await?;
     };
+    push_auth_elapsed(
+        &mut diagnostics,
+        "db2_connect_auth_phase1_read_ms",
+        phase1_read_started,
+    );
 
+    let phase1_parse_started = diagnostics.as_ref().map(|_| Instant::now());
     let mut server_info = ServerInfo::default();
 
     // Parse EXSATRD
@@ -205,6 +220,11 @@ pub(crate) async fn authenticate(
         accepted_encryption_algorithm_code,
         accepted_encryption_key_length
     );
+    push_auth_elapsed(
+        &mut diagnostics,
+        "db2_connect_auth_phase1_parse_ms",
+        phase1_parse_started,
+    );
 
     // Phase 2: SECCHK + ACCRDB. If the server negotiated a mechanism other
     // than the one we initially requested, send a matching ACCSEC first.
@@ -265,7 +285,13 @@ pub(crate) async fn authenticate(
     writer.write_request(&accrdb_data, false); // not chained
 
     let send_buf = writer.finish();
+    let phase2_send_started = diagnostics.as_ref().map(|_| Instant::now());
     transport.write_bytes(&send_buf).await?;
+    push_auth_elapsed(
+        &mut diagnostics,
+        "db2_connect_auth_phase2_send_ms",
+        phase2_send_started,
+    );
     debug!(
         "Sent {}SECCHK + ACCRDB using {:?} credential encoding",
         if renegotiate_security {
@@ -277,6 +303,7 @@ pub(crate) async fn authenticate(
     );
 
     // Read phase 2 responses: optional ACCSECRD, SECCHKRM, ACCRDBRM/SQLCARD.
+    let phase2_read_started = diagnostics.as_ref().map(|_| Instant::now());
     if recv_buf.len() < 6 {
         transport.read_at_least(&mut recv_buf, 6).await?;
     }
@@ -307,9 +334,15 @@ pub(crate) async fn authenticate(
             Err(err) => return Err(err),
         }
     };
+    push_auth_elapsed(
+        &mut diagnostics,
+        "db2_connect_auth_phase2_read_ms",
+        phase2_read_started,
+    );
 
     // Parse phase 2 replies — DB2 may return only SECCHKRM on auth failure,
     // or close the socket immediately after sending the terminal error frame.
+    let phase2_parse_started = diagnostics.as_ref().map(|_| Instant::now());
     let mut saw_secchkrm = false;
     let mut found_accrdbrm = false;
     let mut access_error: Option<Error> = None;
@@ -445,9 +478,28 @@ pub(crate) async fn authenticate(
     // Post-auth: connection is established
 
     debug!("Authentication handshake complete");
+    push_auth_elapsed(
+        &mut diagnostics,
+        "db2_connect_auth_phase2_parse_ms",
+        phase2_parse_started,
+    );
 
     // Reset correlation ID for SQL operations
     Ok((server_info, 1))
+}
+
+fn push_auth_elapsed(
+    diagnostics: &mut Option<&mut Vec<String>>,
+    name: &str,
+    started: Option<Instant>,
+) {
+    if let (Some(diagnostics), Some(started)) = (diagnostics.as_deref_mut(), started) {
+        diagnostics.push(format!(
+            "{}={:.3}",
+            name,
+            started.elapsed().as_secs_f64() * 1000.0
+        ));
+    }
 }
 
 fn security_mechanism_code(security_mechanism: SecurityMechanism) -> u16 {

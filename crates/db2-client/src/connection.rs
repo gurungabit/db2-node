@@ -89,6 +89,7 @@ pub(crate) struct ClientInner {
     pub next_prepared_section: u16,
     pub free_prepared_sections: Vec<u16>,
     pub zos_lob_internal_depth: usize,
+    connection_diagnostics: Vec<String>,
     zos_select_cache: HashMap<String, CachedZosSelect>,
 }
 
@@ -580,28 +581,77 @@ impl ClientInner {
     }
 
     async fn establish_session(&mut self) -> Result<(), Error> {
-        let mut transport = Transport::connect(&self.config).await?;
+        let collect_diagnostics = query_diagnostics_enabled();
+        self.connection_diagnostics.clear();
+        let connect_total_started = collect_diagnostics.then(Instant::now);
 
+        let transport_started = collect_diagnostics.then(Instant::now);
+        let mut transport = Transport::connect_with_diagnostics(
+            &self.config,
+            collect_diagnostics.then_some(&mut self.connection_diagnostics),
+        )
+        .await?;
+        if let Some(started) = transport_started {
+            self.connection_diagnostics.push(format!(
+                "db2_connect_transport_ms={:.3}",
+                started.elapsed().as_secs_f64() * 1000.0
+            ));
+        }
+
+        let auth_started = collect_diagnostics.then(Instant::now);
         let (server_info, next_corr_id) = match auth::authenticate(
             &mut transport,
             &self.config,
             auth::AccsecRdbnamMode::Trimmed,
+            collect_diagnostics.then_some(&mut self.connection_diagnostics),
         )
         .await
         {
-            Ok(result) => result,
+            Ok(result) => {
+                if let Some(started) = auth_started {
+                    self.connection_diagnostics.push(format!(
+                        "db2_connect_auth_ms={:.3}",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    ));
+                }
+                result
+            }
             Err(err) if Self::should_retry_accsec_with_luw_legacy_handshake(&err) => {
                 trace!(
                     "Retrying authentication with LUW legacy handshake after trimmed RDBNAM was rejected: {}",
                     err
                 );
-                transport = Transport::connect(&self.config).await?;
-                auth::authenticate(
+                if collect_diagnostics {
+                    self.connection_diagnostics
+                        .push("db2_connect_auth_retry=luw_legacy".to_string());
+                }
+                let retry_transport_started = collect_diagnostics.then(Instant::now);
+                transport = Transport::connect_with_diagnostics(
+                    &self.config,
+                    collect_diagnostics.then_some(&mut self.connection_diagnostics),
+                )
+                .await?;
+                if let Some(started) = retry_transport_started {
+                    self.connection_diagnostics.push(format!(
+                        "db2_connect_retry_transport_ms={:.3}",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    ));
+                }
+                let retry_auth_started = collect_diagnostics.then(Instant::now);
+                let result = auth::authenticate(
                     &mut transport,
                     &self.config,
                     auth::AccsecRdbnamMode::LuwLegacy,
+                    collect_diagnostics.then_some(&mut self.connection_diagnostics),
                 )
-                .await?
+                .await?;
+                if let Some(started) = retry_auth_started {
+                    self.connection_diagnostics.push(format!(
+                        "db2_connect_retry_auth_ms={:.3}",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    ));
+                }
+                result
             }
             Err(Error::Connection(msg)) if msg.to_lowercase().contains("closed by server") => {
                 return Err(Error::Connection(
@@ -637,6 +687,21 @@ impl ClientInner {
                 self.reset_session_state(false).await;
                 return Err(err);
             }
+        }
+
+        if let Some(started) = connect_total_started {
+            self.connection_diagnostics.push(format!(
+                "db2_connect_total_ms={:.3} server_class={} server_release={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                self.server_info
+                    .as_ref()
+                    .map(|info| info.server_class.trim())
+                    .unwrap_or(""),
+                self.server_info
+                    .as_ref()
+                    .map(|info| info.server_release.trim())
+                    .unwrap_or("")
+            ));
         }
 
         debug!("Client connected to DB2 server");
@@ -2803,6 +2868,7 @@ impl Client {
                 next_prepared_section: 1,
                 free_prepared_sections: Vec::new(),
                 zos_lob_internal_depth: 0,
+                connection_diagnostics: Vec::new(),
                 zos_select_cache: HashMap::new(),
             })),
             pool_checkout: StdMutex::new(None),
@@ -2827,6 +2893,11 @@ impl Client {
         let checked_out = handle.checked_out.upgrade()?;
         let entry = checked_out.lock().await.remove(&handle.key);
         entry
+    }
+
+    pub async fn take_connection_diagnostics(&self) -> Vec<String> {
+        let mut guard = self.inner.lock().await;
+        std::mem::take(&mut guard.connection_diagnostics)
     }
 
     /// Connect to the DB2 server, performing TLS upgrade and DRDA authentication.

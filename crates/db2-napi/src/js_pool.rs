@@ -171,6 +171,9 @@ impl JsPool {
             "napi_pool_acquire_ms",
             acquire_started,
         );
+        if collect_diagnostics {
+            napi_diagnostics.extend(client.take_connection_diagnostics().await);
+        }
         if let Some((idle_before, active_before, max_connections)) = acquire_state_before {
             let idle_after = self.inner.idle_count().await;
             let active_after = self.inner.active_count().await;

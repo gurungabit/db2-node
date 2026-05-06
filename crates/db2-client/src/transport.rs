@@ -1,5 +1,6 @@
 use bytes::BytesMut;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -24,24 +25,40 @@ impl Transport {
     ///
     /// The `connect_timeout` bounds the entire process: TCP connect + TLS handshake.
     pub async fn connect(config: &Config) -> Result<Self, Error> {
+        Self::connect_with_diagnostics(config, None).await
+    }
+
+    pub(crate) async fn connect_with_diagnostics(
+        config: &Config,
+        diagnostics: Option<&mut Vec<String>>,
+    ) -> Result<Self, Error> {
         let addr = config.addr();
         debug!("Connecting to DB2 server at {}", addr);
 
-        timeout(config.connect_timeout, Self::connect_inner(config, &addr))
-            .await
-            .map_err(|_| {
-                Error::Timeout(format!(
-                    "Connection to {} timed out after {:?}",
-                    addr, config.connect_timeout
-                ))
-            })?
+        timeout(
+            config.connect_timeout,
+            Self::connect_inner(config, &addr, diagnostics),
+        )
+        .await
+        .map_err(|_| {
+            Error::Timeout(format!(
+                "Connection to {} timed out after {:?}",
+                addr, config.connect_timeout
+            ))
+        })?
     }
 
     /// Inner connection logic (TCP + optional TLS), called under timeout.
-    async fn connect_inner(config: &Config, addr: &str) -> Result<Self, Error> {
+    async fn connect_inner(
+        config: &Config,
+        addr: &str,
+        mut diagnostics: Option<&mut Vec<String>>,
+    ) -> Result<Self, Error> {
+        let tcp_started = diagnostics.as_ref().map(|_| Instant::now());
         let stream = TcpStream::connect(addr)
             .await
             .map_err(|e| Error::Connection(format!("Failed to connect to {}: {}", addr, e)))?;
+        push_transport_elapsed(&mut diagnostics, "db2_connect_tcp_ms", tcp_started);
 
         // Set TCP nodelay for low-latency protocol exchange
         stream
@@ -52,7 +69,7 @@ impl Transport {
 
         if config.ssl {
             debug!("Upgrading connection to TLS");
-            let tls_stream = Self::upgrade_tls(stream, config).await?;
+            let tls_stream = Self::upgrade_tls(stream, config, diagnostics).await?;
             Ok(Transport::Tls(Box::new(tls_stream)))
         } else {
             Ok(Transport::Tcp(stream))
@@ -63,18 +80,31 @@ impl Transport {
     async fn upgrade_tls(
         stream: TcpStream,
         config: &Config,
+        mut diagnostics: Option<&mut Vec<String>>,
     ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Error> {
+        let tls_config_started = diagnostics.as_ref().map(|_| Instant::now());
         let tls_config = Self::build_tls_config(config.ssl_config.as_ref())?;
+        push_transport_elapsed(
+            &mut diagnostics,
+            "db2_connect_tls_config_ms",
+            tls_config_started,
+        );
         let connector = tokio_rustls::TlsConnector::from(tls_config);
 
         let server_name = rustls::pki_types::ServerName::try_from(config.host.as_str())
             .map_err(|e| Error::Tls(format!("Invalid server name '{}': {}", config.host, e)))?
             .to_owned();
 
+        let tls_handshake_started = diagnostics.as_ref().map(|_| Instant::now());
         let tls_stream = connector
             .connect(server_name, stream)
             .await
             .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
+        push_transport_elapsed(
+            &mut diagnostics,
+            "db2_connect_tls_handshake_ms",
+            tls_handshake_started,
+        );
 
         debug!("TLS connection established");
         Ok(tls_stream)
@@ -118,6 +148,20 @@ impl Transport {
             Ok(config) => Ok(Arc::clone(config)),
             Err(message) => Err(Error::Tls(message.clone())),
         }
+    }
+}
+
+fn push_transport_elapsed(
+    diagnostics: &mut Option<&mut Vec<String>>,
+    name: &str,
+    started: Option<Instant>,
+) {
+    if let (Some(diagnostics), Some(started)) = (diagnostics.as_deref_mut(), started) {
+        diagnostics.push(format!(
+            "{}={:.3}",
+            name,
+            started.elapsed().as_secs_f64() * 1000.0
+        ));
     }
 }
 
