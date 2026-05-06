@@ -4404,6 +4404,7 @@ fn zos_select_section_cacheable(
     descriptors: &[db2_proto::fdoca::ColumnDescriptor],
 ) -> bool {
     !result_metadata_needs_zos_lob_route(columns, descriptors)
+        && !(descriptors.is_empty() && descriptorless_columns_have_ambiguous_text(columns))
 }
 
 fn result_columns_need_zos_lob_route(columns: &[ColumnInfo]) -> bool {
@@ -4446,6 +4447,16 @@ fn descriptor_has_large_lob_inline_type(descriptor: &db2_proto::fdoca::ColumnDes
         | db2_proto::types::Db2Type::LobChar(len) => len & 0x8000 != 0 || len >= 32_704,
         _ => false,
     }
+}
+
+fn descriptorless_columns_have_ambiguous_text(columns: &[ColumnInfo]) -> bool {
+    columns.iter().any(|column| {
+        let ty = column.type_name.trim().to_ascii_lowercase();
+        matches!(
+            ty.as_str(),
+            "char" | "varchar" | "long varchar" | "graphic" | "vargraphic" | "long vargraphic"
+        )
+    })
 }
 
 fn column_info_has_lob_hint(columns: &[ColumnInfo]) -> bool {
@@ -4996,6 +5007,8 @@ fn store_zos_select_metadata(
 ) -> bool {
     if column_info.is_empty()
         || result_metadata_needs_zos_lob_route(column_info, result_descriptors)
+        || (result_descriptors.is_empty()
+            && descriptorless_columns_have_ambiguous_text(column_info))
     {
         return false;
     }
@@ -7282,6 +7295,19 @@ mod tests {
     }
 
     #[test]
+    fn zos_select_metadata_cache_skips_descriptorless_generic_text() {
+        let key = format!("unit:descriptorless-generic-text:{}", line!());
+        let columns = vec![ColumnInfo::new(
+            "INSP_RPT_DETL_DOC".to_string(),
+            "VARCHAR".to_string(),
+            true,
+        )];
+
+        assert!(!store_zos_select_metadata(&key, &columns, &[]));
+        assert!(lookup_zos_select_metadata(&key).is_none());
+    }
+
+    #[test]
     fn zos_select_section_cache_allows_descriptorless_non_lob_columns() {
         let columns = vec![
             ColumnInfo::with_precision(
@@ -7320,19 +7346,24 @@ mod tests {
     }
 
     #[test]
-    fn result_columns_lob_route_detects_opened_native_lob_metadata() {
+    fn zos_select_section_cache_skips_descriptorless_generic_text() {
         let prepare_columns = vec![ColumnInfo::new(
             "INSP_RPT_DETL_DOC".to_string(),
             "VARCHAR".to_string(),
             true,
         )];
+
+        assert!(!zos_select_section_cacheable(&prepare_columns, &[]));
+    }
+
+    #[test]
+    fn result_columns_lob_route_detects_opened_native_lob_metadata() {
         let opened_columns = vec![ColumnInfo::new(
             "INSP_RPT_DETL_DOC".to_string(),
             "VarChar(32777)".to_string(),
             true,
         )];
 
-        assert!(zos_select_section_cacheable(&prepare_columns, &[]));
         assert!(result_columns_need_zos_lob_route(&opened_columns));
     }
 
@@ -7358,7 +7389,7 @@ mod tests {
         let key = format!("unit:opened-lob-evict:{}", line!());
         let prepare_columns = vec![ColumnInfo::new(
             "INSP_RPT_DETL_DOC".to_string(),
-            "VARCHAR".to_string(),
+            "VARCHAR(4000)".to_string(),
             true,
         )];
 
