@@ -931,12 +931,21 @@ fn decode_character_bytes(data: &[u8], ccsid: u16) -> String {
     }
 
     if data.is_ascii() {
-        return String::from_utf8_lossy(data).to_string();
+        return ascii_bytes_to_string(data);
     }
 
     // z/OS compact QRYDSC often omits CCSID detail even though row bytes are
     // still EBCDIC. Prefer readable text for those result blocks.
     crate::codepage::ebcdic037_to_utf8(data)
+}
+
+fn ascii_bytes_to_string(data: &[u8]) -> String {
+    let mut value = String::with_capacity(data.len());
+    // Safe because callers already proved every byte is ASCII, which is valid UTF-8.
+    unsafe {
+        value.as_mut_vec().extend_from_slice(data);
+    }
+    value
 }
 
 fn decode_graphic_bytes(data: &[u8], ccsid: u16) -> String {
