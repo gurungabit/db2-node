@@ -2,7 +2,7 @@ use bytes::BytesMut;
 use std::collections::HashMap;
 use std::env;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedSemaphorePermit};
 use tokio::time::timeout;
 use tracing::{debug, trace};
@@ -1062,7 +1062,7 @@ impl ClientInner {
         let pipeline_cached_fetch = self.zos_lob_internal_depth == 0
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
             && !has_zos_lobs
-            && cached_query_instance_id.is_some()
+            && (cached_query_instance_id.is_some() || cached_pipeline_fetch_after_open)
             && (zos_non_lob_open_rowset.is_some() || cached_pipeline_fetch_after_open)
             && use_zos_non_lob_cached_open_fetch_pipeline();
         let wait_for_open_data = self.zos_lob_internal_depth == 0
@@ -1070,6 +1070,26 @@ impl ClientInner {
             && !has_zos_lobs
             && fetch_size_override.is_some()
             && (zos_non_lob_limited_block_open || use_zos_non_lob_open_data_drain());
+        let collect_diagnostics = query_diagnostics_enabled();
+        let mut open_diagnostics = Vec::new();
+        if collect_diagnostics {
+            open_diagnostics.push(format!(
+                "zos_open_plan has_lobs={} cached_qryinsid={} cached_pipeline_after_open={} pipeline={} fetch_size_override={} open_rowset={} limited_block_open={} wait_open_data={} non_lob_extra_blocks={}",
+                has_zos_lobs,
+                cached_query_instance_id.is_some(),
+                cached_pipeline_fetch_after_open,
+                pipeline_cached_fetch,
+                fetch_size_override
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                zos_non_lob_open_rowset
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                zos_non_lob_limited_block_open,
+                wait_for_open_data,
+                use_zos_non_lob_extra_blocks
+            ));
+        }
         let opnqry_data = {
             let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
             ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
@@ -1107,12 +1127,40 @@ impl ClientInner {
             writer.write_request(&opnqry_data, false);
         }
         let send_buf = writer.finish();
+        let send_started = collect_diagnostics.then(Instant::now);
         self.send_bytes(&send_buf).await?;
+        if let Some(started) = send_started {
+            open_diagnostics.push(format!(
+                "zos_open_send_ms={:.3} bytes={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                send_buf.len()
+            ));
+        }
 
+        let read_started = collect_diagnostics.then(Instant::now);
         let mut frames = self.read_reply_frames().await?;
+        if let Some(started) = read_started {
+            open_diagnostics.push(format!(
+                "zos_open_first_read_ms={:.3} frames={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                frames.len()
+            ));
+        }
         if (use_extended_materialized_blocks || use_zos_non_lob_extra_blocks) && !has_zos_lobs {
+            let frames_before_drain = frames.len();
+            let drain_started = collect_diagnostics.then(Instant::now);
             self.drain_zos_open_reply_frames(&mut frames, wait_for_open_data)
                 .await?;
+            if let Some(started) = drain_started {
+                open_diagnostics.push(format!(
+                    "zos_open_drain_ms={:.3} frames_before={} frames_after={} has_data={} has_terminal={}",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    frames_before_drain,
+                    frames.len(),
+                    frames_have_query_data(&frames),
+                    frames_have_data_or_terminal_reply(&frames)
+                ));
+            }
         }
         let pipeline_fetch_after_open = if pipeline_cached_fetch {
             cached_pipeline_fetch_after_open
@@ -1122,6 +1170,17 @@ impl ClientInner {
                 && !frames_have_data_or_terminal_reply(&frames)
         };
         let query_instance_id = query_instance_id_from_frames(&frames)?;
+        if collect_diagnostics {
+            open_diagnostics.push(format!(
+                "zos_open_observed qryinsid={} pipeline_after_open={} frames={} has_data={} has_terminal={}",
+                query_instance_id.is_some(),
+                pipeline_fetch_after_open,
+                frames.len(),
+                frames_have_query_data(&frames),
+                frames_have_data_or_terminal_reply(&frames)
+            ));
+        }
+        let process_started = collect_diagnostics.then(Instant::now);
         let result = self
             .process_query_reply_with_fetch_size(
                 &frames,
@@ -1130,11 +1189,20 @@ impl ClientInner {
                 fetch_size_override,
             )
             .await;
+        if let Some(started) = process_started {
+            open_diagnostics.push(format!(
+                "zos_open_process_ms={:.3}",
+                started.elapsed().as_secs_f64() * 1000.0
+            ));
+        }
         if use_native_zos_lob_strategy() {
-            return result.map(|result| ZosSelectOpenResult {
-                result,
-                query_instance_id,
-                pipeline_fetch_after_open,
+            return result.map(|mut result| {
+                result.diagnostics.extend(open_diagnostics);
+                ZosSelectOpenResult {
+                    result,
+                    query_instance_id,
+                    pipeline_fetch_after_open,
+                }
             });
         }
         self.retry_zos_lob_chunking_after_decode_error(
@@ -1145,10 +1213,13 @@ impl ClientInner {
             "direct-decode-error",
         )
         .await
-        .map(|result| ZosSelectOpenResult {
-            result,
-            query_instance_id,
-            pipeline_fetch_after_open,
+        .map(|mut result| {
+            result.diagnostics.extend(open_diagnostics);
+            ZosSelectOpenResult {
+                result,
+                query_instance_id,
+                pipeline_fetch_after_open,
+            }
         })
     }
 
@@ -2128,9 +2199,22 @@ impl ClientInner {
                 let mut stalled_fetches = 0usize;
                 loop {
                     let pending_before = cursor.pending_row_bytes.len();
+                    let fetch_started = collect_diagnostics.then(Instant::now);
                     let (more_rows, done, more_extdta_payloads) =
                         cursor.fetch_next_from(self).await?;
                     let pending_after = cursor.pending_row_bytes.len();
+                    if let Some(started) = fetch_started {
+                        diagnostics.push(format!(
+                            "cursor_fetch_ms={:.3} rows={} done={} extdta={} pending_before={} pending_after={} last_fetch=[{}]",
+                            started.elapsed().as_secs_f64() * 1000.0,
+                            more_rows.len(),
+                            done,
+                            more_extdta_payloads.len(),
+                            pending_before,
+                            pending_after,
+                            cursor.last_fetch_diagnostics.join("; ")
+                        ));
+                    }
                     let made_progress = !more_rows.is_empty()
                         || !more_extdta_payloads.is_empty()
                         || done
