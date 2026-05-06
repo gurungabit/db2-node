@@ -3525,7 +3525,10 @@ fn use_zos_non_lob_cached_open_fetch_pipeline() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
-        .unwrap_or(true)
+        // CNTQRY is tied to the active OPNQRY reply's query instance id. Keep
+        // speculative open+fetch pipelining opt-in so hot non-LOB reads do not
+        // pay an idle drain when z/OS waits for a normal CNTQRY.
+        .unwrap_or(false)
 }
 
 fn use_zos_non_lob_excsqlstt_output() -> bool {
@@ -3573,7 +3576,7 @@ fn zos_non_lob_open_data_drain_timeout() -> Duration {
 }
 
 fn zos_non_lob_cached_fetch_drain_timeout() -> Duration {
-    Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_CACHED_FETCH_DRAIN_MS", 75, 0, 250) as u64)
+    Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_CACHED_FETCH_DRAIN_MS", 10, 0, 250) as u64)
 }
 
 fn skip_zos_native_lob_initial_drain() -> bool {
