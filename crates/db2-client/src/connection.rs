@@ -884,11 +884,19 @@ impl ClientInner {
                         Ok(column_info) => {
                             let result_descriptors = self.parse_prepare_result_descriptors(&frames);
                             if let Some(cache_key) = global_metadata_cache_key.as_deref() {
-                                store_zos_select_metadata(
+                                let metadata_cache_stored = store_zos_select_metadata(
                                     cache_key,
                                     &column_info,
                                     &result_descriptors,
                                 );
+                                if collect_diagnostics {
+                                    zos_prepare_diagnostics.push(format!(
+                                        "zos_prepare_metadata_cache_store={} columns={} descriptors={}",
+                                        metadata_cache_stored,
+                                        column_info.len(),
+                                        result_descriptors.len()
+                                    ));
+                                }
                             }
                             (column_info, result_descriptors)
                         }
@@ -4751,19 +4759,18 @@ fn store_zos_select_metadata(
     key: &str,
     column_info: &[ColumnInfo],
     result_descriptors: &[db2_proto::fdoca::ColumnDescriptor],
-) {
+) -> bool {
     if column_info.is_empty()
-        || result_descriptors.is_empty()
         || result_metadata_needs_zos_lob_route(column_info, result_descriptors)
     {
-        return;
+        return false;
     }
 
     let Ok(mut cache) = ZOS_SELECT_METADATA_CACHE
         .get_or_init(|| StdMutex::new(HashMap::new()))
         .lock()
     else {
-        return;
+        return false;
     };
 
     if cache.len() >= ZOS_SELECT_METADATA_CACHE_MAX_ENTRIES && !cache.contains_key(key) {
@@ -4779,6 +4786,7 @@ fn store_zos_select_metadata(
             result_descriptors: result_descriptors.to_vec(),
         },
     );
+    true
 }
 
 pub(crate) fn query_diagnostics_enabled() -> bool {
@@ -6997,6 +7005,46 @@ mod tests {
             "CLOB".to_string(),
             true,
         )]));
+    }
+
+    #[test]
+    fn zos_select_metadata_cache_stores_descriptorless_non_lob_columns() {
+        let key = format!("unit:descriptorless-non-lob:{}", line!());
+        let columns = vec![
+            ColumnInfo::with_precision(
+                "PROP_ID".to_string(),
+                "Decimal { precision: 11, scale: 0 }".to_string(),
+                false,
+                11,
+                0,
+            ),
+            ColumnInfo::new(
+                "UNDWR_INSTRUCT_TXT".to_string(),
+                "VARCHAR(4000)".to_string(),
+                true,
+            ),
+        ];
+
+        assert!(store_zos_select_metadata(&key, &columns, &[]));
+
+        let cached = lookup_zos_select_metadata(&key).expect("descriptorless metadata cached");
+        assert_eq!(cached.column_info.len(), 2);
+        assert_eq!(cached.column_info[1].name, "UNDWR_INSTRUCT_TXT");
+        assert_eq!(cached.column_info[1].type_name, "VARCHAR(4000)");
+        assert!(cached.result_descriptors.is_empty());
+    }
+
+    #[test]
+    fn zos_select_metadata_cache_skips_descriptorless_lob_hints() {
+        let key = format!("unit:descriptorless-lob:{}", line!());
+        let columns = vec![ColumnInfo::new(
+            "INSP_RPT_DETL_DOC".to_string(),
+            "VarChar(32777)".to_string(),
+            true,
+        )];
+
+        assert!(!store_zos_select_metadata(&key, &columns, &[]));
+        assert!(lookup_zos_select_metadata(&key).is_none());
     }
 
     #[test]
