@@ -808,6 +808,7 @@ impl ClientInner {
 
             if params.is_empty() && use_zos_sqlstt {
                 let collect_diagnostics = query_diagnostics_enabled();
+                let mut deferred_zos_prepare_diagnostics = Vec::new();
                 if self.zos_lob_internal_depth == 0 && use_zos_select_cache() {
                     if let Some(cached) = self.zos_select_cache.get(sql).cloned() {
                         if !zos_select_section_cacheable(
@@ -832,22 +833,53 @@ impl ClientInner {
                                 .await;
                             match result {
                                 Ok(opened) => {
-                                    if let Some(cached) = self.zos_select_cache.get_mut(sql) {
-                                        if let Some(query_instance_id) = opened.query_instance_id {
-                                            cached.query_instance_id =
-                                                Some(query_instance_id.into());
+                                    let cached_result_has_lobs =
+                                        result_columns_need_zos_lob_route(&opened.result.columns);
+                                    if cached_result_has_lobs {
+                                        self.zos_select_cache.remove(sql);
+                                        self.release_prepared_section(cached.section_number);
+                                        if use_zos_select_metadata_cache() {
+                                            let metadata_key =
+                                                self.zos_select_metadata_cache_key(sql);
+                                            remove_zos_select_metadata(&metadata_key);
                                         }
-                                        cached.pipeline_fetch_after_open =
-                                            opened.pipeline_fetch_after_open;
-                                    }
-                                    let mut result = opened.result;
-                                    if collect_diagnostics {
-                                        result.diagnostics.push(format!(
+                                        if opened.result.rows.is_empty() {
+                                            if collect_diagnostics {
+                                                deferred_zos_prepare_diagnostics.push(format!(
+                                                    "zos_prepare_cache_hit_lob_retry=true section={}",
+                                                    cached_section_number
+                                                ));
+                                            }
+                                        } else {
+                                            let mut result = opened.result;
+                                            if collect_diagnostics {
+                                                result.diagnostics.push(format!(
+                                                    "zos_prepare_cache_hit=true cache=connection section={} dropped_lob_cache=true",
+                                                    cached_section_number
+                                                ));
+                                            }
+                                            return Ok(result);
+                                        }
+                                    } else {
+                                        if let Some(cached) = self.zos_select_cache.get_mut(sql) {
+                                            if let Some(query_instance_id) =
+                                                opened.query_instance_id
+                                            {
+                                                cached.query_instance_id =
+                                                    Some(query_instance_id.into());
+                                            }
+                                            cached.pipeline_fetch_after_open =
+                                                opened.pipeline_fetch_after_open;
+                                        }
+                                        let mut result = opened.result;
+                                        if collect_diagnostics {
+                                            result.diagnostics.push(format!(
                                             "zos_prepare_cache_hit=true cache=connection section={}",
                                             cached_section_number
                                         ));
+                                        }
+                                        return Ok(result);
                                     }
-                                    return Ok(result);
                                 }
                                 Err(err) if should_reprepare_cached_zos_select(&err) => {
                                     self.zos_select_cache.remove(sql);
@@ -889,6 +921,7 @@ impl ClientInner {
                         global_metadata_cache_hit,
                         !global_metadata_cache_hit
                     ));
+                    zos_prepare_diagnostics.extend(deferred_zos_prepare_diagnostics);
                 }
                 let prpsqlstt_data = if global_cached_metadata.is_some() {
                     db2_proto::commands::prpsqlstt::build_prpsqlstt_without_sqlda(&pkgnamcsn)
@@ -1010,14 +1043,32 @@ impl ClientInner {
                 match result {
                     Ok(opened) => {
                         let mut result = opened.result;
-                        result.diagnostics.extend(zos_prepare_diagnostics);
-                        if let Some(section_number) = cache_section {
-                            let section_cacheable =
-                                zos_select_section_cacheable(&column_info, &result_descriptors);
+                        let opened_result_has_lobs =
+                            result_columns_need_zos_lob_route(&result.columns);
+                        if opened_result_has_lobs {
+                            let metadata_cache_evicted = global_metadata_cache_key
+                                .as_deref()
+                                .is_some_and(remove_zos_select_metadata);
                             if collect_diagnostics {
                                 result.diagnostics.push(format!(
-                                    "zos_prepare_section_cache_store={} has_lobs={}",
-                                    section_cacheable, !section_cacheable
+                                    "zos_prepare_metadata_cache_evict_lob={}",
+                                    metadata_cache_evicted
+                                ));
+                            }
+                        }
+                        result.diagnostics.extend(zos_prepare_diagnostics);
+                        if let Some(section_number) = cache_section {
+                            let prepare_section_cacheable =
+                                zos_select_section_cacheable(&column_info, &result_descriptors);
+                            let section_cacheable =
+                                prepare_section_cacheable && !opened_result_has_lobs;
+                            if collect_diagnostics {
+                                result.diagnostics.push(format!(
+                                    "zos_prepare_section_cache_store={} has_lobs={} prepare_has_lobs={} opened_has_lobs={}",
+                                    section_cacheable,
+                                    !section_cacheable,
+                                    !prepare_section_cacheable,
+                                    opened_result_has_lobs
                                 ));
                             }
                             if section_cacheable {
@@ -4321,6 +4372,10 @@ fn zos_select_section_cacheable(
     !result_metadata_needs_zos_lob_route(columns, descriptors)
 }
 
+fn result_columns_need_zos_lob_route(columns: &[ColumnInfo]) -> bool {
+    !columns.is_empty() && result_metadata_needs_zos_lob_route(columns, &[])
+}
+
 fn descriptors_need_zos_lob_materialization(
     columns: &[ColumnInfo],
     descriptors: &[db2_proto::fdoca::ColumnDescriptor],
@@ -4852,6 +4907,15 @@ fn lookup_zos_select_metadata(key: &str) -> Option<CachedZosSelectMetadata> {
         .lock()
         .ok()
         .and_then(|cache| cache.get(key).cloned())
+}
+
+fn remove_zos_select_metadata(key: &str) -> bool {
+    ZOS_SELECT_METADATA_CACHE
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|mut cache| cache.remove(key))
+        .is_some()
 }
 
 fn store_zos_select_metadata(
@@ -7182,6 +7246,38 @@ mod tests {
         ];
 
         assert!(!zos_select_section_cacheable(&columns, &[]));
+    }
+
+    #[test]
+    fn result_columns_lob_route_detects_opened_native_lob_metadata() {
+        let prepare_columns = vec![ColumnInfo::new(
+            "INSP_RPT_DETL_DOC".to_string(),
+            "VARCHAR".to_string(),
+            true,
+        )];
+        let opened_columns = vec![ColumnInfo::new(
+            "INSP_RPT_DETL_DOC".to_string(),
+            "VarChar(32777)".to_string(),
+            true,
+        )];
+
+        assert!(zos_select_section_cacheable(&prepare_columns, &[]));
+        assert!(result_columns_need_zos_lob_route(&opened_columns));
+    }
+
+    #[test]
+    fn zos_select_metadata_cache_can_evict_lobs_discovered_after_open() {
+        let key = format!("unit:opened-lob-evict:{}", line!());
+        let prepare_columns = vec![ColumnInfo::new(
+            "INSP_RPT_DETL_DOC".to_string(),
+            "VARCHAR".to_string(),
+            true,
+        )];
+
+        assert!(store_zos_select_metadata(&key, &prepare_columns, &[]));
+        assert!(lookup_zos_select_metadata(&key).is_some());
+        assert!(remove_zos_select_metadata(&key));
+        assert!(lookup_zos_select_metadata(&key).is_none());
     }
 
     #[test]
