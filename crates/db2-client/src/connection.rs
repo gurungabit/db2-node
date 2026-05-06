@@ -850,7 +850,21 @@ impl ClientInner {
                                 Ok(opened) => {
                                     let cached_result_has_lobs =
                                         result_has_zos_lob_materialization(&opened.result);
-                                    if cached_result_has_lobs {
+                                    if opened.result.rows.is_empty()
+                                        && use_zos_select_cached_empty_retry()
+                                    {
+                                        self.zos_select_cache.remove(sql);
+                                        self.release_prepared_section(cached.section_number);
+                                        let metadata_cache_removed = global_metadata_cache_key
+                                            .as_deref()
+                                            .is_some_and(remove_zos_select_metadata);
+                                        if collect_diagnostics {
+                                            deferred_zos_prepare_diagnostics.push(format!(
+                                                "zos_prepare_cache_hit_empty_retry=true section={} metadata_cache_removed={}",
+                                                cached_section_number, metadata_cache_removed
+                                            ));
+                                        }
+                                    } else if cached_result_has_lobs {
                                         self.zos_select_cache.remove(sql);
                                         self.release_prepared_section(cached.section_number);
                                         if let Some(metadata_key) =
@@ -4926,6 +4940,15 @@ fn use_zos_select_cache() -> bool {
 
 fn use_zos_select_metadata_cache() -> bool {
     env::var("DB2_ZOS_SELECT_METADATA_CACHE")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn use_zos_select_cached_empty_retry() -> bool {
+    env::var("DB2_ZOS_SELECT_CACHED_EMPTY_RETRY")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
