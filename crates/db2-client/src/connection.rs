@@ -49,12 +49,18 @@ struct CachedZosSelect {
     pkgnamcsn: Arc<[u8]>,
     column_info: Vec<ColumnInfo>,
     result_descriptors: Vec<db2_proto::fdoca::ColumnDescriptor>,
+    query_instance_id: Option<Arc<[u8]>>,
 }
 
 #[derive(Clone)]
 struct CachedZosSelectMetadata {
     column_info: Vec<ColumnInfo>,
     result_descriptors: Vec<db2_proto::fdoca::ColumnDescriptor>,
+}
+
+struct ZosSelectOpenResult {
+    result: QueryResult,
+    query_instance_id: Option<Vec<u8>>,
 }
 
 static ZOS_SELECT_METADATA_CACHE: OnceLock<StdMutex<HashMap<String, CachedZosSelectMetadata>>> =
@@ -688,16 +694,25 @@ impl ClientInner {
                 if self.zos_lob_internal_depth == 0 && use_zos_select_cache() {
                     if let Some(cached) = self.zos_select_cache.get(sql).cloned() {
                         self.activate_section(cached.package_id, cached.section_number);
+                        let cached_query_instance_id = cached.query_instance_id.clone();
                         let result = self
                             .open_zos_select(
                                 sql,
                                 &cached.pkgnamcsn,
                                 &cached.column_info,
                                 &cached.result_descriptors,
+                                cached_query_instance_id.as_deref(),
                             )
                             .await;
                         match result {
-                            Ok(result) => return Ok(result),
+                            Ok(opened) => {
+                                if let Some(query_instance_id) = opened.query_instance_id {
+                                    if let Some(cached) = self.zos_select_cache.get_mut(sql) {
+                                        cached.query_instance_id = Some(query_instance_id.into());
+                                    }
+                                }
+                                return Ok(opened.result);
+                            }
                             Err(err) if should_reprepare_cached_zos_select(&err) => {
                                 self.zos_select_cache.remove(sql);
                                 self.release_prepared_section(cached.section_number);
@@ -793,11 +808,15 @@ impl ClientInner {
                     },
                 };
                 let result = self
-                    .open_zos_select(sql, &pkgnamcsn, &column_info, &result_descriptors)
+                    .open_zos_select(sql, &pkgnamcsn, &column_info, &result_descriptors, None)
                     .await;
                 match result {
-                    Ok(result) => {
+                    Ok(opened) => {
                         if let Some(section_number) = cache_section {
+                            let query_instance_id = opened
+                                .query_instance_id
+                                .as_ref()
+                                .map(|value| Arc::<[u8]>::from(value.as_slice()));
                             self.zos_select_cache.insert(
                                 sql.to_string(),
                                 CachedZosSelect {
@@ -806,10 +825,11 @@ impl ClientInner {
                                     pkgnamcsn: pkgnamcsn.clone().into(),
                                     column_info,
                                     result_descriptors,
+                                    query_instance_id,
                                 },
                             );
                         }
-                        return Ok(result);
+                        return Ok(opened.result);
                     }
                     Err(err) => {
                         if let Some(section_number) = cache_section {
@@ -914,7 +934,8 @@ impl ClientInner {
         pkgnamcsn: &[u8],
         column_info: &[ColumnInfo],
         result_descriptors: &[db2_proto::fdoca::ColumnDescriptor],
-    ) -> Result<QueryResult, Error> {
+        cached_query_instance_id: Option<&[u8]>,
+    ) -> Result<ZosSelectOpenResult, Error> {
         if self.zos_lob_internal_depth == 0 && !use_native_zos_lob_strategy() {
             let current_schema = self.config.current_schema.clone();
             let prepare_columns =
@@ -928,7 +949,10 @@ impl ClientInner {
                 )
                 .await?
             {
-                return Ok(result);
+                return Ok(ZosSelectOpenResult {
+                    result,
+                    query_instance_id: None,
+                });
             }
 
             if result_metadata_needs_zos_lob_route(column_info, result_descriptors) {
@@ -946,7 +970,10 @@ impl ClientInner {
                         )
                         .await?
                     {
-                        return Ok(result);
+                        return Ok(ZosSelectOpenResult {
+                            result,
+                            query_instance_id: None,
+                        });
                     }
                 }
             }
@@ -979,6 +1006,11 @@ impl ClientInner {
         } else {
             None
         };
+        let pipeline_cached_fetch = self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && !has_zos_lobs
+            && cached_query_instance_id.is_some()
+            && use_zos_non_lob_cached_open_fetch_pipeline();
         let opnqry_data = {
             let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
             ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
@@ -1001,7 +1033,20 @@ impl ClientInner {
 
         let corr_id = self.next_correlation_id();
         let mut writer = DssWriter::new(corr_id);
-        writer.write_request(&opnqry_data, false);
+        if pipeline_cached_fetch {
+            let cntqry_data = db2_proto::commands::cntqry::build_cntqry(
+                pkgnamcsn,
+                cached_query_instance_id,
+                db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
+                use_zos_non_lob_extra_blocks.then_some(-1),
+                fetch_size_override,
+            );
+            writer.write_request(&opnqry_data, true);
+            writer.set_correlation_id(self.next_correlation_id());
+            writer.write_request(&cntqry_data, false);
+        } else {
+            writer.write_request(&opnqry_data, false);
+        }
         let send_buf = writer.finish();
         self.send_bytes(&send_buf).await?;
 
@@ -1009,6 +1054,7 @@ impl ClientInner {
         if (use_extended_materialized_blocks || use_zos_non_lob_extra_blocks) && !has_zos_lobs {
             self.drain_zos_open_reply_frames(&mut frames).await?;
         }
+        let query_instance_id = query_instance_id_from_frames(&frames)?;
         let result = self
             .process_query_reply_with_fetch_size(
                 &frames,
@@ -1018,7 +1064,10 @@ impl ClientInner {
             )
             .await;
         if use_native_zos_lob_strategy() {
-            return result;
+            return result.map(|result| ZosSelectOpenResult {
+                result,
+                query_instance_id,
+            });
         }
         self.retry_zos_lob_chunking_after_decode_error(
             sql,
@@ -1028,6 +1077,10 @@ impl ClientInner {
             "direct-decode-error",
         )
         .await
+        .map(|result| ZosSelectOpenResult {
+            result,
+            query_instance_id,
+        })
     }
 
     async fn execute_query_with_reconnect_retry(
@@ -3193,6 +3246,15 @@ fn use_zos_non_lob_sql_rowset_cap() -> bool {
 
 fn use_zos_non_lob_open_rowset() -> bool {
     env::var("DB2_ZOS_NON_LOB_OPEN_ROWSET")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn use_zos_non_lob_cached_open_fetch_pipeline() -> bool {
+    env::var("DB2_ZOS_NON_LOB_CACHED_OPEN_FETCH_PIPELINE")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
@@ -5534,6 +5596,22 @@ fn prepare_frames_have_result_metadata(frames: &[DssFrame]) -> bool {
                     .any(|obj| obj.code_point == codepoints::SQLDARD)
             })
     })
+}
+
+fn query_instance_id_from_frames(frames: &[DssFrame]) -> Result<Option<Vec<u8>>, Error> {
+    for frame in frames {
+        for obj in ClientInner::parse_ddm_objects(&frame.payload)? {
+            if obj.code_point == codepoints::OPNQRYRM {
+                let reply = db2_proto::replies::opnqryrm::parse_opnqryrm(&obj)
+                    .map_err(|err| Error::Protocol(err.to_string()))?;
+                if reply.is_success() && reply.query_instance_id.is_some() {
+                    return Ok(reply.query_instance_id);
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 fn apply_extdta_payloads_to_rows(
