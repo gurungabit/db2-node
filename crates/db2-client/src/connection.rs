@@ -959,6 +959,26 @@ impl ClientInner {
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
             && !has_zos_lobs
             && use_zos_non_lob_extra_blocks();
+        let fetch_size_override = if self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && !has_zos_lobs
+            && use_zos_non_lob_sql_rowset_cap()
+        {
+            parse_fetch_first_row_limit(sql)
+                .and_then(|limit| u32::try_from(limit).ok())
+                .map(|limit| limit.min(self.config.fetch_size.max(1)))
+        } else {
+            None
+        };
+        let zos_non_lob_open_rowset = if self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && !has_zos_lobs
+            && use_zos_non_lob_open_rowset()
+        {
+            fetch_size_override
+        } else {
+            None
+        };
         let opnqry_data = {
             let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
             ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
@@ -966,6 +986,9 @@ impl ClientInner {
                 codepoints::QRYBLKSZ,
                 db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
             );
+            if let Some(rows) = zos_non_lob_open_rowset {
+                ddm.add_u32(codepoints::QRYROWSET, rows);
+            }
             if has_zos_lobs && use_native_zos_lob_strategy() {
                 ddm.add_u16(codepoints::MAXBLKEXT, (-1i16) as u16);
                 ddm.add_u16(codepoints::QRYPRCTYP, codepoints::QRYPRCTYP_LMTBLKPRC);
@@ -986,17 +1009,6 @@ impl ClientInner {
         if (use_extended_materialized_blocks || use_zos_non_lob_extra_blocks) && !has_zos_lobs {
             self.drain_zos_open_reply_frames(&mut frames).await?;
         }
-        let fetch_size_override = if self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
-            && !has_zos_lobs
-            && use_zos_non_lob_sql_rowset_cap()
-        {
-            parse_fetch_first_row_limit(sql)
-                .and_then(|limit| u32::try_from(limit).ok())
-                .map(|limit| limit.min(self.config.fetch_size.max(1)))
-        } else {
-            None
-        };
         let result = self
             .process_query_reply_with_fetch_size(
                 &frames,
@@ -2735,7 +2747,7 @@ fn optimize_zos_select_sql(sql: &str) -> Option<String> {
 
     let mut optimized = String::with_capacity(body.len() + 48);
     optimized.push_str(select_part);
-    optimized.push_str(" FOR READ ONLY");
+    optimized.push_str(" FOR FETCH ONLY");
     if let Some(limit) = parse_fetch_first_row_limit(select_part) {
         optimized.push_str(" OPTIMIZE FOR ");
         optimized.push_str(&limit.to_string());
@@ -3172,6 +3184,15 @@ fn use_zos_non_lob_extra_blocks() -> bool {
 
 fn use_zos_non_lob_sql_rowset_cap() -> bool {
     env::var("DB2_ZOS_NON_LOB_SQL_ROWSET_CAP")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn use_zos_non_lob_open_rowset() -> bool {
+    env::var("DB2_ZOS_NON_LOB_OPEN_ROWSET")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
@@ -5963,7 +5984,7 @@ mod tests {
             )
             .as_deref(),
             Some(
-                "SELECT * FROM FIREINSP.PLCY_SNPST FETCH FIRST 3 ROWS ONLY FOR READ ONLY OPTIMIZE FOR 3 ROWS"
+                "SELECT * FROM FIREINSP.PLCY_SNPST FETCH FIRST 3 ROWS ONLY FOR FETCH ONLY OPTIMIZE FOR 3 ROWS"
             )
         );
     }
@@ -5972,7 +5993,7 @@ mod tests {
     fn optimize_zos_select_sql_preserves_isolation_clause() {
         assert_eq!(
             optimize_zos_select_sql("SELECT * FROM T FETCH FIRST 2 ROWS ONLY WITH UR").as_deref(),
-            Some("SELECT * FROM T FETCH FIRST 2 ROWS ONLY FOR READ ONLY OPTIMIZE FOR 2 ROWS WITH UR")
+            Some("SELECT * FROM T FETCH FIRST 2 ROWS ONLY FOR FETCH ONLY OPTIMIZE FOR 2 ROWS WITH UR")
         );
     }
 
