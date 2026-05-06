@@ -1038,16 +1038,22 @@ impl ClientInner {
         } else {
             None
         };
+        let zos_non_lob_limited_block_open = self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && !has_zos_lobs
+            && fetch_size_override.is_some()
+            && zos_non_lob_open_rowset.is_none();
         let pipeline_cached_fetch = self.zos_lob_internal_depth == 0
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
             && !has_zos_lobs
             && cached_query_instance_id.is_some()
+            && zos_non_lob_open_rowset.is_some()
             && use_zos_non_lob_cached_open_fetch_pipeline();
         let wait_for_open_data = self.zos_lob_internal_depth == 0
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
             && !has_zos_lobs
             && fetch_size_override.is_some()
-            && use_zos_non_lob_open_data_drain();
+            && (zos_non_lob_limited_block_open || use_zos_non_lob_open_data_drain());
         let opnqry_data = {
             let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
             ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
@@ -3326,7 +3332,7 @@ fn use_zos_non_lob_open_rowset() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn use_zos_non_lob_cached_open_fetch_pipeline() -> bool {
@@ -3362,7 +3368,7 @@ fn use_zos_non_lob_close_with_limited_fetch() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn use_zos_select_sql_optimization() -> bool {
@@ -3379,7 +3385,7 @@ fn zos_non_lob_open_drain_timeout() -> Duration {
 }
 
 fn zos_non_lob_open_data_drain_timeout() -> Duration {
-    Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_OPEN_DATA_DRAIN_MS", 12, 0, 100) as u64)
+    Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_OPEN_DATA_DRAIN_MS", 4, 0, 100) as u64)
 }
 
 fn skip_zos_native_lob_initial_drain() -> bool {
