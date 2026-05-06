@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -9,6 +9,9 @@ use crate::config::{Config, SslConfig};
 use crate::error::Error;
 
 const READ_RESERVE: usize = 64 * 1024;
+static DEFAULT_TLS_CLIENT_CONFIG: OnceLock<Result<Arc<rustls::ClientConfig>, String>> =
+    OnceLock::new();
+static INSECURE_TLS_CLIENT_CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
 
 /// Transport layer abstraction over TCP and TLS connections.
 pub enum Transport {
@@ -62,7 +65,7 @@ impl Transport {
         config: &Config,
     ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Error> {
         let tls_config = Self::build_tls_config(config.ssl_config.as_ref())?;
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
+        let connector = tokio_rustls::TlsConnector::from(tls_config);
 
         let server_name = rustls::pki_types::ServerName::try_from(config.host.as_str())
             .map_err(|e| Error::Tls(format!("Invalid server name '{}': {}", config.host, e)))?
@@ -77,68 +80,86 @@ impl Transport {
         Ok(tls_stream)
     }
 
+    /// Warm reusable TLS configuration without opening a socket.
+    pub(crate) fn warm_tls_config(config: &Config) {
+        if config.ssl {
+            let _ = Self::build_tls_config(config.ssl_config.as_ref());
+        }
+    }
+
     /// Build the rustls ClientConfig from our SslConfig.
-    fn build_tls_config(ssl_config: Option<&SslConfig>) -> Result<rustls::ClientConfig, Error> {
+    fn build_tls_config(
+        ssl_config: Option<&SslConfig>,
+    ) -> Result<Arc<rustls::ClientConfig>, Error> {
         // Ensure the ring crypto provider is installed (idempotent)
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        let builder = rustls::ClientConfig::builder();
-
         if let Some(ssl) = ssl_config {
             if !ssl.reject_unauthorized {
-                // If not rejecting unauthorized, build a config that skips server verification
-                let config = builder
-                    .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(NoVerifier))
-                    .with_no_client_auth();
-                return Ok(config);
+                return Ok(Arc::clone(INSECURE_TLS_CLIENT_CONFIG.get_or_init(|| {
+                    Arc::new(
+                        rustls::ClientConfig::builder()
+                            .dangerous()
+                            .with_custom_certificate_verifier(Arc::new(NoVerifier))
+                            .with_no_client_auth(),
+                    )
+                })));
+            }
+            if ssl.ca_cert.is_some() {
+                return build_verified_tls_config(ssl.ca_cert.as_deref())
+                    .map(Arc::new)
+                    .map_err(Error::Tls);
             }
         }
 
-        let mut root_store = rustls::RootCertStore::empty();
-        let native_certs = rustls_native_certs::load_native_certs();
-        if !native_certs.errors.is_empty() {
-            warn!(
-                "Encountered {} error(s) while loading native certificates",
-                native_certs.errors.len()
-            );
+        match DEFAULT_TLS_CLIENT_CONFIG
+            .get_or_init(|| build_verified_tls_config(None).map(Arc::new))
+        {
+            Ok(config) => Ok(Arc::clone(config)),
+            Err(message) => Err(Error::Tls(message.clone())),
         }
-        for cert in native_certs.certs {
-            root_store
-                .add(cert)
-                .map_err(|e| Error::Tls(format!("Failed to add native CA cert: {}", e)))?;
-        }
+    }
+}
 
-        if let Some(ssl) = ssl_config {
-            if let Some(ca_cert_path) = &ssl.ca_cert {
-                let ca_data = std::fs::read(ca_cert_path).map_err(|e| {
-                    Error::Tls(format!("Failed to read CA cert {}: {}", ca_cert_path, e))
-                })?;
-                let mut cursor = std::io::Cursor::new(ca_data);
-                let certs = rustls_pemfile::certs(&mut cursor)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| Error::Tls(format!("Failed to parse CA cert: {}", e)))?;
-                for cert in certs {
-                    root_store
-                        .add(cert)
-                        .map_err(|e| Error::Tls(format!("Failed to add CA cert: {}", e)))?;
-                }
-            }
-        }
-
-        if root_store.is_empty() {
-            return Err(Error::Tls(
-                "TLS verification is enabled but no root certificates are available".into(),
-            ));
-        }
-
-        let config = builder
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
-        Ok(config)
+fn build_verified_tls_config(ca_cert_path: Option<&str>) -> Result<rustls::ClientConfig, String> {
+    let mut root_store = rustls::RootCertStore::empty();
+    let native_certs = rustls_native_certs::load_native_certs();
+    if !native_certs.errors.is_empty() {
+        warn!(
+            "Encountered {} error(s) while loading native certificates",
+            native_certs.errors.len()
+        );
+    }
+    for cert in native_certs.certs {
+        root_store
+            .add(cert)
+            .map_err(|e| format!("Failed to add native CA cert: {}", e))?;
     }
 
+    if let Some(ca_cert_path) = ca_cert_path {
+        let ca_data = std::fs::read(ca_cert_path)
+            .map_err(|e| format!("Failed to read CA cert {}: {}", ca_cert_path, e))?;
+        let mut cursor = std::io::Cursor::new(ca_data);
+        let certs = rustls_pemfile::certs(&mut cursor)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to parse CA cert: {}", e))?;
+        for cert in certs {
+            root_store
+                .add(cert)
+                .map_err(|e| format!("Failed to add CA cert: {}", e))?;
+        }
+    }
+
+    if root_store.is_empty() {
+        return Err("TLS verification is enabled but no root certificates are available".into());
+    }
+
+    Ok(rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth())
+}
+
+impl Transport {
     /// Read bytes from the transport into the provided buffer.
     /// Returns the number of bytes read (0 means EOF).
     pub async fn read_bytes(&mut self, buf: &mut BytesMut) -> Result<usize, Error> {

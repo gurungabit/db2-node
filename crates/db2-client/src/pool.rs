@@ -8,6 +8,7 @@ use tracing::{debug, trace, warn};
 use crate::config::Config;
 use crate::connection::{Client, PoolCheckoutEntry, PoolCheckoutMap};
 use crate::error::Error;
+use crate::transport::Transport;
 use crate::types::{QueryResult, ToSql};
 
 /// Configuration for the connection pool.
@@ -95,6 +96,7 @@ impl Pool {
     /// Create a new connection pool synchronously without pre-creating connections.
     /// Connections are created lazily on first use.
     pub fn new_sync(config: PoolConfig) -> Self {
+        Transport::warm_tls_config(&config.connection);
         Pool {
             semaphore: Arc::new(Semaphore::new(config.max_connections as usize)),
             config,
@@ -113,6 +115,7 @@ impl Pool {
                 "min_connections cannot exceed max_connections".into(),
             ));
         }
+        Transport::warm_tls_config(&config.connection);
 
         let pool = Pool {
             config: config.clone(),
