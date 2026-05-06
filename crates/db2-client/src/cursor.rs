@@ -97,14 +97,20 @@ impl Cursor {
                     .server_info
                     .as_ref()
                     .map_or(false, crate::connection::is_db2_zos_server);
-            let use_zos_non_lob_extra_blocks = !has_lobs
+            let use_zos_non_lob_fetch = !has_lobs
                 && inner.zos_lob_internal_depth == 0
                 && inner
                     .server_info
                     .as_ref()
-                    .map_or(false, crate::connection::is_db2_zos_server)
-                && use_zos_non_lob_cntqry_extra_blocks();
+                    .map_or(false, crate::connection::is_db2_zos_server);
+            let use_zos_non_lob_extra_blocks =
+                use_zos_non_lob_fetch && use_zos_non_lob_cntqry_extra_blocks();
             let use_extra_blocks = use_extended_materialized_blocks || use_zos_non_lob_extra_blocks;
+            let qryblksz = if use_zos_non_lob_fetch {
+                crate::connection::zos_non_lob_qryblksz()
+            } else {
+                db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ
+            };
             let qryrowset = if use_zos_non_lob_extra_blocks {
                 zos_non_lob_cntqry_rowset(self.fetch_size)
             } else {
@@ -112,19 +118,20 @@ impl Cursor {
             };
             if collect_diagnostics {
                 self.last_fetch_diagnostics.push(format!(
-                    "cntqry_request has_lobs={} native_lobs=false rdbnam=false maxblkext={} qryrowset={} rtnextdta=none non_lob_extra_blocks={}",
+                    "cntqry_request has_lobs={} native_lobs=false rdbnam=false maxblkext={} qryrowset={} rtnextdta=none non_lob_extra_blocks={} qryblksz={}",
                     has_lobs,
                     if use_extra_blocks { "-1" } else { "none" },
                     qryrowset
                         .map(|value| value.to_string())
                         .unwrap_or_else(|| "none".to_string()),
-                    use_zos_non_lob_extra_blocks
+                    use_zos_non_lob_extra_blocks,
+                    qryblksz
                 ));
             }
             db2_proto::commands::cntqry::build_cntqry(
                 &self.pkgnamcsn,
                 self.query_instance_id.as_deref(),
-                db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
+                qryblksz,
                 use_extra_blocks.then_some(-1),
                 qryrowset,
             )

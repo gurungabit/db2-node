@@ -29,6 +29,10 @@ pub(crate) const PREPARED_STATEMENT_PKGID: &str = "SYSLH200";
 pub(crate) const PREPARED_STATEMENT_MAX_SECTION: u16 = 385;
 const ZOS_SELECT_CACHE_MAX_ENTRIES: usize = 64;
 const ZOS_SELECT_METADATA_CACHE_MAX_ENTRIES: usize = 256;
+const ZOS_NON_LOB_QRYBLKSZ_MIN: usize = 32_767;
+const ZOS_NON_LOB_QRYBLKSZ_STEP: usize = 32_768;
+const ZOS_NON_LOB_QRYBLKSZ_DEFAULT: usize = 262_143;
+const ZOS_NON_LOB_QRYBLKSZ_MAX: usize = 1_048_575;
 
 pub(crate) struct PoolCheckoutEntry {
     pub(crate) created_at: std::time::Instant,
@@ -1093,6 +1097,14 @@ impl ClientInner {
             && (cached_query_instance_id.is_some() || cached_pipeline_fetch_after_open)
             && (zos_non_lob_open_rowset.is_some() || cached_pipeline_fetch_after_open)
             && use_zos_non_lob_cached_open_fetch_pipeline();
+        let qryblksz = if self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && !has_zos_lobs
+        {
+            zos_non_lob_qryblksz()
+        } else {
+            db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ
+        };
         let wait_for_open_data = self.zos_lob_internal_depth == 0
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
             && !has_zos_lobs
@@ -1102,7 +1114,7 @@ impl ClientInner {
         let mut open_diagnostics = Vec::new();
         if collect_diagnostics {
             open_diagnostics.push(format!(
-                "zos_open_plan has_lobs={} cached_qryinsid={} cached_pipeline_after_open={} pipeline={} fetch_size_override={} open_rowset={} limited_block_open={} wait_open_data={} non_lob_extra_blocks={}",
+                "zos_open_plan has_lobs={} cached_qryinsid={} cached_pipeline_after_open={} pipeline={} fetch_size_override={} open_rowset={} limited_block_open={} wait_open_data={} non_lob_extra_blocks={} qryblksz={}",
                 has_zos_lobs,
                 cached_query_instance_id.is_some(),
                 cached_pipeline_fetch_after_open,
@@ -1115,16 +1127,14 @@ impl ClientInner {
                     .unwrap_or_else(|| "none".to_string()),
                 zos_non_lob_limited_block_open,
                 wait_for_open_data,
-                use_zos_non_lob_extra_blocks
+                use_zos_non_lob_extra_blocks,
+                qryblksz
             ));
         }
         let opnqry_data = {
             let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
             ddm.add_code_point(codepoints::PKGNAMCSN, pkgnamcsn);
-            ddm.add_u32(
-                codepoints::QRYBLKSZ,
-                db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
-            );
+            ddm.add_u32(codepoints::QRYBLKSZ, qryblksz);
             if let Some(rows) = zos_non_lob_open_rowset {
                 ddm.add_u32(codepoints::QRYROWSET, rows);
             }
@@ -1144,7 +1154,7 @@ impl ClientInner {
             let cntqry_data = db2_proto::commands::cntqry::build_cntqry(
                 pkgnamcsn,
                 cached_query_instance_id,
-                db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
+                qryblksz,
                 use_zos_non_lob_extra_blocks.then_some(-1),
                 fetch_size_override,
             );
@@ -3569,6 +3579,30 @@ fn use_zos_select_sql_optimization() -> bool {
 
 fn zos_non_lob_open_drain_timeout() -> Duration {
     Duration::from_millis(env_usize("DB2_ZOS_NON_LOB_OPEN_DRAIN_MS", 2, 0, 25) as u64)
+}
+
+pub(crate) fn zos_non_lob_qryblksz() -> u32 {
+    let value = env_usize(
+        "DB2_ZOS_NON_LOB_QRYBLKSZ",
+        ZOS_NON_LOB_QRYBLKSZ_DEFAULT,
+        ZOS_NON_LOB_QRYBLKSZ_MIN,
+        ZOS_NON_LOB_QRYBLKSZ_MAX,
+    );
+    normalize_zos_non_lob_qryblksz(value) as u32
+}
+
+fn normalize_zos_non_lob_qryblksz(value: usize) -> usize {
+    let clamped = value.clamp(ZOS_NON_LOB_QRYBLKSZ_MIN, ZOS_NON_LOB_QRYBLKSZ_MAX);
+    let offset = clamped - ZOS_NON_LOB_QRYBLKSZ_MIN;
+    let lower =
+        ZOS_NON_LOB_QRYBLKSZ_MIN + (offset / ZOS_NON_LOB_QRYBLKSZ_STEP) * ZOS_NON_LOB_QRYBLKSZ_STEP;
+    let upper = (lower + ZOS_NON_LOB_QRYBLKSZ_STEP).min(ZOS_NON_LOB_QRYBLKSZ_MAX);
+
+    if clamped - lower <= upper - clamped {
+        lower
+    } else {
+        upper
+    }
 }
 
 fn zos_non_lob_open_data_drain_timeout() -> Duration {
@@ -6435,6 +6469,14 @@ mod tests {
     fn optimize_zos_select_sql_skips_existing_cursor_clauses() {
         assert!(optimize_zos_select_sql("SELECT * FROM T FOR READ ONLY").is_none());
         assert!(optimize_zos_select_sql("SELECT * FROM T OPTIMIZE FOR 1 ROW").is_none());
+    }
+
+    #[test]
+    fn normalize_zos_non_lob_qryblksz_uses_odbc_query_data_sizes() {
+        assert_eq!(normalize_zos_non_lob_qryblksz(1), 32_767);
+        assert_eq!(normalize_zos_non_lob_qryblksz(65_000), 65_535);
+        assert_eq!(normalize_zos_non_lob_qryblksz(262_144), 262_143);
+        assert_eq!(normalize_zos_non_lob_qryblksz(2_000_000), 1_048_575);
     }
 
     #[test]
