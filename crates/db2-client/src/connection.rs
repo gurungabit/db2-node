@@ -742,9 +742,11 @@ impl ClientInner {
             let qryblksz: u32 = 0x0000FFFF;
 
             if params.is_empty() && use_zos_sqlstt {
+                let collect_diagnostics = query_diagnostics_enabled();
                 if self.zos_lob_internal_depth == 0 && use_zos_select_cache() {
                     if let Some(cached) = self.zos_select_cache.get(sql).cloned() {
                         self.activate_section(cached.package_id, cached.section_number);
+                        let cached_section_number = cached.section_number;
                         let cached_query_instance_id = cached.query_instance_id.clone();
                         let result = self
                             .open_zos_select(
@@ -765,7 +767,14 @@ impl ClientInner {
                                     cached.pipeline_fetch_after_open =
                                         opened.pipeline_fetch_after_open;
                                 }
-                                return Ok(opened.result);
+                                let mut result = opened.result;
+                                if collect_diagnostics {
+                                    result.diagnostics.push(format!(
+                                        "zos_prepare_cache_hit=true cache=connection section={}",
+                                        cached_section_number
+                                    ));
+                                }
+                                return Ok(result);
                             }
                             Err(err) if should_reprepare_cached_zos_select(&err) => {
                                 self.zos_select_cache.remove(sql);
@@ -795,6 +804,18 @@ impl ClientInner {
                 let global_cached_metadata = global_metadata_cache_key
                     .as_deref()
                     .and_then(lookup_zos_select_metadata);
+                let global_metadata_cache_hit = global_cached_metadata.is_some();
+                let prepare_total_started = collect_diagnostics.then(Instant::now);
+                let mut zos_prepare_diagnostics = Vec::new();
+                if collect_diagnostics {
+                    zos_prepare_diagnostics.push(format!(
+                        "zos_prepare_plan section={} cache_section={} metadata_cache_hit={} request_sqlda={}",
+                        section_number,
+                        cache_section.is_some(),
+                        global_metadata_cache_hit,
+                        !global_metadata_cache_hit
+                    ));
+                }
                 let prpsqlstt_data = if global_cached_metadata.is_some() {
                     db2_proto::commands::prpsqlstt::build_prpsqlstt_without_sqlda(&pkgnamcsn)
                 } else {
@@ -811,13 +832,22 @@ impl ClientInner {
                 writer.write_object(&sqlstt_data, false);
 
                 let send_buf = writer.finish();
+                let prepare_send_started = collect_diagnostics.then(Instant::now);
                 if let Err(err) = self.send_bytes(&send_buf).await {
                     if let Some(section_number) = cache_section {
                         self.release_prepared_section(section_number);
                     }
                     return Err(err);
                 }
+                if let Some(started) = prepare_send_started {
+                    zos_prepare_diagnostics.push(format!(
+                        "zos_prepare_send_ms={:.3} bytes={}",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        send_buf.len()
+                    ));
+                }
 
+                let prepare_read_started = collect_diagnostics.then(Instant::now);
                 let frames = match if global_cached_metadata.is_some() {
                     self.read_reply_frames().await
                 } else {
@@ -831,6 +861,15 @@ impl ClientInner {
                         return Err(err);
                     }
                 };
+                if let Some(started) = prepare_read_started {
+                    zos_prepare_diagnostics.push(format!(
+                        "zos_prepare_read_ms={:.3} frames={} metadata_cache_hit={}",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        frames.len(),
+                        global_metadata_cache_hit
+                    ));
+                }
+                let prepare_parse_started = collect_diagnostics.then(Instant::now);
                 let (column_info, result_descriptors) = match global_cached_metadata {
                     Some(metadata) => {
                         if let Err(err) = self.parse_prepare_reply(&frames) {
@@ -861,6 +900,21 @@ impl ClientInner {
                         }
                     },
                 };
+                if let Some(started) = prepare_parse_started {
+                    zos_prepare_diagnostics.push(format!(
+                        "zos_prepare_parse_ms={:.3} columns={} descriptors={} metadata_cache_hit={}",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        column_info.len(),
+                        result_descriptors.len(),
+                        global_metadata_cache_hit
+                    ));
+                }
+                if let Some(started) = prepare_total_started {
+                    zos_prepare_diagnostics.push(format!(
+                        "zos_prepare_total_ms={:.3}",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    ));
+                }
                 let result = self
                     .open_zos_select(
                         sql,
@@ -873,6 +927,8 @@ impl ClientInner {
                     .await;
                 match result {
                     Ok(opened) => {
+                        let mut result = opened.result;
+                        result.diagnostics.extend(zos_prepare_diagnostics);
                         if let Some(section_number) = cache_section {
                             let query_instance_id = opened
                                 .query_instance_id
@@ -891,7 +947,7 @@ impl ClientInner {
                                 },
                             );
                         }
-                        return Ok(opened.result);
+                        return Ok(result);
                     }
                     Err(err) => {
                         if let Some(section_number) = cache_section {
