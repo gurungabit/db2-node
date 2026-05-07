@@ -2685,6 +2685,21 @@ impl ClientInner {
             );
         }
 
+        if end_of_query
+            && !pending_row_bytes.is_empty()
+            && !rows.is_empty()
+            && db2_proto::fdoca::is_ignorable_final_row_tail(&pending_row_bytes)
+        {
+            if collect_diagnostics {
+                diagnostics.push(format!(
+                    "decode_final_discarded_trailer len={} preview={}",
+                    pending_row_bytes.len(),
+                    format_hex_preview(&pending_row_bytes, 160)
+                ));
+            }
+            pending_row_bytes.clear();
+        }
+
         if end_of_query && !pending_row_bytes.is_empty() {
             let progress = active_descriptors
                 .map(|descriptors| {
