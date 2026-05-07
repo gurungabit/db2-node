@@ -106,13 +106,20 @@ impl JsPool {
 
     #[napi]
     pub async fn connect(&self) -> Result<()> {
-        self.inner.warmup().await.map_err(client_error_to_napi)?;
+        self.inner
+            .warmup_parallel()
+            .await
+            .map_err(client_error_to_napi)?;
         Ok(())
     }
 
     #[napi]
     pub async fn warmup(&self) -> Result<u32> {
-        let created = self.inner.warmup().await.map_err(client_error_to_napi)?;
+        let created = self
+            .inner
+            .warmup_parallel()
+            .await
+            .map_err(client_error_to_napi)?;
         Ok(created as u32)
     }
 

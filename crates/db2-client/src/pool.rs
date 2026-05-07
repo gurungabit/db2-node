@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
+use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::{debug, trace, warn};
 
@@ -231,6 +232,68 @@ impl Pool {
         Ok(to_create)
     }
 
+    /// Open idle connections up to the configured minimum with parallel handshakes.
+    ///
+    /// This is used for explicit pool warmup/connect calls where the caller is
+    /// already waiting for the pool to become ready. Background replacement uses
+    /// `warmup` so foreground checkouts can wait on a single in-flight socket.
+    pub async fn warmup_parallel(&self) -> Result<usize, Error> {
+        if self.config.max_connections == 0 {
+            return Err(Error::Pool("max_connections must be > 0".into()));
+        }
+
+        let _create_guard = self.connection_create_lock.lock().await;
+        let target = self.target_idle_count();
+        let current = self.total_count().await + self.creating_count();
+        let to_create = target.saturating_sub(current);
+        if to_create == 0 {
+            return Ok(0);
+        }
+
+        let mut tasks = JoinSet::new();
+        for _ in 0..to_create {
+            let config = self.config.connection.clone();
+            let creating_connections = Arc::clone(&self.creating_connections);
+            tasks.spawn(async move {
+                let _creating = CreatingConnection::new(creating_connections);
+                Client::connect_with(config).await
+            });
+        }
+
+        let mut clients = Vec::with_capacity(to_create);
+        let mut first_error = None;
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(client)) => clients.push(client),
+                Ok(Err(err)) => {
+                    first_error.get_or_insert(err);
+                }
+                Err(err) => {
+                    first_error
+                        .get_or_insert_with(|| Error::Pool(format!("warmup task failed: {err}")));
+                }
+            }
+        }
+
+        let created = clients.len();
+        if created > 0 {
+            let mut conns = self.connections.lock().await;
+            for client in clients {
+                conns.push_back(PooledConnection {
+                    client,
+                    created_at: Instant::now(),
+                    last_used: Instant::now(),
+                });
+            }
+        }
+
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+
+        Ok(created)
+    }
+
     /// Return whether a background warmup could add an idle connection.
     pub async fn warmup_needed(&self) -> bool {
         !self.semaphore.is_closed()
@@ -308,7 +371,7 @@ impl Pool {
 
     /// Create a new connection using the pool's configuration.
     async fn create_connection(&self) -> Result<Client, Error> {
-        let _creating = CreatingConnection::new(&self.creating_connections);
+        let _creating = CreatingConnection::new(Arc::clone(&self.creating_connections));
         debug!("Creating new pool connection");
         let config = self.config.connection.clone();
         let client = Client::connect_with(config).await?;
@@ -527,18 +590,18 @@ impl Pool {
     }
 }
 
-struct CreatingConnection<'a> {
-    count: &'a AtomicUsize,
+struct CreatingConnection {
+    count: Arc<AtomicUsize>,
 }
 
-impl<'a> CreatingConnection<'a> {
-    fn new(count: &'a AtomicUsize) -> Self {
+impl CreatingConnection {
+    fn new(count: Arc<AtomicUsize>) -> Self {
         count.fetch_add(1, Ordering::Relaxed);
         CreatingConnection { count }
     }
 }
 
-impl Drop for CreatingConnection<'_> {
+impl Drop for CreatingConnection {
     fn drop(&mut self) {
         self.count.fetch_sub(1, Ordering::Relaxed);
     }
