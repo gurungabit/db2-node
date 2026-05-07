@@ -310,7 +310,7 @@ fn pool_acquire_path(idle: usize, active: usize, max_connections: usize) -> &'st
 }
 
 fn defer_background_warmup(pool: &Arc<db2_client::Pool>) -> bool {
-    if pool.max_connections() <= 1 || !use_background_pool_warmup() {
+    if !use_background_pool_warmup() {
         return false;
     }
 
