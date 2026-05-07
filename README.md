@@ -54,6 +54,16 @@ await client.close();
 
 Package-level usage and API details live in `crates/db2-napi/README.md`.
 
+## TLS Compatibility
+
+The Node package supports IBM CLI-style TLS connection strings:
+
+```txt
+SECURITY=SSL;SSLServerCertificate=/path/to/cert.pem;SSLClientHostnameValidation=OFF;
+```
+
+`SSLServerCertificate` maps to `caCert`. `SSLClientHostnameValidation` defaults to `Basic`; set it to `OFF` only for trusted DB2 certificates that do not include a DNS/IP subjectAltName matching the DB2 hostname or VIP.
+
 ## Db2 for z/OS Production Notes
 
 The z/OS LOB cleanup behavior has two supported production modes:

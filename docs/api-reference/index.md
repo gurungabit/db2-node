@@ -15,6 +15,7 @@ interface ConnectionConfig {
   password: string;
   ssl?: boolean;                  // default: false
   rejectUnauthorized?: boolean;   // default: true (verify server cert)
+  sslClientHostnameValidation?: 'Basic' | 'OFF'; // default: 'Basic'
   caCert?: string;                // path to CA certificate PEM file
   connectTimeout?: number;        // ms, default: 30000 (covers TCP + TLS)
   queryTimeout?: number;          // ms, default: 0 (no timeout)
@@ -93,6 +94,15 @@ Establishes a TCP connection (with optional TLS upgrade) and performs the DRDA a
 The `connectTimeout` covers the entire process: TCP connect + TLS handshake.
 
 **Throws**: `Error` if connection fails (timeout, network error, authentication failure, database not found, TLS handshake failure).
+
+### TLS Hostname Validation
+
+`sslClientHostnameValidation` follows the IBM Db2 CLI keyword values:
+
+- `'Basic'` (default) verifies the certificate chain and checks that the connected host matches the certificate DNS/IP subjectAltName.
+- `'OFF'` verifies the certificate chain but skips the hostname/SAN check. This matches IBM CLI connection strings that use `SSLServerCertificate=...;SSLClientHostnameValidation=OFF`.
+
+Use `'OFF'` only when the DB2 certificate is trusted but was issued without a hostname that matches the DB2 VIP or load balancer name.
 
 ### client.query()
 

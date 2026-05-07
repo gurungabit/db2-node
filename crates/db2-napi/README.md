@@ -72,6 +72,7 @@ const { Client } = require('@gurungabit/db2-node')
 | `encryptedPasswordTokenEncoding` | `string` | `'same'` | SECMEC 7 DES password IV/token encoding, based on the user ID: `'same'`, `'utf8'`, or `'ebcdic'`; AES uses the server security token |
 | `ssl` | `boolean` | `false` | Enable TLS/SSL |
 | `rejectUnauthorized` | `boolean` | `true` | Verify server certificate (requires `ssl: true`) |
+| `sslClientHostnameValidation` | `string` | `'Basic'` | IBM-compatible hostname validation mode: `'Basic'` or `'OFF'` |
 | `caCert` | `string` | — | Path to CA certificate PEM file |
 | `connectTimeout` | `number` | `30000` | Connection timeout in ms (covers TCP + TLS handshake) |
 | `queryTimeout` | `number` | `0` | Query execution timeout in ms (0 = no timeout) |
@@ -188,9 +189,24 @@ const client = new Client({
   rejectUnauthorized: true,
   caCert: '/path/to/ca-cert.pem',
 })
+
+// IBM CLI-compatible certificate pinning without hostname validation
+const client = new Client({
+  host: 'db2-vip.example.com',
+  port: 50001,
+  database: 'proddb',
+  user: 'app_user',
+  password: 'secret',
+  ssl: true,
+  rejectUnauthorized: true,
+  caCert: '/path/to/server-or-ca-cert.pem',
+  sslClientHostnameValidation: 'OFF',
+})
 ```
 
-TLS uses `rustls` (pure Rust, no OpenSSL). System trust store certificates are loaded automatically when `rejectUnauthorized` is `true`. The `connectTimeout` covers the full TCP + TLS handshake.
+TLS uses `rustls` (pure Rust, no OpenSSL). System trust store certificates are loaded automatically when `rejectUnauthorized` is `true`. Custom CA/server certificate files can be supplied with `caCert`, or with the IBM CLI connection string keyword `SSLServerCertificate`.
+
+By default hostname validation is enabled (`sslClientHostnameValidation: 'Basic'`). Set `sslClientHostnameValidation: 'OFF'`, or `SSLClientHostnameValidation=OFF` in an IBM-style connection string, only when the DB2 server certificate is trusted but does not contain a matching DNS/IP subjectAltName. This keeps certificate-chain verification enabled while skipping only the hostname/SAN check. The `connectTimeout` covers the full TCP + TLS handshake.
 
 ## DB2 z/OS Authentication
 

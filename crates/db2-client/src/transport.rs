@@ -135,15 +135,15 @@ impl Transport {
                     )
                 })));
             }
-            if ssl.ca_cert.is_some() {
-                return build_verified_tls_config(ssl.ca_cert.as_deref())
+            if ssl.ca_cert.is_some() || !ssl.validate_server_name {
+                return build_verified_tls_config(ssl.ca_cert.as_deref(), ssl.validate_server_name)
                     .map(Arc::new)
                     .map_err(Error::Tls);
             }
         }
 
         match DEFAULT_TLS_CLIENT_CONFIG
-            .get_or_init(|| build_verified_tls_config(None).map(Arc::new))
+            .get_or_init(|| build_verified_tls_config(None, true).map(Arc::new))
         {
             Ok(config) => Ok(Arc::clone(config)),
             Err(message) => Err(Error::Tls(message.clone())),
@@ -165,7 +165,25 @@ fn push_transport_elapsed(
     }
 }
 
-fn build_verified_tls_config(ca_cert_path: Option<&str>) -> Result<rustls::ClientConfig, String> {
+fn build_verified_tls_config(
+    ca_cert_path: Option<&str>,
+    validate_server_name: bool,
+) -> Result<rustls::ClientConfig, String> {
+    let root_store = build_root_store(ca_cert_path)?;
+
+    if !validate_server_name {
+        return Ok(rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoHostnameVerifier::new(root_store)))
+            .with_no_client_auth());
+    }
+
+    Ok(rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth())
+}
+
+fn build_root_store(ca_cert_path: Option<&str>) -> Result<rustls::RootCertStore, String> {
     let mut root_store = rustls::RootCertStore::empty();
     let native_certs = rustls_native_certs::load_native_certs();
     if !native_certs.errors.is_empty() {
@@ -198,9 +216,7 @@ fn build_verified_tls_config(ca_cert_path: Option<&str>) -> Result<rustls::Clien
         return Err("TLS verification is enabled but no root certificates are available".into());
     }
 
-    Ok(rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth())
+    Ok(root_store)
 }
 
 impl Transport {
@@ -315,5 +331,73 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
             rustls::SignatureScheme::RSA_PSS_SHA512,
             rustls::SignatureScheme::ED25519,
         ]
+    }
+}
+
+/// A TLS verifier that validates the certificate chain but skips hostname/SAN checks.
+///
+/// This matches IBM CLI/ODBC's explicit `SSLClientHostnameValidation=OFF` mode:
+/// trust must still chain to system roots or `SSLServerCertificate`/`caCert`, but
+/// the certificate does not need a subjectAltName for the connected host.
+#[derive(Debug)]
+struct NoHostnameVerifier {
+    roots: rustls::RootCertStore,
+    supported: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl NoHostnameVerifier {
+    fn new(roots: rustls::RootCertStore) -> Self {
+        Self {
+            roots,
+            supported: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for NoHostnameVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let cert = rustls::server::ParsedCertificate::try_from(end_entity)?;
+        rustls::client::verify_server_cert_signed_by_trust_anchor(
+            &cert,
+            &self.roots,
+            intermediates,
+            now,
+            self.supported.all,
+        )?;
+
+        if !ocsp_response.is_empty() {
+            trace!("Unvalidated OCSP response: {:?}", ocsp_response.to_vec());
+        }
+
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.supported)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.supported)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.supported.supported_schemes()
     }
 }

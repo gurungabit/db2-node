@@ -47,6 +47,7 @@ await client.connect();
 | `password` | `string` | — | Password |
 | `ssl` | `boolean` | `false` | Enable TLS/SSL |
 | `rejectUnauthorized` | `boolean` | `true` | Verify server certificate |
+| `sslClientHostnameValidation` | `string` | `'Basic'` | IBM-compatible hostname validation mode: `'Basic'` or `'OFF'` |
 | `caCert` | `string` | — | Path to CA certificate PEM file |
 | `connectTimeout` | `number` | `30000` | Connection timeout in ms (TCP + TLS) |
 | `queryTimeout` | `number` | `0` | Query timeout in ms (0 = no timeout) |
@@ -190,9 +191,24 @@ const client = new Client({
   ssl: true,
   caCert: '/path/to/ca-cert.pem',
 });
+
+// IBM CLI-compatible SSLServerCertificate behavior for DB2 certs without SANs
+const client = new Client({
+  host: 'db2-vip.example.com',
+  port: 50001,
+  database: 'PRODDB',
+  user: 'app_user',
+  password: 'secret',
+  ssl: true,
+  rejectUnauthorized: true,
+  caCert: '/path/to/server-or-ca-cert.pem',
+  sslClientHostnameValidation: 'OFF',
+});
 ```
 
-When `rejectUnauthorized` is `true` (the default), system trust store certificates are loaded automatically. Custom CA certificates from `caCert` are added on top.
+When `rejectUnauthorized` is `true` (the default), system trust store certificates are loaded automatically. Custom CA certificates from `caCert` are added on top. IBM-style connection strings can also use `SSLServerCertificate=/path/to/cert.pem`, which maps to `caCert`.
+
+Hostname validation is enabled by default (`sslClientHostnameValidation: 'Basic'`). Set `sslClientHostnameValidation: 'OFF'`, or `SSLClientHostnameValidation=OFF` in a connection string, only when the DB2 server certificate is trusted but does not contain a matching DNS/IP subjectAltName. That mode verifies the certificate chain and skips only the hostname/SAN check.
 
 ## Db2 z/OS LOB Production Modes
 

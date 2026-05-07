@@ -20,8 +20,14 @@ fn ssl_port() -> Option<u16> {
 
 /// Build a Config targeting the SSL port with the given SslConfig.
 fn ssl_config(ssl_cfg: SslConfig) -> Config {
+    ssl_config_for_host(common::test_config().host, ssl_cfg)
+}
+
+/// Build a Config targeting the SSL port and a specific TCP/TLS hostname.
+fn ssl_config_for_host(host: String, ssl_cfg: SslConfig) -> Config {
     let base = common::test_config();
     Config {
+        host,
         port: ssl_port().unwrap(),
         ssl: true,
         ssl_config: Some(ssl_cfg),
@@ -88,6 +94,80 @@ async fn test_tls_connect_with_ca_cert() {
         .query("VALUES 'tls-ok'", &[])
         .await
         .expect("query over verified TLS");
+    assert_eq!(result.row_count, 1);
+
+    client.close().await.expect("close verified TLS connection");
+}
+
+#[tokio::test]
+async fn test_tls_hostname_mismatch_fails_with_ca_cert() {
+    if ssl_port().is_none() {
+        eprintln!("SKIP: DB2_TEST_SSL_PORT not set");
+        return;
+    }
+
+    let ca_path = ca_cert_path();
+    if !std::path::Path::new(&ca_path).exists() {
+        eprintln!("SKIP: CA cert not found at {}", ca_path);
+        return;
+    }
+
+    let config = ssl_config_for_host(
+        "0.0.0.0".to_string(),
+        SslConfig {
+            ca_cert: Some(ca_path),
+            reject_unauthorized: true,
+            validate_server_name: true,
+            ..Default::default()
+        },
+    );
+
+    let mut client = Client::new(config);
+    let err = client
+        .connect()
+        .await
+        .expect_err("TLS hostname mismatch should fail when validation is Basic");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("certificate") || msg.contains("hostname") || msg.contains("name"),
+        "Expected certificate hostname validation error, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_tls_hostname_validation_off_with_ca_cert() {
+    if ssl_port().is_none() {
+        eprintln!("SKIP: DB2_TEST_SSL_PORT not set");
+        return;
+    }
+
+    let ca_path = ca_cert_path();
+    if !std::path::Path::new(&ca_path).exists() {
+        eprintln!("SKIP: CA cert not found at {}", ca_path);
+        return;
+    }
+
+    let config = ssl_config_for_host(
+        "0.0.0.0".to_string(),
+        SslConfig {
+            ca_cert: Some(ca_path),
+            reject_unauthorized: true,
+            validate_server_name: false,
+            ..Default::default()
+        },
+    );
+
+    let mut client = Client::new(config);
+    client
+        .connect()
+        .await
+        .expect("TLS connect should verify the CA and skip only hostname validation");
+
+    let result = client
+        .query("VALUES 'tls-hostname-off'", &[])
+        .await
+        .expect("query over verified TLS without hostname validation");
     assert_eq!(result.row_count, 1);
 
     client.close().await.expect("close verified TLS connection");

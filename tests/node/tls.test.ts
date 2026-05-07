@@ -47,6 +47,20 @@ describe('TLS: basic connection', { skip: !sslPort && 'DB2_TEST_SSL_PORT not set
     await c.close();
   });
 
+  it('connects with custom CA when hostname validation is OFF', async () => {
+    const c = new Client({
+      ...baseCfg(),
+      host: '0.0.0.0',
+      rejectUnauthorized: true,
+      caCert: caCertPath,
+      sslClientHostnameValidation: 'OFF',
+    });
+    await c.connect();
+    const r = await c.query("VALUES 'tls-hostname-off'");
+    assert.equal(r.rowCount, 1);
+    await c.close();
+  });
+
   it('returns real server info over TLS', async () => {
     const c = new Client({ ...baseCfg(), rejectUnauthorized: false });
     await c.connect();
@@ -91,6 +105,19 @@ describe('TLS: error cases', { skip: !sslPort && 'DB2_TEST_SSL_PORT not set' }, 
     });
     await assert.rejects(() => c.connect(), (err: any) => {
       assert.ok(err.message.length > 0);
+      return true;
+    });
+  });
+
+  it('fails hostname mismatch with custom CA by default', async () => {
+    const c = new Client({
+      ...baseCfg(),
+      host: '0.0.0.0',
+      rejectUnauthorized: true,
+      caCert: caCertPath,
+    });
+    await assert.rejects(() => c.connect(), (err: any) => {
+      assert.match(err.message, /certificate|name|hostname/i);
       return true;
     });
   });

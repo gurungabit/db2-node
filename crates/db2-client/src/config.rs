@@ -74,6 +74,12 @@ pub struct SslConfig {
     pub client_cert: Option<String>,
     pub client_key: Option<String>,
     pub reject_unauthorized: bool,
+    /// Verify the connected hostname against the server certificate SAN/CN.
+    ///
+    /// IBM CLI/ODBC exposes this as SSLClientHostnameValidation.  Set this to
+    /// false to keep certificate-chain verification while accepting DB2 server
+    /// certificates that do not contain a matching hostname.
+    pub validate_server_name: bool,
 }
 
 impl Default for SslConfig {
@@ -83,6 +89,7 @@ impl Default for SslConfig {
             client_cert: None,
             client_key: None,
             reject_unauthorized: true,
+            validate_server_name: true,
         }
     }
 }

@@ -16,7 +16,7 @@ test('exports ibm_db-compatible entry points', () => {
 
 test('parses common ibm_db connection string keywords', () => {
   const config = ibmdb._compat.parseConnectionString(
-    'DATABASE=DDFIC0A;HOSTNAME=db.example.com;PORT=3380;PROTOCOL=TCPIP;UID=user;PWD=pass;Security=SSL;CURRENTSCHEMA=APP',
+    'DATABASE=DDFIC0A;HOSTNAME=db.example.com;PORT=3380;PROTOCOL=TCPIP;UID=user;PWD=pass;Security=SSL;CURRENTSCHEMA=APP;SSLServerCertificate=/tmp/db2-ca.pem;SSLClientHostnameValidation=OFF',
     { connectTimeout: 40, minConnections: 2, maxConnections: 4 }
   )
 
@@ -27,6 +27,8 @@ test('parses common ibm_db connection string keywords', () => {
     password: 'pass',
     port: 3380,
     ssl: true,
+    caCert: '/tmp/db2-ca.pem',
+    sslClientHostnameValidation: 'OFF',
     currentSchema: 'APP',
     connectTimeout: 40000,
     minConnections: 2,

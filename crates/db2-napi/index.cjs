@@ -104,6 +104,9 @@ function parseConnectionString(connectionString, options = {}) {
     config.ssl = true
     config.caCert = parts.SSLSERVERCERTIFICATE
   }
+  if (parts.SSLCLIENTHOSTNAMEVALIDATION) {
+    config.sslClientHostnameValidation = parts.SSLCLIENTHOSTNAMEVALIDATION
+  }
 
   const schema = parts.CURRENTSCHEMA
   if (schema) config.currentSchema = schema
@@ -129,6 +132,9 @@ function parseConnectionString(connectionString, options = {}) {
     if (options.ssl != null) config.ssl = parseBool(options.ssl)
     if (options.rejectUnauthorized != null) {
       config.rejectUnauthorized = parseBool(options.rejectUnauthorized)
+    }
+    if (options.sslClientHostnameValidation != null) {
+      config.sslClientHostnameValidation = String(options.sslClientHostnameValidation)
     }
   }
 

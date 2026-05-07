@@ -17,6 +17,7 @@ pub fn config_from_js(
     password: &str,
     ssl: Option<bool>,
     reject_unauthorized: Option<bool>,
+    ssl_client_hostname_validation: Option<String>,
     ca_cert: Option<String>,
     security_mechanism: Option<String>,
     encryption_algorithm: Option<String>,
@@ -52,6 +53,9 @@ pub fn config_from_js(
     if use_ssl {
         config.ssl_config = Some(db2_client::SslConfig {
             reject_unauthorized: reject_unauthorized.unwrap_or(true),
+            validate_server_name: parse_ssl_client_hostname_validation(
+                ssl_client_hostname_validation,
+            )?,
             ca_cert,
             ..Default::default()
         });
@@ -71,6 +75,28 @@ pub fn config_from_js(
         config.fetch_size = fs;
     }
     Ok(config)
+}
+
+fn parse_ssl_client_hostname_validation(value: Option<String>) -> napi::Result<bool> {
+    let Some(value) = value else {
+        return Ok(true);
+    };
+
+    let normalized: String = value
+        .trim()
+        .chars()
+        .filter(|c| *c != '_' && *c != '-' && !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+
+    match normalized.as_str() {
+        "" | "basic" | "true" | "yes" | "on" | "1" => Ok(true),
+        "off" | "false" | "no" | "none" | "0" => Ok(false),
+        _ => Err(napi::Error::from_reason(format!(
+            "Unsupported sslClientHostnameValidation '{}'. Use 'Basic' or 'OFF'.",
+            value
+        ))),
+    }
 }
 
 fn parse_security_mechanism(value: Option<String>) -> napi::Result<db2_client::SecurityMechanism> {
