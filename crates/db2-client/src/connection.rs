@@ -2278,6 +2278,7 @@ impl ClientInner {
         let mut pending_row_bytes = Vec::new();
         let mut extdta_payloads = Vec::new();
         let mut end_of_query = false;
+        let mut zos_lob_cleanup_verified = false;
         let collect_diagnostics = query_diagnostics_enabled();
         let mut diagnostics = if collect_diagnostics {
             frame_diagnostics(frames)
@@ -2531,13 +2532,21 @@ impl ClientInner {
                         );
                         extdta_payloads.extend(more_extdta_payloads);
                         if !rows_need_extdta_payloads(&rows, &cursor.descriptors) {
-                            if !done && use_zos_lob_close_after_materialization() {
-                                cursor.close_from(self).await?;
+                            if done {
+                                zos_lob_cleanup_verified = true;
+                            } else if use_zos_lob_close_after_materialization() {
+                                let close_outcome = cursor.close_from(self).await?;
+                                zos_lob_cleanup_verified = close_outcome.verified();
                                 if collect_diagnostics {
                                     diagnostics.push(format!(
-                                        "cursor_lob_materialized_close rows={} extdta={} last_fetch=[{}]",
+                                        "cursor_lob_materialized_close rows={} extdta={} verified={} close_frames={} close_reads={} discarded_extdta={} timed_out={} last_fetch=[{}]",
                                         rows.len(),
                                         extdta_payloads.len(),
+                                        close_outcome.verified(),
+                                        close_outcome.frames,
+                                        close_outcome.reads,
+                                        close_outcome.discarded_extdta,
+                                        close_outcome.timed_out,
                                         cursor.last_fetch_diagnostics.join("; ")
                                     ));
                                 }
@@ -2546,6 +2555,7 @@ impl ClientInner {
                         }
                     }
                     if done {
+                        zos_lob_cleanup_verified = true;
                         break;
                     }
                     if stalled_fetches >= 3 {
@@ -2646,6 +2656,9 @@ impl ClientInner {
         }
 
         let mut result = QueryResult::with_rows_and_diagnostics(rows, columns, diagnostics);
+        if end_of_query {
+            zos_lob_cleanup_verified = true;
+        }
         if self.zos_lob_internal_depth == 0
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
             && result_has_zos_lob_materialization(&result)
@@ -2677,10 +2690,21 @@ impl ClientInner {
                 }
             }
 
-            if !lob_cleanup_committed && use_zos_lob_disconnect_after_materialization() {
+            if collect_diagnostics {
+                result.diagnostics.push(format!(
+                    "zos_lob_cleanup_verified={} close_after_materialize={}",
+                    zos_lob_cleanup_verified,
+                    use_zos_lob_close_after_materialization()
+                ));
+            }
+
+            if !lob_cleanup_committed
+                && !zos_lob_cleanup_verified
+                && use_zos_lob_disconnect_after_materialization()
+            {
                 if collect_diagnostics {
                     result.diagnostics.push(format!(
-                        "zos_lob_disconnect_after_materialization=true rows={} columns={}",
+                        "zos_lob_disconnect_after_materialization=true reason=cleanup_unverified rows={} columns={}",
                         result.row_count,
                         result.columns.len()
                     ));
@@ -5026,7 +5050,7 @@ fn use_zos_lob_close_after_materialization() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn use_zos_lob_disconnect_after_materialization() -> bool {
@@ -5035,7 +5059,7 @@ fn use_zos_lob_disconnect_after_materialization() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn lookup_zos_select_metadata(key: &str) -> Option<CachedZosSelectMetadata> {

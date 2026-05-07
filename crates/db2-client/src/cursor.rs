@@ -29,6 +29,24 @@ pub(crate) struct Cursor {
     closed: bool,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct CursorCloseOutcome {
+    pub frames: usize,
+    pub reads: usize,
+    pub discarded_rows: usize,
+    pub discarded_extdta: usize,
+    pub close_reply_seen: bool,
+    pub end_of_query: bool,
+    pub timed_out: bool,
+    pub max_reads_reached: bool,
+}
+
+impl CursorCloseOutcome {
+    pub(crate) fn verified(self) -> bool {
+        self.close_reply_seen || self.end_of_query
+    }
+}
+
 impl Cursor {
     /// Create a new cursor for fetching results.
     pub fn new(
@@ -361,9 +379,15 @@ impl Cursor {
         Ok((rows, end_of_query, extdta_payloads))
     }
 
-    pub(crate) async fn close_from(&mut self, inner: &mut ClientInner) -> Result<(), Error> {
+    pub(crate) async fn close_from(
+        &mut self,
+        inner: &mut ClientInner,
+    ) -> Result<CursorCloseOutcome, Error> {
         if self.closed {
-            return Ok(());
+            return Ok(CursorCloseOutcome {
+                end_of_query: true,
+                ..CursorCloseOutcome::default()
+            });
         }
 
         let collect_diagnostics = crate::connection::query_diagnostics_enabled();
@@ -375,41 +399,86 @@ impl Cursor {
         inner.send_bytes(&send_buf).await?;
 
         let drain_timeout = zos_lob_close_drain_timeout();
-        match timeout(drain_timeout, inner.read_reply_frames()).await {
-            Ok(Ok(frames)) => {
-                if collect_diagnostics {
-                    self.last_fetch_diagnostics.push(format!(
-                        "lob_close_drain frames={} corr={} bytes={}",
-                        frames.len(),
-                        corr_id,
-                        send_buf.len()
-                    ));
-                }
-                let mut rows = Vec::new();
-                let mut extdta_payloads = Vec::new();
-                let mut end_of_query = false;
-                self.process_fetch_frames(
-                    &frames,
-                    &mut rows,
-                    &mut extdta_payloads,
-                    &mut end_of_query,
-                    collect_diagnostics,
-                )?;
+        let mut outcome = CursorCloseOutcome::default();
+        let mut end_of_query = false;
+
+        loop {
+            if outcome.reads >= zos_lob_close_max_reads() {
+                outcome.max_reads_reached = true;
+                break;
             }
-            Ok(Err(err)) => return Err(err),
-            Err(_) => {
-                if collect_diagnostics {
-                    self.last_fetch_diagnostics.push(format!(
-                        "lob_close_drain timed_out corr={} bytes={}",
-                        corr_id,
-                        send_buf.len()
-                    ));
+            outcome.reads += 1;
+
+            let frames = match timeout(drain_timeout, inner.read_reply_frames()).await {
+                Ok(Ok(frames)) => frames,
+                Ok(Err(err)) => return Err(err),
+                Err(_) => {
+                    outcome.timed_out = true;
+                    if collect_diagnostics {
+                        self.last_fetch_diagnostics.push(format!(
+                            "lob_close_drain timed_out corr={} bytes={} frames={} reads={}",
+                            corr_id,
+                            send_buf.len(),
+                            outcome.frames,
+                            outcome.reads
+                        ));
+                    }
+                    break;
                 }
+            };
+            if frames.is_empty() {
+                break;
+            }
+
+            outcome.frames += frames.len();
+            outcome.close_reply_seen |= frames
+                .iter()
+                .any(|frame| frame.header.correlation_id == corr_id);
+            if collect_diagnostics {
+                self.last_fetch_diagnostics.push(format!(
+                    "lob_close_drain frames={} corr={} close_reply_seen={} bytes={}",
+                    frames.len(),
+                    corr_id,
+                    outcome.close_reply_seen,
+                    send_buf.len()
+                ));
+            }
+
+            let mut rows = Vec::new();
+            let mut extdta_payloads = Vec::new();
+            self.process_fetch_frames(
+                &frames,
+                &mut rows,
+                &mut extdta_payloads,
+                &mut end_of_query,
+                collect_diagnostics,
+            )?;
+            outcome.discarded_rows += rows.len();
+            outcome.discarded_extdta += extdta_payloads.len();
+            outcome.end_of_query = end_of_query;
+
+            if outcome.verified() {
+                break;
             }
         }
 
+        if collect_diagnostics {
+            self.last_fetch_diagnostics.push(format!(
+                "lob_close_drain_result verified={} frames={} reads={} discarded_rows={} discarded_extdta={} close_reply_seen={} end_of_query={} timed_out={} max_reads_reached={}",
+                outcome.verified(),
+                outcome.frames,
+                outcome.reads,
+                outcome.discarded_rows,
+                outcome.discarded_extdta,
+                outcome.close_reply_seen,
+                outcome.end_of_query,
+                outcome.timed_out,
+                outcome.max_reads_reached
+            ));
+        }
+
         self.closed = true;
-        Ok(())
+        Ok(outcome)
     }
 
     fn process_fetch_frames(
@@ -577,7 +646,11 @@ fn zos_non_lob_fetch_end_drain_timeout() -> Duration {
 }
 
 fn zos_lob_close_drain_timeout() -> Duration {
-    Duration::from_millis(env_u64("DB2_ZOS_LOB_CLOSE_DRAIN_MS", 25, 0, 250))
+    Duration::from_millis(env_u64("DB2_ZOS_LOB_CLOSE_DRAIN_MS", 75, 0, 500))
+}
+
+fn zos_lob_close_max_reads() -> usize {
+    env_u64("DB2_ZOS_LOB_CLOSE_MAX_READS", 64, 1, 512) as usize
 }
 
 fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
