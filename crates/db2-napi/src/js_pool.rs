@@ -199,12 +199,29 @@ impl JsPool {
         );
 
         let release_started = collect_diagnostics.then(Instant::now);
-        self.inner.release(client).await;
+        let release_outcome = self.inner.release_with_outcome(client).await;
         push_elapsed_diagnostic(
             &mut napi_diagnostics,
             "napi_pool_release_ms",
             release_started,
         );
+        if collect_diagnostics && release_outcome.disconnected {
+            let idle_after = self.inner.idle_count().await;
+            let active_after = self.inner.active_count().await;
+            let replacement_error = release_outcome
+                .replacement_error
+                .as_deref()
+                .unwrap_or("none")
+                .replace(' ', "_");
+            napi_diagnostics.push(format!(
+                "napi_pool_release_state disconnected=true replacement_created={} replacement_error={} idle_after={} active_after={} total_after={}",
+                release_outcome.replacement_created,
+                replacement_error,
+                idle_after,
+                active_after,
+                idle_after + active_after
+            ));
+        }
 
         let result = match result {
             Ok(result) => result,

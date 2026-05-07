@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
@@ -79,6 +80,14 @@ struct PooledConnection {
     client: Client,
     created_at: Instant,
     last_used: Instant,
+}
+
+/// Outcome from returning a checked-out connection to the pool.
+#[derive(Debug, Default, Clone)]
+pub struct PoolReleaseOutcome {
+    pub disconnected: bool,
+    pub replacement_created: bool,
+    pub replacement_error: Option<String>,
 }
 
 /// A connection pool that manages reusable DB2 connections.
@@ -175,12 +184,17 @@ impl Pool {
 
     /// Release a connection back into the pool.
     pub async fn release(&self, client: Client) {
+        let _ = self.release_with_outcome(client).await;
+    }
+
+    /// Release a connection and report whether pool maintenance was needed.
+    pub async fn release_with_outcome(&self, client: Client) -> PoolReleaseOutcome {
         let conn = PooledConnection {
             client,
             created_at: Instant::now(), // approximate; ideally tracked from creation
             last_used: Instant::now(),
         };
-        self.return_connection(conn).await;
+        self.return_connection(conn).await
     }
 
     /// Open idle connections up to the configured minimum.
@@ -363,7 +377,8 @@ impl Pool {
     }
 
     /// Return a connection to the pool for reuse.
-    async fn return_connection(&self, conn: PooledConnection) {
+    async fn return_connection(&self, conn: PooledConnection) -> PoolReleaseOutcome {
+        let mut outcome = PoolReleaseOutcome::default();
         let checkout = conn.client.detach_pool_checkout().await;
         let created_at = checkout
             .as_ref()
@@ -373,18 +388,29 @@ impl Pool {
         if checkout.is_none() {
             warn!("Returning a client that is not tracked as checked out from this pool");
         }
+        drop(checkout);
 
         // Check if the connection is still valid
         if !conn.client.is_connected().await {
             trace!("Not returning disconnected connection to pool");
-            return;
+            outcome.disconnected = true;
+            match self.replace_disconnected_connection().await {
+                Ok(replacement_created) => {
+                    outcome.replacement_created = replacement_created;
+                }
+                Err(err) => {
+                    warn!("Failed to replace disconnected pooled connection: {}", err);
+                    outcome.replacement_error = Some(err.to_string());
+                }
+            }
+            return outcome;
         }
 
         // Check lifetime
         if created_at.elapsed() > self.config.max_lifetime {
             trace!("Not returning expired connection to pool");
             let _ = conn.client.close().await;
-            return;
+            return outcome;
         }
 
         let mut conns = self.connections.lock().await;
@@ -393,6 +419,40 @@ impl Pool {
             created_at,
             last_used: Instant::now(),
         });
+        outcome
+    }
+
+    async fn replace_disconnected_connection(&self) -> Result<bool, Error> {
+        if !replace_disconnected_pool_connections() || self.semaphore.is_closed() {
+            return Ok(false);
+        }
+
+        let target_idle = self
+            .config
+            .min_connections
+            .max(1)
+            .min(self.config.max_connections) as usize;
+        if target_idle == 0 || self.idle_count().await >= target_idle {
+            return Ok(false);
+        }
+
+        if self.total_count().await >= self.config.max_connections as usize {
+            return Ok(false);
+        }
+
+        let client = self.create_connection().await?;
+        let mut conns = self.connections.lock().await;
+        if conns.len() >= target_idle {
+            drop(conns);
+            let _ = client.close().await;
+            return Ok(false);
+        }
+        conns.push_back(PooledConnection {
+            client,
+            created_at: Instant::now(),
+            last_used: Instant::now(),
+        });
+        Ok(true)
     }
 
     /// Perform a basic health check on a connection.
@@ -418,4 +478,13 @@ impl Pool {
         self.config.health_check_interval.is_zero()
             || conn.last_used.elapsed() >= self.config.health_check_interval
     }
+}
+
+fn replace_disconnected_pool_connections() -> bool {
+    env::var("DB2_POOL_REPLACE_DISCONNECTED")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
 }
