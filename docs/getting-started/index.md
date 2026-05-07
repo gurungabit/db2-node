@@ -194,6 +194,41 @@ const client = new Client({
 
 When `rejectUnauthorized` is `true` (the default), system trust store certificates are loaded automatically. Custom CA certificates from `caCert` are added on top.
 
+## Db2 z/OS LOB Production Modes
+
+Db2 for z/OS can continue sending external LOB data (`EXTDTA`) after an application has materialized the requested rows. The driver keeps pooled connections safe by verifying cleanup before reuse.
+
+### Default mode
+
+Run normally with no z/OS LOB environment variables:
+
+```bash
+node app.js
+```
+
+This is the recommended default. If a z/OS LOB query cannot be proven clean after materialization, the driver disconnects that socket and warm-replaces it in the pool. This prevents stale `EXTDTA` from corrupting the next query and is the fastest mode for large CLOB workloads where preserving the exact same server session is not required.
+
+### Active close mode
+
+Set `DB2_ZOS_LOB_CLOSE_AFTER_MATERIALIZE=1` when preserving the same DB2 connection is more important than individual large-LOB query latency:
+
+```bash
+DB2_ZOS_LOB_CLOSE_AFTER_MATERIALIZE=1 node app.js
+```
+
+The driver sends `CLSQRY`, drains remaining `EXTDTA`, waits for DB2's close acknowledgement, and only then returns the connection to the pool.
+
+Keep `DB2_ZOS_LOB_TRUST_PASSIVE_TAIL_QUIET` off in production. It is fail-closed, but it is not a useful performance path for large z/OS CLOB workloads.
+
+Production candidate soak coverage for this release series:
+
+| Mode | Cycles | Result |
+|------|--------|--------|
+| Default disconnect + warm replacement | 100/100 | Passed |
+| Active close | 50/50 | Passed |
+
+Both soaks completed with no wrong row counts, zero-row corruption, stale `EXTDTA`, or unhandled driver errors.
+
 ## Development Setup
 
 To run a local DB2 instance for development and testing:

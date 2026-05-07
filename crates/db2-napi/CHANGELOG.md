@@ -2,6 +2,12 @@
 
 All notable changes to this package will be documented in this file.
 
+## [0.1.7-zos.198](https://github.com/gurungabit/db2-node/releases/tag/v0.1.7-zos.198) (2026-05-06)
+
+### Documentation
+
+- document production-ready z/OS LOB cleanup modes, soak validation, and recommended environment flags
+
 ## [0.1.7-zos.54](https://github.com/gurungabit/db2-node/releases/tag/zos-secmec7-0.1.7-zos.54) (2026-05-02)
 
 ### Bug Fixes

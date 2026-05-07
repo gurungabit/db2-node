@@ -24,10 +24,10 @@ npm install @gurungabit/db2-node
 Install from a GitHub release tarball:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v0.1.3/gurungabit-db2-node-0.1.3.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v0.1.7-zos.198/gurungabit-db2-node-0.1.7-zos.198.tgz
 ```
 
-Replace `0.1.3` with the release version you want.
+Replace `0.1.7-zos.198` with the release version you want.
 
 ```ts
 import { Client } from "@gurungabit/db2-node";
@@ -53,6 +53,17 @@ await client.close();
 ```
 
 Package-level usage and API details live in `crates/db2-napi/README.md`.
+
+## Db2 for z/OS Production Notes
+
+The z/OS LOB cleanup behavior has two supported production modes:
+
+- **Default mode:** run normally with no z/OS LOB environment variables. This is the recommended default for general production. When a CLOB/LOB result cannot be proven clean after materialization, the driver disconnects that socket and warm-replaces it in the pool so stale `EXTDTA` cannot affect the next query.
+- **Active close mode:** set `DB2_ZOS_LOB_CLOSE_AFTER_MATERIALIZE=1` when preserving the same DB2 connection is more important than individual large-LOB query latency. The driver sends an active `CLSQRY`, drains until DB2 acknowledges the close, and reuses the connection only after cleanup is verified.
+
+Keep `DB2_ZOS_LOB_TRUST_PASSIVE_TAIL_QUIET` off in production. It is fail-closed, but it is not a useful performance path for large z/OS CLOB workloads.
+
+The production candidate soak passed 100/100 default-mode cycles and 50/50 active-close cycles with no wrong row counts, zero-row corruption, stale `EXTDTA`, or unhandled driver errors.
 
 ## Local Development
 

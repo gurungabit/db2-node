@@ -15,10 +15,10 @@ npm install @gurungabit/db2-node
 You can also install the npm-packed artifact from a GitHub release:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v0.1.3/gurungabit-db2-node-0.1.3.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v0.1.7-zos.198/gurungabit-db2-node-0.1.7-zos.198.tgz
 ```
 
-Replace `0.1.3` with the release version you want.
+Replace `0.1.7-zos.198` with the release version you want.
 
 Prebuilt native binaries ship for supported platforms — no Rust toolchain needed:
 
@@ -231,6 +231,67 @@ const client = new Client({
 ```
 
 For Db2 for z/OS, IBM's current JDBC driver defaults to encrypted user ID and encrypted password security (`SECMEC 9`) with AES when ICSF is enabled on the subsystem. Use `securityMechanism: 'encryptedPassword'` only when your working JDBC configuration explicitly sets `securityMechanism=7`.
+
+## Db2 z/OS LOB Production Modes
+
+Db2 for z/OS can continue sending external LOB data (`EXTDTA`) after the rows requested by an application have already been materialized. The driver treats that tail data conservatively so a pooled connection is never returned while stale LOB frames can corrupt the next query.
+
+### Recommended default
+
+Run normally:
+
+```bash
+node app.js
+```
+
+Do not set z/OS LOB cleanup environment variables for the default production path. If a z/OS LOB query cannot be proven clean after materialization, the driver disconnects that socket and warm-replaces it in the pool. This is the fastest mode for large CLOB result sets where preserving the exact same server session is not required.
+
+Expected default diagnostics, when `DB2_QUERY_DIAGNOSTICS=1` is enabled for troubleshooting:
+
+```text
+zos_lob_disconnect_after_materialization=true
+```
+
+### Active close mode
+
+Enable active close when connection/session preservation is more important than individual large-LOB query latency:
+
+```bash
+DB2_ZOS_LOB_CLOSE_AFTER_MATERIALIZE=1 node app.js
+```
+
+In this mode the driver sends `CLSQRY` with the learned z/OS query instance identifier, drains remaining `EXTDTA`, waits for DB2's close acknowledgement, and only then returns the connection to the pool.
+
+Expected active-close diagnostics:
+
+```text
+cursor_lob_materialized_tail skipped=active_close
+cursor_lob_materialized_close ... verified=true ... close_reply_seen=true
+zos_lob_cleanup_verified=true close_after_materialize=true
+```
+
+Active close keeps the same connection reusable, but it can add latency to large LOB queries because the driver reads and discards the remaining LOB tail inline.
+
+### Passive quiet trust
+
+Keep this off in production:
+
+```bash
+DB2_ZOS_LOB_TRUST_PASSIVE_TAIL_QUIET=0
+```
+
+The passive quiet path is fail-closed, but it is not a useful optimization for large z/OS CLOB workloads because any observed tail `EXTDTA` rejects reuse and falls back to safe cleanup.
+
+### Production validation
+
+The production candidate soak for this release series passed:
+
+| Mode | Cycles | Result |
+|------|--------|--------|
+| Default disconnect + warm replacement | 100/100 | Passed |
+| Active close | 50/50 | Passed |
+
+Across both soaks there were no wrong row counts, zero-row corruption, stale `EXTDTA`, or unhandled driver errors.
 
 ## Server Info
 
