@@ -486,5 +486,5 @@ fn replace_disconnected_pool_connections() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }

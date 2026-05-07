@@ -1,5 +1,6 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use std::env;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -69,11 +70,13 @@ impl JsPool {
             config.fetch_size,
         )?;
 
-        let min_connections = config.min_connections.unwrap_or(0);
         let max_connections = config.max_connections.unwrap_or(10);
         if max_connections == 0 {
             return Err(Error::from_reason("maxConnections must be > 0"));
         }
+        let min_connections = config
+            .min_connections
+            .unwrap_or_else(|| max_connections.min(2));
         if min_connections > max_connections {
             return Err(Error::from_reason(
                 "minConnections cannot exceed maxConnections",
@@ -205,6 +208,7 @@ impl JsPool {
             "napi_pool_release_ms",
             release_started,
         );
+        let warmup_deferred = defer_background_warmup(&self.inner);
         if collect_diagnostics && release_outcome.disconnected {
             let idle_after = self.inner.idle_count().await;
             let active_after = self.inner.active_count().await;
@@ -214,13 +218,16 @@ impl JsPool {
                 .unwrap_or("none")
                 .replace(' ', "_");
             napi_diagnostics.push(format!(
-                "napi_pool_release_state disconnected=true replacement_created={} replacement_error={} idle_after={} active_after={} total_after={}",
+                "napi_pool_release_state disconnected=true replacement_created={} replacement_deferred={} replacement_error={} idle_after={} active_after={} total_after={}",
                 release_outcome.replacement_created,
+                warmup_deferred,
                 replacement_error,
                 idle_after,
                 active_after,
                 idle_after + active_after
             ));
+        } else if collect_diagnostics && warmup_deferred {
+            napi_diagnostics.push("napi_pool_background_warmup_deferred=true".to_string());
         }
 
         let result = match result {
@@ -259,7 +266,8 @@ impl JsPool {
     pub async fn release(&self, client: &JsClient) -> Result<()> {
         let mut guard = client.inner.lock().await;
         if let Some(client) = guard.take() {
-            self.inner.release(client).await;
+            let _ = self.inner.release_with_outcome(client).await;
+            let _ = defer_background_warmup(&self.inner);
         }
         Ok(())
     }
@@ -299,4 +307,25 @@ fn pool_acquire_path(idle: usize, active: usize, max_connections: usize) -> &'st
     } else {
         "wait"
     }
+}
+
+fn defer_background_warmup(pool: &Arc<db2_client::Pool>) -> bool {
+    if pool.max_connections() <= 1 || !use_background_pool_warmup() {
+        return false;
+    }
+
+    let pool = Arc::clone(pool);
+    tokio::spawn(async move {
+        let _ = pool.warmup().await;
+    });
+    true
+}
+
+fn use_background_pool_warmup() -> bool {
+    env::var("DB2_POOL_BACKGROUND_WARMUP")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
 }
