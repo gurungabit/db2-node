@@ -2648,17 +2648,45 @@ impl ClientInner {
         let mut result = QueryResult::with_rows_and_diagnostics(rows, columns, diagnostics);
         if self.zos_lob_internal_depth == 0
             && self.server_info.as_ref().map_or(false, is_db2_zos_server)
-            && use_zos_lob_disconnect_after_materialization()
             && result_has_zos_lob_materialization(&result)
         {
-            if collect_diagnostics {
-                result.diagnostics.push(format!(
-                    "zos_lob_disconnect_after_materialization=true rows={} columns={}",
-                    result.row_count,
-                    result.columns.len()
-                ));
+            let mut lob_cleanup_committed = false;
+            if self.auto_commit && use_zos_lob_commit_after_materialization() {
+                let commit_started = collect_diagnostics.then(Instant::now);
+                match self.commit().await {
+                    Ok(()) => {
+                        lob_cleanup_committed = true;
+                        if let Some(started) = commit_started {
+                            result.diagnostics.push(format!(
+                                "zos_lob_commit_after_materialization_ms={:.3} success=true rows={} columns={}",
+                                started.elapsed().as_secs_f64() * 1000.0,
+                                result.row_count,
+                                result.columns.len()
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        if let Some(started) = commit_started {
+                            result.diagnostics.push(format!(
+                                "zos_lob_commit_after_materialization_ms={:.3} success=false error={}",
+                                started.elapsed().as_secs_f64() * 1000.0,
+                                sanitize_diagnostic_value(&err.to_string())
+                            ));
+                        }
+                    }
+                }
             }
-            self.reset_session_state(false).await;
+
+            if !lob_cleanup_committed && use_zos_lob_disconnect_after_materialization() {
+                if collect_diagnostics {
+                    result.diagnostics.push(format!(
+                        "zos_lob_disconnect_after_materialization=true rows={} columns={}",
+                        result.row_count,
+                        result.columns.len()
+                    ));
+                }
+                self.reset_session_state(false).await;
+            }
         }
 
         Ok(result)
@@ -4953,6 +4981,10 @@ fn summarize_sql_for_diagnostics(sql: &str) -> String {
     compact
 }
 
+fn sanitize_diagnostic_value(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join("_")
+}
+
 pub(crate) fn use_native_zos_lob_strategy() -> bool {
     env::var("DB2_ZOS_LOB_STRATEGY")
         .map(|value| {
@@ -4983,6 +5015,15 @@ fn use_zos_select_metadata_cache() -> bool {
 
 fn use_zos_select_cached_empty_retry() -> bool {
     env::var("DB2_ZOS_SELECT_CACHED_EMPTY_RETRY")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn use_zos_lob_commit_after_materialization() -> bool {
+    env::var("DB2_ZOS_LOB_COMMIT_AFTER_MATERIALIZE")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
