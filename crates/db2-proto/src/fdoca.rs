@@ -260,7 +260,11 @@ fn parse_sda_triplet(data: &[u8], col_index: usize) -> Option<ColumnDescriptor> 
 
     if let Some(swapped_len) = probable_zos_late_fixed_char_length(drda_type, data, length) {
         length = swapped_len;
-        db2_type_override = Some(Db2Type::Char(swapped_len));
+        db2_type_override = Some(if drda_type == 0x51 {
+            Db2Type::VarChar(swapped_len)
+        } else {
+            Db2Type::Char(swapped_len)
+        });
         nullable_override = Some(false);
         zos_late_fixed_char = true;
     }
@@ -1380,17 +1384,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_sda_late_lid_does_not_use_lid_low_bit_as_nullable() {
+    fn test_parse_sda_late_varying_lid_does_not_use_lid_low_bit_as_nullable() {
         let qrydsc = [0x05, 0x70, 0x51, 0x02, 0x00];
         let descriptors = parse_qrydsc(&qrydsc).unwrap();
         assert_eq!(descriptors.len(), 1);
-        assert_eq!(descriptors[0].db2_type, Db2Type::Char(2));
+        assert_eq!(descriptors[0].db2_type, Db2Type::VarChar(2));
         assert_eq!(descriptors[0].length, 2);
         assert!(!descriptors[0].nullable);
 
-        let (values, consumed) = decode_row(&[0x40, 0x40], &descriptors).unwrap();
-        assert_eq!(consumed, 2);
-        assert_eq!(values[0], Db2Value::Char("  ".to_string()));
+        let (values, consumed) = decode_row(&[0x00, 0x02, 0x40, 0x40], &descriptors).unwrap();
+        assert_eq!(consumed, 4);
+        assert_eq!(values[0], Db2Value::VarChar("  ".to_string()));
     }
 
     #[test]
@@ -1426,7 +1430,7 @@ mod tests {
         let qrydsc = [
             // Three direct result columns.
             0x05, 0x70, 0x50, 0x12, 0x00, // EBCDIC CHAR(18)
-            0x07, 0x70, 0x32, 0x00, 0x08, 0x00, 0x25, // VARCHAR(8), CCSID 37
+            0x05, 0x70, 0x51, 0x64, 0x00, // EBCDIC VARCHAR(100)
             0x05, 0x70, 0x50, 0x08, 0x00, // EBCDIC CHAR(8)
             // A compact GDA fragment that only references the first late LID.
             0x06, 0x76, 0xD0, 0x50, 0x00, 0x12,
@@ -1434,7 +1438,7 @@ mod tests {
         let descriptors = parse_qrydsc(&qrydsc).unwrap();
         assert_eq!(descriptors.len(), 3);
         assert_eq!(descriptors[0].db2_type, Db2Type::Char(18));
-        assert_eq!(descriptors[1].db2_type, Db2Type::VarChar(8));
+        assert_eq!(descriptors[1].db2_type, Db2Type::VarChar(100));
         assert_eq!(descriptors[1].ccsid, 37);
         assert_eq!(descriptors[2].db2_type, Db2Type::Char(8));
 
