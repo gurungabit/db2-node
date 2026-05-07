@@ -265,7 +265,7 @@ fn decode_row_body(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2
     let mut offset = 0;
 
     for col in columns {
-        if col.nullable && matches!(col.db2_type, Db2Type::Boolean) {
+        if columns.len() == 1 && col.nullable && matches!(col.db2_type, Db2Type::Boolean) {
             if offset >= data.len() {
                 return Err(ProtoError::BufferTooShort {
                     expected: offset + 1,
@@ -1094,6 +1094,44 @@ mod tests {
         let (values, consumed) = decode_row(&[0xFF], &cols).unwrap();
         assert_eq!(consumed, 1);
         assert_eq!(values[0], Db2Value::Null);
+    }
+
+    #[test]
+    fn test_decode_nullable_boolean_uses_indicator_in_multi_column_rows() {
+        let cols = vec![
+            ColumnDescriptor {
+                column_index: 0,
+                drda_type: 0x02,
+                length: 4,
+                precision: 0,
+                scale: 0,
+                nullable: false,
+                ccsid: 0,
+                db2_type: Db2Type::Integer,
+                byte_order: ByteOrder::LittleEndian,
+            },
+            ColumnDescriptor {
+                column_index: 1,
+                drda_type: 0xBF,
+                length: 2,
+                precision: 0,
+                scale: 0,
+                nullable: true,
+                ccsid: 0,
+                db2_type: Db2Type::Boolean,
+                byte_order: ByteOrder::BigEndian,
+            },
+        ];
+
+        let mut row_data = Vec::new();
+        row_data.extend_from_slice(&1i32.to_le_bytes());
+        row_data.push(0x00);
+        row_data.push(0x01);
+
+        let (values, consumed) = decode_row(&row_data, &cols).unwrap();
+        assert_eq!(consumed, row_data.len());
+        assert_eq!(values[0], Db2Value::Integer(1));
+        assert_eq!(values[1], Db2Value::Boolean(true));
     }
 
     #[test]
