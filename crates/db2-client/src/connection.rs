@@ -2538,23 +2538,27 @@ impl ClientInner {
                                 let tail_outcome = cursor.passive_tail_drain_from(self).await?;
                                 if tail_outcome.ran() && collect_diagnostics {
                                     diagnostics.push(format!(
-                                        "cursor_lob_materialized_tail rows={} extdta={} verified={} tail_frames={} tail_reads={} discarded_rows={} discarded_extdta={} end_of_query={} timed_out={} max_reads_reached={} protocol_error={} pending_tail={} last_fetch=[{}]",
+                                        "cursor_lob_materialized_tail rows={} extdta={} verified={} reuse_allowed={} trusted_quiet={} tail_frames={} tail_reads={} discarded_rows={} discarded_extdta={} discarded_extdta_bytes={} end_of_query={} timed_out={} max_reads_reached={} protocol_error={} pending_tail={} elapsed_ms={:.3} last_fetch=[{}]",
                                         rows.len(),
                                         extdta_payloads.len(),
                                         tail_outcome.verified(),
+                                        tail_outcome.reuse_allowed(),
+                                        tail_outcome.trusted_quiet,
                                         tail_outcome.frames,
                                         tail_outcome.reads,
                                         tail_outcome.discarded_rows,
                                         tail_outcome.discarded_extdta,
+                                        tail_outcome.discarded_extdta_bytes,
                                         tail_outcome.end_of_query,
                                         tail_outcome.timed_out,
                                         tail_outcome.max_reads_reached,
                                         tail_outcome.protocol_error,
                                         tail_outcome.pending_tail,
+                                        tail_outcome.elapsed_ms,
                                         cursor.last_fetch_diagnostics.join("; ")
                                     ));
                                 }
-                                zos_lob_cleanup_verified = tail_outcome.verified();
+                                zos_lob_cleanup_verified = tail_outcome.reuse_allowed();
                             }
                             if !zos_lob_cleanup_verified
                                 && use_zos_lob_close_after_materialization()

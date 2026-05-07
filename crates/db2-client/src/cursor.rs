@@ -1,6 +1,6 @@
 use std::env;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::trace;
 
@@ -47,17 +47,24 @@ pub(crate) struct CursorTailDrainOutcome {
     pub reads: usize,
     pub discarded_rows: usize,
     pub discarded_extdta: usize,
+    pub discarded_extdta_bytes: usize,
     pub end_of_query: bool,
     pub timed_out: bool,
     pub max_reads_reached: bool,
     pub protocol_error: bool,
     pub disabled: bool,
     pub pending_tail: usize,
+    pub elapsed_ms: f64,
+    pub trusted_quiet: bool,
 }
 
 impl CursorTailDrainOutcome {
     pub(crate) fn verified(self) -> bool {
         self.end_of_query && self.pending_tail == 0 && !self.protocol_error
+    }
+
+    pub(crate) fn reuse_allowed(self) -> bool {
+        self.verified() || self.trusted_quiet
     }
 
     pub(crate) fn ran(self) -> bool {
@@ -426,6 +433,7 @@ impl Cursor {
             return Ok(outcome);
         }
 
+        let started = Instant::now();
         let collect_diagnostics = crate::connection::query_diagnostics_enabled();
         let mut end_of_query = false;
         loop {
@@ -485,6 +493,10 @@ impl Cursor {
 
             outcome.discarded_rows += rows.len();
             outcome.discarded_extdta += extdta_payloads.len();
+            outcome.discarded_extdta_bytes += extdta_payloads
+                .iter()
+                .map(|payload| payload.len())
+                .sum::<usize>();
             outcome.end_of_query = end_of_query;
             outcome.pending_tail = self.pending_row_bytes.len();
 
@@ -495,19 +507,29 @@ impl Cursor {
 
         outcome.end_of_query |= self.closed;
         outcome.pending_tail = self.pending_row_bytes.len();
+        outcome.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        outcome.trusted_quiet = trust_zos_lob_passive_tail_quiet()
+            && outcome.timed_out
+            && outcome.frames > 0
+            && outcome.pending_tail == 0
+            && !outcome.protocol_error;
         if collect_diagnostics {
             self.last_fetch_diagnostics.push(format!(
-                "lob_passive_tail_drain_result verified={} frames={} reads={} discarded_rows={} discarded_extdta={} end_of_query={} timed_out={} max_reads_reached={} protocol_error={} pending_tail={}",
+                "lob_passive_tail_drain_result verified={} reuse_allowed={} trusted_quiet={} frames={} reads={} discarded_rows={} discarded_extdta={} discarded_extdta_bytes={} end_of_query={} timed_out={} max_reads_reached={} protocol_error={} pending_tail={} elapsed_ms={:.3}",
                 outcome.verified(),
+                outcome.reuse_allowed(),
+                outcome.trusted_quiet,
                 outcome.frames,
                 outcome.reads,
                 outcome.discarded_rows,
                 outcome.discarded_extdta,
+                outcome.discarded_extdta_bytes,
                 outcome.end_of_query,
                 outcome.timed_out,
                 outcome.max_reads_reached,
                 outcome.protocol_error,
-                outcome.pending_tail
+                outcome.pending_tail,
+                outcome.elapsed_ms
             ));
         }
 
@@ -798,11 +820,20 @@ fn use_zos_lob_passive_tail_drain() -> bool {
 }
 
 fn zos_lob_passive_tail_drain_timeout() -> Duration {
-    Duration::from_millis(env_u64("DB2_ZOS_LOB_PASSIVE_TAIL_DRAIN_MS", 2, 0, 100))
+    Duration::from_millis(env_u64("DB2_ZOS_LOB_PASSIVE_TAIL_DRAIN_MS", 15, 0, 500))
 }
 
 fn zos_lob_passive_tail_drain_max_reads() -> usize {
     env_u64("DB2_ZOS_LOB_PASSIVE_TAIL_DRAIN_MAX_READS", 16, 1, 256) as usize
+}
+
+fn trust_zos_lob_passive_tail_quiet() -> bool {
+    env::var("DB2_ZOS_LOB_TRUST_PASSIVE_TAIL_QUIET")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            value == "1" || value == "true" || value == "on" || value == "yes"
+        })
+        .unwrap_or(false)
 }
 
 fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
