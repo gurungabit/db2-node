@@ -334,7 +334,7 @@ fn decode_rows_from_buffer(
                 offset += consumed;
             }
             Err(ProtoError::BufferTooShort { .. }) => {
-                let tail_start = find_partial_row_start(&buffer, offset, columns).unwrap_or(offset);
+                let tail_start = find_partial_row_start(buffer, offset, columns).unwrap_or(offset);
                 if env::var_os("DB2_WIRE_DEBUG_HEX").is_some() {
                     eprintln!(
                         "[db2-wire] FD:OCA partial row at offset {} of {} tail_start={} preview={}",
@@ -949,7 +949,7 @@ fn ascii_bytes_to_string(data: &[u8]) -> String {
 }
 
 fn decode_graphic_bytes(data: &[u8], ccsid: u16) -> String {
-    if matches!(ccsid, 1200 | 13488) && data.len() % 2 == 0 {
+    if matches!(ccsid, 1200 | 13488) && data.len().is_multiple_of(2) {
         let units: Vec<u16> = data
             .chunks_exact(2)
             .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))

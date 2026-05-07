@@ -449,9 +449,7 @@ impl Pool {
     async fn take_reusable_idle_connection(&self) -> Option<PooledConnection> {
         loop {
             let maybe_conn = { self.connections.lock().await.pop_back() };
-            let Some(conn) = maybe_conn else {
-                return None;
-            };
+            let conn = maybe_conn?;
 
             if conn.created_at.elapsed() > self.config.max_lifetime {
                 trace!("Discarding expired connection");

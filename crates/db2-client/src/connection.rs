@@ -69,6 +69,11 @@ struct ZosSelectOpenResult {
     pipeline_fetch_after_open: bool,
 }
 
+type LobInitialGridRows = (
+    Vec<Vec<db2_proto::types::Db2Value>>,
+    Vec<Vec<Option<usize>>>,
+);
+
 static ZOS_SELECT_METADATA_CACHE: OnceLock<StdMutex<HashMap<String, CachedZosSelectMetadata>>> =
     OnceLock::new();
 static ZOS_SELECT_LOB_CACHE_DENYLIST: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
@@ -113,7 +118,7 @@ impl ClientInner {
     }
 
     pub fn direct_query_pkgnamcsn(&mut self) -> Vec<u8> {
-        let section_number = if self.server_info.as_ref().map_or(false, is_db2_zos_server) {
+        let section_number = if self.server_info.as_ref().is_some_and(is_db2_zos_server) {
             ZOS_DIRECT_QUERY_SECTION
         } else {
             DIRECT_QUERY_SECTION
@@ -362,7 +367,7 @@ impl ClientInner {
     fn frame_drain_timeout(&self) -> Duration {
         let timeout = self.config.frame_drain_timeout;
         if self.zos_lob_internal_depth > 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
         {
             return timeout.max(zos_lob_frame_drain_timeout());
         }
@@ -474,7 +479,7 @@ impl ClientInner {
         debug!("Execute immediate: {}", sql);
 
         let corr_id = self.next_correlation_id();
-        let use_zos_sqlstt = self.server_info.as_ref().map_or(false, is_db2_zos_server);
+        let use_zos_sqlstt = self.server_info.as_ref().is_some_and(is_db2_zos_server);
         let pkgnamcsn = self.direct_query_pkgnamcsn();
         // Use EXCSQLIMM (0x200A) for non-query SQL execution
         let exec_data = if self.auto_commit {
@@ -780,7 +785,7 @@ impl ClientInner {
         debug!("Execute query with {} params: {}", params.len(), sql);
 
         let is_query = sql_is_query(sql);
-        let use_zos_sqlstt = self.server_info.as_ref().map_or(false, is_db2_zos_server);
+        let use_zos_sqlstt = self.server_info.as_ref().is_some_and(is_db2_zos_server);
         let optimized_zos_sql = if params.is_empty()
             && is_query
             && use_zos_sqlstt
@@ -1281,7 +1286,7 @@ impl ClientInner {
 
         let has_zos_lobs = result_metadata_needs_zos_lob_route(column_info, result_descriptors);
         if self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && !has_zos_lobs
             && use_zos_non_lob_excsqlstt_output()
         {
@@ -1296,13 +1301,13 @@ impl ClientInner {
         }
 
         let use_extended_materialized_blocks = self.zos_lob_internal_depth > 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server);
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server);
         let use_zos_non_lob_extra_blocks = self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && !has_zos_lobs
             && use_zos_non_lob_extra_blocks();
         let fetch_size_override = if self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && !has_zos_lobs
             && use_zos_non_lob_sql_rowset_cap()
         {
@@ -1313,7 +1318,7 @@ impl ClientInner {
             None
         };
         let zos_non_lob_open_rowset = if self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && !has_zos_lobs
             && use_zos_non_lob_open_rowset()
         {
@@ -1322,12 +1327,12 @@ impl ClientInner {
             None
         };
         let zos_non_lob_limited_block_open = self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && !has_zos_lobs
             && fetch_size_override.is_some()
             && zos_non_lob_open_rowset.is_none();
         let pipeline_cached_fetch = self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && !has_zos_lobs
             && (cached_query_instance_id.is_some() || cached_pipeline_fetch_after_open)
             && (zos_non_lob_open_rowset.is_some() || cached_pipeline_fetch_after_open)
@@ -1338,7 +1343,7 @@ impl ClientInner {
             && !pipeline_cached_fetch
             && zos_non_lob_open_rowset.is_none();
         let qryblksz = if self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && !has_zos_lobs
         {
             zos_non_lob_qryblksz()
@@ -1346,7 +1351,7 @@ impl ClientInner {
             db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ
         };
         let wait_for_open_data = self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && !has_zos_lobs
             && fetch_size_override.is_some()
             && (zos_non_lob_limited_block_open || use_zos_non_lob_open_data_drain());
@@ -1920,7 +1925,7 @@ impl ClientInner {
         };
 
         if self.zos_lob_internal_depth > 0
-            || !self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            || !self.server_info.as_ref().is_some_and(is_db2_zos_server)
             || !should_retry_zos_lob_chunking_after_decode_error(&original_error)
         {
             return Err(original_error);
@@ -2426,7 +2431,7 @@ impl ClientInner {
             && pending_row_bytes.is_empty()
             && extdta_payloads.is_empty()
             && self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && fetch_size_override.is_some_and(|limit| limit > 0 && rows.len() >= limit as usize)
         {
             let cursor_descriptors = preferred_descriptor_vec(
@@ -2461,7 +2466,7 @@ impl ClientInner {
             .filter(|descriptors| !descriptors.is_empty());
             if let Some(descriptors) = cursor_descriptors {
                 let cursor_column_info = column_info_for_cursor_fetch(column_info, &descriptors);
-                if self.server_info.as_ref().map_or(false, is_db2_zos_server)
+                if self.server_info.as_ref().is_some_and(is_db2_zos_server)
                     && self.zos_lob_internal_depth == 0
                     && !use_native_zos_lob_strategy()
                     && descriptors_need_zos_lob_materialization(&cursor_column_info, &descriptors)
@@ -2482,7 +2487,7 @@ impl ClientInner {
                     && rows.is_empty()
                     && pending_row_bytes.is_empty()
                     && self.zos_lob_internal_depth == 0
-                    && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+                    && self.server_info.as_ref().is_some_and(is_db2_zos_server)
                     && !descriptors_need_lob_materialization(&cursor_column_info, &descriptors)
                     && use_zos_non_lob_close_with_limited_fetch();
                 let mut cursor = Cursor::new(
@@ -2698,7 +2703,7 @@ impl ClientInner {
             zos_lob_cleanup_verified = true;
         }
         if self.zos_lob_internal_depth == 0
-            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && result_has_zos_lob_materialization(&result)
         {
             let mut lob_cleanup_committed = false;
@@ -2793,7 +2798,7 @@ impl ClientInner {
         )
         .is_some_and(|descriptors| descriptors_need_lob_materialization(column_info, descriptors));
 
-        if self.server_info.as_ref().map_or(false, is_db2_zos_server)
+        if self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && has_lobs
             && use_native_zos_lob_strategy()
             && skip_zos_native_lob_initial_drain()
@@ -2801,7 +2806,7 @@ impl ClientInner {
             return false;
         }
 
-        if self.server_info.as_ref().map_or(false, is_db2_zos_server) && !has_lobs {
+        if self.server_info.as_ref().is_some_and(is_db2_zos_server) && !has_lobs {
             return false;
         }
 
@@ -3189,7 +3194,7 @@ impl Client {
 
             let prpsqlstt_data =
                 db2_proto::commands::prpsqlstt::build_prpsqlstt_with_sqlda(&pkgnamcsn);
-            let use_zos_sqlstt = guard.server_info.as_ref().map_or(false, is_db2_zos_server);
+            let use_zos_sqlstt = guard.server_info.as_ref().is_some_and(is_db2_zos_server);
             let sqlstt_data = build_sqlstt_for_server(sql, use_zos_sqlstt);
             let use_zos_cursor_attributes =
                 sql_is_query(sql) && use_zos_sqlstt && use_zos_read_only_cursor_attributes();
@@ -4177,13 +4182,7 @@ fn materialize_zos_lob_initial_grid_rows(
     initial_result: &QueryResult,
     catalog_columns: &[CatalogColumn],
     specs: &[LobChunkSpec],
-) -> Result<
-    (
-        Vec<Vec<db2_proto::types::Db2Value>>,
-        Vec<Vec<Option<usize>>>,
-    ),
-    Error,
-> {
+) -> Result<LobInitialGridRows, Error> {
     let mut output_values = Vec::with_capacity(initial_result.rows.len());
     let mut lob_lengths_by_column =
         vec![vec![None; initial_result.rows.len()]; catalog_columns.len()];
@@ -6276,6 +6275,7 @@ fn process_query_frames(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_pending_query_data(
     column_info: &[ColumnInfo],
     rows: &mut Vec<Row>,
@@ -6854,10 +6854,7 @@ fn finish_query_diagnostics(
     started: Option<Instant>,
     result: Result<QueryResult, Error>,
 ) -> Result<QueryResult, Error> {
-    let mut result = match result {
-        Ok(result) => result,
-        Err(err) => return Err(err),
-    };
+    let mut result = result?;
 
     if let Some(started) = started {
         result.diagnostics.push(format!(

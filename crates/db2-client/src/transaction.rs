@@ -110,7 +110,7 @@ impl Transaction {
             let use_zos_sqlstt = guard
                 .server_info
                 .as_ref()
-                .map_or(false, crate::connection::is_db2_zos_server);
+                .is_some_and(crate::connection::is_db2_zos_server);
             let sqlstt_data = crate::connection::build_sqlstt_for_server(sql, use_zos_sqlstt);
             let use_zos_cursor_attributes = crate::connection::sql_is_query(sql)
                 && use_zos_sqlstt

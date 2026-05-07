@@ -167,13 +167,13 @@ impl Cursor {
                 && inner
                     .server_info
                     .as_ref()
-                    .map_or(false, crate::connection::is_db2_zos_server);
+                    .is_some_and(crate::connection::is_db2_zos_server);
             let use_zos_non_lob_fetch = !has_lobs
                 && inner.zos_lob_internal_depth == 0
                 && inner
                     .server_info
                     .as_ref()
-                    .map_or(false, crate::connection::is_db2_zos_server);
+                    .is_some_and(crate::connection::is_db2_zos_server);
             let use_zos_non_lob_extra_blocks =
                 use_zos_non_lob_fetch && use_zos_non_lob_cntqry_extra_blocks();
             let use_extra_blocks = use_extended_materialized_blocks || use_zos_non_lob_extra_blocks;
@@ -810,7 +810,7 @@ fn should_drain_zos_non_lob_fetch_end(
         && inner
             .server_info
             .as_ref()
-            .map_or(false, crate::connection::is_db2_zos_server)
+            .is_some_and(crate::connection::is_db2_zos_server)
         && !zos_non_lob_fetch_end_drain_timeout().is_zero()
 }
 

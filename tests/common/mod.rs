@@ -39,6 +39,7 @@ pub fn test_config() -> Config {
         frame_drain_timeout: std::time::Duration::from_millis(500),
         fetch_size: 100,
         current_schema: None,
+        type_definition_name: None,
     }
 }
 
@@ -61,6 +62,7 @@ pub async fn create_pool(max_connections: u32) -> Pool {
         max_connections,
         idle_timeout: std::time::Duration::from_secs(60),
         max_lifetime: std::time::Duration::from_secs(300),
+        health_check_interval: std::time::Duration::from_secs(30),
     })
     .await
     .expect("Failed to create pool")
