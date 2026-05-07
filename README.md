@@ -29,6 +29,12 @@ npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.0/guru
 
 Replace `v1.0.0` and `1.0.0` with the release version you want.
 
+Current production release tarball:
+
+```bash
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.1/gurungabit-db2-node-1.0.1.tgz
+```
+
 ```ts
 import { Client } from "@gurungabit/db2-node";
 
@@ -73,7 +79,7 @@ The z/OS LOB cleanup behavior has two supported production modes:
 
 Keep `DB2_ZOS_LOB_TRUST_PASSIVE_TAIL_QUIET` off in production. It is fail-closed, but it is not a useful performance path for large z/OS CLOB workloads.
 
-The production soak passed 100/100 default-mode cycles and 50/50 active-close cycles with no wrong row counts, zero-row corruption, stale `EXTDTA`, or unhandled driver errors.
+The `1.0.1` production soak passed 100/100 default-mode cycles and 50/50 active-close cycles with no wrong row counts, zero-row corruption, stale `EXTDTA`, or unhandled driver errors. A BI_RENEW validation query also passed all 10 partitions, fetching 301 records through IBM-compatible TLS hostname validation and z/OS QRYDSC late text descriptors.
 
 ## Local Development
 
@@ -197,11 +203,13 @@ The deployed docs site lives at `https://gurungabit.github.io/db2-node/`.
 
 ## Status
 
-The `1.0.0` release is production-ready for the validated DB2 LUW and Db2 for z/OS paths:
+The `1.0.1` release is production-ready for the validated DB2 LUW and Db2 for z/OS paths:
 
 - Rust and Node integration suites are green
 - TLS behavior is covered in both Rust and Node tests
+- IBM-style `SSLServerCertificate` connection strings support `SSLClientHostnameValidation=OFF` for trusted certificates that do not contain matching DNS/IP SAN entries
 - Prepared statements, pooling, reconnect behavior, and timeout handling have all been hardened
+- z/OS QRYDSC late fixed and varying text descriptors are decoded for validated BI_RENEW-style result sets
 - Db2 for z/OS LOB materialization has passed default-mode and active-close soak testing with no stale `EXTDTA` corruption
 
 ## License

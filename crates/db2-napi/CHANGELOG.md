@@ -2,6 +2,20 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.1](https://github.com/gurungabit/db2-node/releases/tag/v1.0.1) (2026-05-07)
+
+### Bug Fixes
+
+- support IBM-compatible `SSLClientHostnameValidation=OFF` with `SSLServerCertificate` while keeping certificate-chain verification enabled
+- decode Db2 for z/OS late fixed and varying QRYDSC text descriptors, including BI_RENEW-style `PEND_KEY`, `PEND_INFO`, and `PEND_DATE` result sets
+- prefer complete z/OS QRYDSC descriptor lists when compact GDA fragments are incomplete
+
+### Validation
+
+- passed 10/10 BI_RENEW partition queries, fetching 301 total records through TLS with hostname validation disabled
+- passed 100/100 default z/OS LOB cleanup soak cycles
+- passed 50/50 active-close z/OS LOB cleanup soak cycles
+
 ## [1.0.0](https://github.com/gurungabit/db2-node/releases/tag/v1.0.0) (2026-05-06)
 
 ### Release

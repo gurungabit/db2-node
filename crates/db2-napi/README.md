@@ -4,7 +4,7 @@ Pure Rust DB2 driver for Node.js using the DRDA wire protocol directly. No IBM C
 
 ## Status
 
-`1.0.0` is the production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, TLS, and validated z/OS LOB materialization cleanup.
+`1.0.1` is the production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, IBM-compatible TLS certificate handling, validated z/OS QRYDSC descriptor decoding, and validated z/OS LOB materialization cleanup.
 
 ## Install
 
@@ -19,6 +19,12 @@ npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.0/guru
 ```
 
 Replace `v1.0.0` and `1.0.0` with the release version you want.
+
+Current production release tarball:
+
+```bash
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.1/gurungabit-db2-node-1.0.1.tgz
+```
 
 Prebuilt native binaries ship for supported platforms — no Rust toolchain needed:
 
@@ -300,7 +306,7 @@ The passive quiet path is fail-closed, but it is not a useful optimization for l
 
 ### Production validation
 
-The production soak for the `1.0.0` release passed:
+The production soak for the `1.0.1` release passed:
 
 | Mode | Cycles | Result |
 |------|--------|--------|
@@ -308,6 +314,8 @@ The production soak for the `1.0.0` release passed:
 | Active close | 50/50 | Passed |
 
 Across both soaks there were no wrong row counts, zero-row corruption, stale `EXTDTA`, or unhandled driver errors.
+
+The `1.0.1` z/OS descriptor validation also passed all 10 BI_RENEW partitions, fetching 301 total records. That path exercises IBM-style `SSLServerCertificate` plus `SSLClientHostnameValidation=OFF`, and QRYDSC late fixed/varying EBCDIC text descriptors such as `PEND_KEY`, `PEND_INFO`, and `PEND_DATE`.
 
 ## Server Info
 
