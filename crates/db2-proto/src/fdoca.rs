@@ -117,7 +117,7 @@ pub fn parse_qrydsc(data: &[u8]) -> Result<Vec<ColumnDescriptor>> {
         offset += triplet_len;
     }
 
-    if !object_descriptors.is_empty() {
+    if !object_descriptors.is_empty() && object_descriptors.len() >= direct_descriptors.len() {
         Ok(object_descriptors)
     } else {
         Ok(direct_descriptors)
@@ -1419,6 +1419,35 @@ mod tests {
         assert_eq!(consumed, row_data.len());
         assert_eq!(values[0], Db2Value::Char("222D598260      ".to_string()));
         assert_eq!(values[1], Db2Value::Char("20260507".to_string()));
+    }
+
+    #[test]
+    fn test_parse_qrydsc_keeps_direct_columns_when_gda_is_incomplete() {
+        let qrydsc = [
+            // Three direct result columns.
+            0x05, 0x70, 0x50, 0x12, 0x00, // EBCDIC CHAR(18)
+            0x07, 0x70, 0x32, 0x00, 0x08, 0x00, 0x25, // VARCHAR(8), CCSID 37
+            0x05, 0x70, 0x50, 0x08, 0x00, // EBCDIC CHAR(8)
+            // A compact GDA fragment that only references the first late LID.
+            0x06, 0x76, 0xD0, 0x50, 0x00, 0x12,
+        ];
+        let descriptors = parse_qrydsc(&qrydsc).unwrap();
+        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors[0].db2_type, Db2Type::Char(18));
+        assert_eq!(descriptors[1].db2_type, Db2Type::VarChar(8));
+        assert_eq!(descriptors[1].ccsid, 37);
+        assert_eq!(descriptors[2].db2_type, Db2Type::Char(8));
+
+        let row_data = [
+            0xF2, 0xF2, 0xF2, 0xC4, 0xF5, 0xF9, 0xF8, 0xF2, 0xF6, 0xF0, 0x40, 0x40, 0x40, 0x40,
+            0x40, 0x40, 0x40, 0x40, 0x00, 0x08, 0xC2, 0xC9, 0x6D, 0xD9, 0xC5, 0xD5, 0xC5, 0xE6,
+            0xF2, 0xF0, 0xF2, 0xF6, 0xF0, 0xF5, 0xF0, 0xF7,
+        ];
+        let (values, consumed) = decode_row(&row_data, &descriptors).unwrap();
+        assert_eq!(consumed, row_data.len());
+        assert_eq!(values[0], Db2Value::Char("222D598260        ".to_string()));
+        assert_eq!(values[1], Db2Value::VarChar("BI_RENEW".to_string()));
+        assert_eq!(values[2], Db2Value::Char("20260507".to_string()));
     }
 
     #[test]

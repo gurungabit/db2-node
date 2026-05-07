@@ -2701,15 +2701,24 @@ impl ClientInner {
         }
 
         if end_of_query && !pending_row_bytes.is_empty() {
-            let progress = active_descriptors
+            let (active_desc_count, descriptor_detail, progress) = active_descriptors
                 .map(|descriptors| {
-                    db2_proto::fdoca::describe_decode_progress(&pending_row_bytes, descriptors)
+                    (
+                        descriptors.len(),
+                        descriptor_summary(descriptors),
+                        db2_proto::fdoca::describe_decode_progress(&pending_row_bytes, descriptors),
+                    )
                 })
-                .unwrap_or_else(|| "no active descriptors".to_string());
+                .unwrap_or_else(|| (0, "none".to_string(), "no active descriptors".to_string()));
             return Err(Error::Protocol(format!(
-                "query ended with undecoded row data; pending_tail={} progress={}",
+                "query ended with undecoded row data; pending_tail={} column_info={} qrydsc_desc={} sqldard_desc={} active_desc={} progress={} descriptors={}",
                 pending_row_bytes.len(),
-                progress
+                column_info.len(),
+                qrydsc_descriptors.as_ref().map(|v| v.len()).unwrap_or(0),
+                sqldard_descriptors.as_ref().map(|v| v.len()).unwrap_or(0),
+                active_desc_count,
+                progress,
+                descriptor_detail
             )));
         }
 
