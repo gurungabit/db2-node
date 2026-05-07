@@ -206,7 +206,7 @@ const client = new Client({
 
 TLS uses `rustls` (pure Rust, no OpenSSL). System trust store certificates are loaded automatically when `rejectUnauthorized` is `true`. Custom CA/server certificate files can be supplied with `caCert`, or with the IBM CLI connection string keyword `SSLServerCertificate`.
 
-By default hostname validation is enabled (`sslClientHostnameValidation: 'Basic'`). Set `sslClientHostnameValidation: 'OFF'`, or `SSLClientHostnameValidation=OFF` in an IBM-style connection string, only when the DB2 server certificate is trusted but does not contain a matching DNS/IP subjectAltName. This keeps certificate-chain verification enabled while skipping only the hostname/SAN check. The `connectTimeout` covers the full TCP + TLS handshake.
+By default hostname validation is enabled (`sslClientHostnameValidation: 'Basic'`). For IBM `ibm_db` connection string compatibility, `SSLServerCertificate=/path/to/cert.pem` defaults hostname validation to `OFF` unless `SSLClientHostnameValidation=Basic` is supplied explicitly. Object-style `caCert` config remains strict by default; set `sslClientHostnameValidation: 'OFF'` only when the DB2 server certificate is trusted but does not contain a matching DNS/IP subjectAltName. This keeps certificate-chain verification enabled while skipping only the hostname/SAN check. The `connectTimeout` covers the full TCP + TLS handshake.
 
 ## DB2 z/OS Authentication
 

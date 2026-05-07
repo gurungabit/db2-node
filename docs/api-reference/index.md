@@ -102,6 +102,8 @@ The `connectTimeout` covers the entire process: TCP connect + TLS handshake.
 - `'Basic'` (default) verifies the certificate chain and checks that the connected host matches the certificate DNS/IP subjectAltName.
 - `'OFF'` verifies the certificate chain but skips the hostname/SAN check. This matches IBM CLI connection strings that use `SSLServerCertificate=...;SSLClientHostnameValidation=OFF`.
 
+For IBM `ibm_db` connection string compatibility, `SSLServerCertificate=/path/to/cert.pem` defaults hostname validation to `OFF` unless `SSLClientHostnameValidation=Basic` is supplied explicitly. Object-style `caCert` config remains strict by default.
+
 Use `'OFF'` only when the DB2 certificate is trusted but was issued without a hostname that matches the DB2 VIP or load balancer name.
 
 ### client.query()

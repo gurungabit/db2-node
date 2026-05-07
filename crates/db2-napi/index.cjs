@@ -103,6 +103,7 @@ function parseConnectionString(connectionString, options = {}) {
   if (parts.SSLSERVERCERTIFICATE) {
     config.ssl = true
     config.caCert = parts.SSLSERVERCERTIFICATE
+    config.sslClientHostnameValidation = 'OFF'
   }
   if (parts.SSLCLIENTHOSTNAMEVALIDATION) {
     config.sslClientHostnameValidation = parts.SSLCLIENTHOSTNAMEVALIDATION

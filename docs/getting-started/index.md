@@ -208,7 +208,7 @@ const client = new Client({
 
 When `rejectUnauthorized` is `true` (the default), system trust store certificates are loaded automatically. Custom CA certificates from `caCert` are added on top. IBM-style connection strings can also use `SSLServerCertificate=/path/to/cert.pem`, which maps to `caCert`.
 
-Hostname validation is enabled by default (`sslClientHostnameValidation: 'Basic'`). Set `sslClientHostnameValidation: 'OFF'`, or `SSLClientHostnameValidation=OFF` in a connection string, only when the DB2 server certificate is trusted but does not contain a matching DNS/IP subjectAltName. That mode verifies the certificate chain and skips only the hostname/SAN check.
+Hostname validation is enabled by default (`sslClientHostnameValidation: 'Basic'`). For IBM `ibm_db` connection string compatibility, `SSLServerCertificate=/path/to/cert.pem` defaults hostname validation to `OFF` unless `SSLClientHostnameValidation=Basic` is supplied explicitly. Object-style `caCert` config remains strict by default. Use `sslClientHostnameValidation: 'OFF'` only when the DB2 server certificate is trusted but does not contain a matching DNS/IP subjectAltName. That mode verifies the certificate chain and skips only the hostname/SAN check.
 
 ## Db2 z/OS LOB Production Modes
 

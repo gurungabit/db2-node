@@ -16,7 +16,7 @@ test('exports ibm_db-compatible entry points', () => {
 
 test('parses common ibm_db connection string keywords', () => {
   const config = ibmdb._compat.parseConnectionString(
-    'DATABASE=DDFIC0A;HOSTNAME=db.example.com;PORT=3380;PROTOCOL=TCPIP;UID=user;PWD=pass;Security=SSL;CURRENTSCHEMA=APP;SSLServerCertificate=/tmp/db2-ca.pem;SSLClientHostnameValidation=OFF',
+    'DATABASE=DDFIC0A;HOSTNAME=db.example.com;PORT=3380;PROTOCOL=TCPIP;UID=user;PWD=pass;Security=SSL;CURRENTSCHEMA=APP;SSLServerCertificate=/tmp/db2-ca.pem',
     { connectTimeout: 40, minConnections: 2, maxConnections: 4 }
   )
 
@@ -34,6 +34,25 @@ test('parses common ibm_db connection string keywords', () => {
     minConnections: 2,
     maxConnections: 4,
   })
+})
+
+test('explicit SSLClientHostnameValidation overrides SSLServerCertificate default', () => {
+  const config = ibmdb._compat.parseConnectionString(
+    'DATABASE=DDFIC0A;HOSTNAME=db.example.com;UID=user;PWD=pass;Security=SSL;SSLServerCertificate=/tmp/db2-ca.pem;SSLClientHostnameValidation=Basic'
+  )
+
+  assert.equal(config.ssl, true)
+  assert.equal(config.caCert, '/tmp/db2-ca.pem')
+  assert.equal(config.sslClientHostnameValidation, 'Basic')
+})
+
+test('parses IBM SSLClientHostnameValidation=OFF connection string keyword', () => {
+  const config = ibmdb._compat.parseConnectionString(
+    'DATABASE=DDFIC0A;HOSTNAME=db.example.com;UID=user;PWD=pass;Security=SSL;SSLClientHostnameValidation=OFF'
+  )
+
+  assert.equal(config.ssl, true)
+  assert.equal(config.sslClientHostnameValidation, 'OFF')
 })
 
 test('memory ODBCResult supports fetch APIs', () => {

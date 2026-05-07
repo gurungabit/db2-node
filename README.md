@@ -62,7 +62,7 @@ The Node package supports IBM CLI-style TLS connection strings:
 SECURITY=SSL;SSLServerCertificate=/path/to/cert.pem;SSLClientHostnameValidation=OFF;
 ```
 
-`SSLServerCertificate` maps to `caCert`. `SSLClientHostnameValidation` defaults to `Basic`; set it to `OFF` only for trusted DB2 certificates that do not include a DNS/IP subjectAltName matching the DB2 hostname or VIP.
+`SSLServerCertificate` maps to `caCert`. For IBM `ibm_db` connection string compatibility, `SSLServerCertificate` also defaults hostname validation to `OFF` unless `SSLClientHostnameValidation=Basic` is supplied explicitly. Object-style `caCert` config remains strict by default.
 
 ## Db2 for z/OS Production Notes
 
