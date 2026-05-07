@@ -15,6 +15,8 @@ export const NativeTransaction = compat.NativeTransaction
 
 export const Client = compat.Client
 export const Pool = compat.Pool
+export const CompatPool = compat.CompatPool
+export const IbmDbPool = compat.IbmDbPool
 export const Database = compat.Database
 export const ODBCResult = compat.ODBCResult
 export const ODBCStatement = compat.ODBCStatement

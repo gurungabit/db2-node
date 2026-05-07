@@ -33,6 +33,7 @@ import type {
 export type ConnectionString = string | JsConnectionConfig
 
 export const Client: typeof JsClient
+export const Pool: typeof JsPool
 export const PreparedStatement: typeof JsPreparedStatement
 export const Transaction: typeof JsTransaction
 
@@ -107,7 +108,7 @@ export class Database {
   getInfoSync(infoType: number | string): never
 }
 
-export class Pool {
+export class CompatPool {
   constructor(config?: JsPoolConfig)
   connect(callback?: (err?: Error | null) => void): Promise<void> | void
   warmup(callback?: (err: Error | null, created?: number) => void): Promise<number> | void
@@ -130,6 +131,8 @@ export class Pool {
   initAsync(size: number, connectionString: ConnectionString, callback?: (err?: Error | null) => void): Promise<void> | void
   setMaxPoolSize(size: number): boolean
 }
+
+export const IbmDbPool: typeof CompatPool
 
 export function open(connectionString: ConnectionString, callback: (err: Error | null, conn: Database) => void): void
 export function open(connectionString: ConnectionString, options: Record<string, any>, callback: (err: Error | null, conn: Database) => void): void

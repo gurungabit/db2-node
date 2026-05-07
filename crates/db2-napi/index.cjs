@@ -520,7 +520,7 @@ function openSync() {
   return unsupportedSync('ibmdb.openSync')
 }
 
-class Pool {
+class CompatPool {
   constructor(config) {
     this._maxPoolSize = 10
     this._connections = new Set()
@@ -534,7 +534,7 @@ class Pool {
 
   _requireNative() {
     if (!this._native) {
-      throw new Error('Pool is not initialized; pass a config to new Pool(config) or call init/initAsync/open first')
+      throw new Error('CompatPool is not initialized; pass a config to new CompatPool(config) or call init/initAsync/open first')
     }
     return this._native
   }
@@ -678,7 +678,9 @@ const api = {
   NativePreparedStatement: JsPreparedStatement,
   NativeTransaction: JsTransaction,
   Client: JsClient,
-  Pool,
+  Pool: JsPool,
+  CompatPool,
+  IbmDbPool: CompatPool,
   Database,
   ODBCResult,
   ODBCStatement,
@@ -693,6 +695,7 @@ const api = {
     ODBCResult,
     ODBCStatement,
     Database,
+    Pool: CompatPool,
   },
 }
 

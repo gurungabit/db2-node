@@ -7,6 +7,8 @@ test('exports ibm_db-compatible entry points', () => {
   assert.equal(typeof ibmdb.open, 'function')
   assert.equal(typeof ibmdb.openSync, 'function')
   assert.equal(typeof ibmdb.Pool, 'function')
+  assert.equal(ibmdb.Pool, ibmdb.NativePool)
+  assert.equal(typeof ibmdb.CompatPool, 'function')
   assert.equal(typeof ibmdb.Database, 'function')
   assert.equal(typeof ibmdb.ODBCResult, 'function')
   assert.equal(typeof ibmdb.NativePool, 'function')
@@ -48,7 +50,7 @@ test('sync database APIs fail loudly instead of pretending to block', () => {
 })
 
 test('compat Pool.connect propagates async errors to callback and promise callers', async () => {
-  const pool = new ibmdb.Pool()
+  const pool = new ibmdb.CompatPool()
   const failure = new Error('bad credentials')
   pool._native = {
     connect: async () => {
@@ -71,7 +73,7 @@ test('compat Pool.connect propagates async errors to callback and promise caller
 })
 
 test('compat Pool.open simple query uses native Pool.query fast path', async () => {
-  const pool = new ibmdb.Pool()
+  const pool = new ibmdb.CompatPool()
   const calls = []
   pool._native = {
     acquire: async () => {
