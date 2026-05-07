@@ -41,6 +41,30 @@ pub(crate) struct CursorCloseOutcome {
     pub max_reads_reached: bool,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct CursorTailDrainOutcome {
+    pub frames: usize,
+    pub reads: usize,
+    pub discarded_rows: usize,
+    pub discarded_extdta: usize,
+    pub end_of_query: bool,
+    pub timed_out: bool,
+    pub max_reads_reached: bool,
+    pub protocol_error: bool,
+    pub disabled: bool,
+    pub pending_tail: usize,
+}
+
+impl CursorTailDrainOutcome {
+    pub(crate) fn verified(self) -> bool {
+        self.end_of_query && self.pending_tail == 0 && !self.protocol_error
+    }
+
+    pub(crate) fn ran(self) -> bool {
+        !self.disabled && (self.reads > 0 || self.frames > 0 || self.timed_out)
+    }
+}
+
 impl CursorCloseOutcome {
     pub(crate) fn verified(self) -> bool {
         self.close_reply_seen || self.end_of_query
@@ -379,6 +403,117 @@ impl Cursor {
         Ok((rows, end_of_query, extdta_payloads))
     }
 
+    pub(crate) async fn passive_tail_drain_from(
+        &mut self,
+        inner: &mut ClientInner,
+    ) -> Result<CursorTailDrainOutcome, Error> {
+        let mut outcome = CursorTailDrainOutcome {
+            pending_tail: self.pending_row_bytes.len(),
+            ..CursorTailDrainOutcome::default()
+        };
+        if self.closed {
+            outcome.end_of_query = true;
+            return Ok(outcome);
+        }
+        if !use_zos_lob_passive_tail_drain() {
+            outcome.disabled = true;
+            return Ok(outcome);
+        }
+
+        let drain_timeout = zos_lob_passive_tail_drain_timeout();
+        if drain_timeout.is_zero() {
+            outcome.disabled = true;
+            return Ok(outcome);
+        }
+
+        let collect_diagnostics = crate::connection::query_diagnostics_enabled();
+        let mut end_of_query = false;
+        loop {
+            if outcome.reads >= zos_lob_passive_tail_drain_max_reads() {
+                outcome.max_reads_reached = true;
+                break;
+            }
+            outcome.reads += 1;
+
+            let frames = match timeout(drain_timeout, inner.read_reply_frames()).await {
+                Ok(Ok(frames)) => frames,
+                Ok(Err(err)) => return Err(err),
+                Err(_) => {
+                    outcome.timed_out = true;
+                    if collect_diagnostics {
+                        self.last_fetch_diagnostics.push(format!(
+                            "lob_passive_tail_drain timed_out frames={} reads={} pending_tail={}",
+                            outcome.frames,
+                            outcome.reads,
+                            self.pending_row_bytes.len()
+                        ));
+                    }
+                    break;
+                }
+            };
+            if frames.is_empty() {
+                break;
+            }
+
+            outcome.frames += frames.len();
+            if collect_diagnostics {
+                self.last_fetch_diagnostics.push(format!(
+                    "lob_passive_tail_drain frames={} reads={}",
+                    frames.len(),
+                    outcome.reads
+                ));
+            }
+
+            let mut rows = Vec::new();
+            let mut extdta_payloads = Vec::new();
+            if let Err(err) = self.process_fetch_frames(
+                &frames,
+                &mut rows,
+                &mut extdta_payloads,
+                &mut end_of_query,
+                collect_diagnostics,
+            ) {
+                outcome.protocol_error = true;
+                if collect_diagnostics {
+                    self.last_fetch_diagnostics.push(format!(
+                        "lob_passive_tail_drain protocol_error={}",
+                        err.to_string().replace(' ', "_")
+                    ));
+                }
+                break;
+            }
+
+            outcome.discarded_rows += rows.len();
+            outcome.discarded_extdta += extdta_payloads.len();
+            outcome.end_of_query = end_of_query;
+            outcome.pending_tail = self.pending_row_bytes.len();
+
+            if outcome.verified() {
+                break;
+            }
+        }
+
+        outcome.end_of_query |= self.closed;
+        outcome.pending_tail = self.pending_row_bytes.len();
+        if collect_diagnostics {
+            self.last_fetch_diagnostics.push(format!(
+                "lob_passive_tail_drain_result verified={} frames={} reads={} discarded_rows={} discarded_extdta={} end_of_query={} timed_out={} max_reads_reached={} protocol_error={} pending_tail={}",
+                outcome.verified(),
+                outcome.frames,
+                outcome.reads,
+                outcome.discarded_rows,
+                outcome.discarded_extdta,
+                outcome.end_of_query,
+                outcome.timed_out,
+                outcome.max_reads_reached,
+                outcome.protocol_error,
+                outcome.pending_tail
+            ));
+        }
+
+        Ok(outcome)
+    }
+
     pub(crate) async fn close_from(
         &mut self,
         inner: &mut ClientInner,
@@ -651,6 +786,23 @@ fn zos_lob_close_drain_timeout() -> Duration {
 
 fn zos_lob_close_max_reads() -> usize {
     env_u64("DB2_ZOS_LOB_CLOSE_MAX_READS", 64, 1, 512) as usize
+}
+
+fn use_zos_lob_passive_tail_drain() -> bool {
+    env::var("DB2_ZOS_LOB_PASSIVE_TAIL_DRAIN")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn zos_lob_passive_tail_drain_timeout() -> Duration {
+    Duration::from_millis(env_u64("DB2_ZOS_LOB_PASSIVE_TAIL_DRAIN_MS", 2, 0, 100))
+}
+
+fn zos_lob_passive_tail_drain_max_reads() -> usize {
+    env_u64("DB2_ZOS_LOB_PASSIVE_TAIL_DRAIN_MAX_READS", 16, 1, 256) as usize
 }
 
 fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
