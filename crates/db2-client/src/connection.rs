@@ -2531,7 +2531,7 @@ impl ClientInner {
                         );
                         extdta_payloads.extend(more_extdta_payloads);
                         if !rows_need_extdta_payloads(&rows, &cursor.descriptors) {
-                            if !done {
+                            if !done && use_zos_lob_close_after_materialization() {
                                 cursor.close_from(self).await?;
                                 if collect_diagnostics {
                                     diagnostics.push(format!(
@@ -4455,7 +4455,6 @@ fn zos_select_section_cacheable(
     descriptors: &[db2_proto::fdoca::ColumnDescriptor],
 ) -> bool {
     !result_metadata_needs_zos_lob_route(columns, descriptors)
-        && !(descriptors.is_empty() && descriptorless_columns_have_ambiguous_text(columns))
 }
 
 fn result_columns_need_zos_lob_route(columns: &[ColumnInfo]) -> bool {
@@ -4498,16 +4497,6 @@ fn descriptor_has_large_lob_inline_type(descriptor: &db2_proto::fdoca::ColumnDes
         | db2_proto::types::Db2Type::LobChar(len) => len & 0x8000 != 0 || len >= 32_704,
         _ => false,
     }
-}
-
-fn descriptorless_columns_have_ambiguous_text(columns: &[ColumnInfo]) -> bool {
-    columns.iter().any(|column| {
-        let ty = column.type_name.trim().to_ascii_lowercase();
-        matches!(
-            ty.as_str(),
-            "char" | "varchar" | "long varchar" | "graphic" | "vargraphic" | "long vargraphic"
-        )
-    })
 }
 
 fn column_info_has_lob_hint(columns: &[ColumnInfo]) -> bool {
@@ -5031,13 +5020,22 @@ fn use_zos_lob_commit_after_materialization() -> bool {
         .unwrap_or(false)
 }
 
+fn use_zos_lob_close_after_materialization() -> bool {
+    env::var("DB2_ZOS_LOB_CLOSE_AFTER_MATERIALIZE")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(false)
+}
+
 fn use_zos_lob_disconnect_after_materialization() -> bool {
     env::var("DB2_ZOS_LOB_DISCONNECT_AFTER_MATERIALIZE")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn lookup_zos_select_metadata(key: &str) -> Option<CachedZosSelectMetadata> {
@@ -5080,8 +5078,6 @@ fn store_zos_select_metadata(
 ) -> bool {
     if column_info.is_empty()
         || result_metadata_needs_zos_lob_route(column_info, result_descriptors)
-        || (result_descriptors.is_empty()
-            && descriptorless_columns_have_ambiguous_text(column_info))
     {
         return false;
     }
@@ -7368,7 +7364,7 @@ mod tests {
     }
 
     #[test]
-    fn zos_select_metadata_cache_skips_descriptorless_generic_text() {
+    fn zos_select_metadata_cache_allows_descriptorless_generic_text() {
         let key = format!("unit:descriptorless-generic-text:{}", line!());
         let columns = vec![ColumnInfo::new(
             "INSP_RPT_DETL_DOC".to_string(),
@@ -7376,8 +7372,8 @@ mod tests {
             true,
         )];
 
-        assert!(!store_zos_select_metadata(&key, &columns, &[]));
-        assert!(lookup_zos_select_metadata(&key).is_none());
+        assert!(store_zos_select_metadata(&key, &columns, &[]));
+        assert!(lookup_zos_select_metadata(&key).is_some());
     }
 
     #[test]
@@ -7419,14 +7415,14 @@ mod tests {
     }
 
     #[test]
-    fn zos_select_section_cache_skips_descriptorless_generic_text() {
+    fn zos_select_section_cache_allows_descriptorless_generic_text() {
         let prepare_columns = vec![ColumnInfo::new(
             "INSP_RPT_DETL_DOC".to_string(),
             "VARCHAR".to_string(),
             true,
         )];
 
-        assert!(!zos_select_section_cacheable(&prepare_columns, &[]));
+        assert!(zos_select_section_cacheable(&prepare_columns, &[]));
     }
 
     #[test]
