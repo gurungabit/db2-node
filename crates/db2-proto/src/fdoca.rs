@@ -190,13 +190,22 @@ fn parse_sda_triplet(data: &[u8], col_index: usize) -> Option<ColumnDescriptor> 
     }
 
     let drda_type = data[0];
-    let nullable = (drda_type & 0x01) != 0;
 
-    let length = if data.len() >= 3 {
+    let mut length = if data.len() >= 3 {
         u16::from_be_bytes([data[1], data[2]])
     } else {
         0
     };
+    let mut db2_type_override = None;
+    let mut nullable_override = None;
+    let mut zos_late_fixed_char = false;
+
+    if let Some(swapped_len) = probable_zos_late_fixed_char_length(drda_type, data, length) {
+        length = swapped_len;
+        db2_type_override = Some(Db2Type::Char(swapped_len));
+        nullable_override = Some(false);
+        zos_late_fixed_char = true;
+    }
 
     let mut precision = 0u8;
     let mut scale = 0u8;
@@ -226,8 +235,14 @@ fn parse_sda_triplet(data: &[u8], col_index: usize) -> Option<ColumnDescriptor> 
             }
         }
     }
+    if zos_late_fixed_char && ccsid == 0 {
+        ccsid = 37;
+    }
 
-    let (db2_type, _) = Db2Type::from_drda_type(drda_type, length, precision, scale);
+    let (db2_type, decoded_nullable) = db2_type_override
+        .map(|db2_type| (db2_type, false))
+        .unwrap_or_else(|| Db2Type::from_drda_type(drda_type, length, precision, scale));
+    let nullable = nullable_override.unwrap_or(decoded_nullable);
 
     Some(ColumnDescriptor {
         column_index: col_index,
@@ -240,6 +255,23 @@ fn parse_sda_triplet(data: &[u8], col_index: usize) -> Option<ColumnDescriptor> 
         db2_type,
         byte_order: ByteOrder::LittleEndian,
     })
+}
+
+fn probable_zos_late_fixed_char_length(drda_type: u8, data: &[u8], be_length: u16) -> Option<u16> {
+    if !(0x50..0xC8).contains(&drda_type) || data.len() < 3 {
+        return None;
+    }
+
+    let le_length = u16::from_le_bytes([data[1], data[2]]);
+    if le_length == 0 || le_length > 512 {
+        return None;
+    }
+
+    if be_length >= 256 && be_length.is_multiple_of(256) {
+        Some(le_length)
+    } else {
+        None
+    }
 }
 
 /// Decode a single row of data from QRYDTA bytes using column descriptors.
@@ -1269,6 +1301,47 @@ mod tests {
         assert_eq!(consumed, row_data.len());
         assert_eq!(values[0], Db2Value::Decimal("3".to_string()));
         assert_eq!(values[1], Db2Value::VarChar("112042F8730CA1".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sda_late_lid_swapped_length_as_fixed_ebcdic_char() {
+        let qrydsc = [0x05, 0x70, 0x50, 0x10, 0x00];
+        let descriptors = parse_qrydsc(&qrydsc).unwrap();
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].db2_type, Db2Type::Char(16));
+        assert_eq!(descriptors[0].length, 16);
+        assert!(!descriptors[0].nullable);
+
+        let row_data = [
+            0xF2, 0xF2, 0xF2, 0xC4, 0xF5, 0xF9, 0xF8, 0xF2, 0xF6, 0xF0, 0x40, 0x40, 0x40, 0x40,
+            0x40, 0x40,
+        ];
+        let (values, consumed) = decode_row(&row_data, &descriptors).unwrap();
+        assert_eq!(consumed, 16);
+        assert_eq!(values[0], Db2Value::Char("222D598260      ".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sda_late_lid_does_not_use_lid_low_bit_as_nullable() {
+        let qrydsc = [0x05, 0x70, 0x51, 0x02, 0x00];
+        let descriptors = parse_qrydsc(&qrydsc).unwrap();
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].db2_type, Db2Type::Char(2));
+        assert_eq!(descriptors[0].length, 2);
+        assert!(!descriptors[0].nullable);
+
+        let (values, consumed) = decode_row(&[0x40, 0x40], &descriptors).unwrap();
+        assert_eq!(consumed, 2);
+        assert_eq!(values[0], Db2Value::Char("  ".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sda_regular_lobbytes_length_stays_lobbytes() {
+        let qrydsc = [0x05, 0x70, 0x50, 0x00, 0x08];
+        let descriptors = parse_qrydsc(&qrydsc).unwrap();
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].db2_type, Db2Type::LobBytes(8));
+        assert_eq!(descriptors[0].length, 8);
     }
 
     #[test]
