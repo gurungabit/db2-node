@@ -41,7 +41,7 @@ pub(crate) struct CursorCloseOutcome {
     pub max_reads_reached: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct CursorTailDrainOutcome {
     pub frames: usize,
     pub reads: usize,
@@ -56,6 +56,28 @@ pub(crate) struct CursorTailDrainOutcome {
     pub pending_tail: usize,
     pub elapsed_ms: f64,
     pub trusted_quiet: bool,
+    pub quiet_reject_reason: &'static str,
+}
+
+impl Default for CursorTailDrainOutcome {
+    fn default() -> Self {
+        Self {
+            frames: 0,
+            reads: 0,
+            discarded_rows: 0,
+            discarded_extdta: 0,
+            discarded_extdta_bytes: 0,
+            end_of_query: false,
+            timed_out: false,
+            max_reads_reached: false,
+            protocol_error: false,
+            disabled: false,
+            pending_tail: 0,
+            elapsed_ms: 0.0,
+            trusted_quiet: false,
+            quiet_reject_reason: "not_requested",
+        }
+    }
 }
 
 impl CursorTailDrainOutcome {
@@ -508,17 +530,17 @@ impl Cursor {
         outcome.end_of_query |= self.closed;
         outcome.pending_tail = self.pending_row_bytes.len();
         outcome.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-        outcome.trusted_quiet = trust_zos_lob_passive_tail_quiet()
-            && outcome.timed_out
-            && outcome.frames > 0
-            && outcome.pending_tail == 0
-            && !outcome.protocol_error;
+        if trust_zos_lob_passive_tail_quiet() {
+            outcome.quiet_reject_reason = passive_tail_quiet_reject_reason(outcome);
+            outcome.trusted_quiet = outcome.quiet_reject_reason == "none";
+        }
         if collect_diagnostics {
             self.last_fetch_diagnostics.push(format!(
-                "lob_passive_tail_drain_result verified={} reuse_allowed={} trusted_quiet={} frames={} reads={} discarded_rows={} discarded_extdta={} discarded_extdta_bytes={} end_of_query={} timed_out={} max_reads_reached={} protocol_error={} pending_tail={} elapsed_ms={:.3}",
+                "lob_passive_tail_drain_result verified={} reuse_allowed={} trusted_quiet={} quiet_reject_reason={} frames={} reads={} discarded_rows={} discarded_extdta={} discarded_extdta_bytes={} end_of_query={} timed_out={} max_reads_reached={} protocol_error={} pending_tail={} elapsed_ms={:.3}",
                 outcome.verified(),
                 outcome.reuse_allowed(),
                 outcome.trusted_quiet,
+                outcome.quiet_reject_reason,
                 outcome.frames,
                 outcome.reads,
                 outcome.discarded_rows,
@@ -836,6 +858,34 @@ fn trust_zos_lob_passive_tail_quiet() -> bool {
         .unwrap_or(false)
 }
 
+fn passive_tail_quiet_reject_reason(outcome: CursorTailDrainOutcome) -> &'static str {
+    if outcome.verified() {
+        return "verified";
+    }
+    if outcome.protocol_error {
+        return "protocol_error";
+    }
+    if outcome.end_of_query {
+        return "end_without_verified";
+    }
+    if outcome.max_reads_reached {
+        return "max_reads";
+    }
+    if !outcome.timed_out {
+        return "not_quiet";
+    }
+    if outcome.pending_tail != 0 {
+        return "pending_tail";
+    }
+    if outcome.discarded_extdta != 0 || outcome.discarded_extdta_bytes != 0 {
+        return "discarded_extdta";
+    }
+    if outcome.discarded_rows != 0 {
+        return "discarded_rows";
+    }
+    "none"
+}
+
 fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
     env::var(name)
         .ok()
@@ -1029,4 +1079,39 @@ fn format_hex_preview(data: &[u8], max_bytes: usize) -> String {
         out.push_str(" ...");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{passive_tail_quiet_reject_reason, CursorTailDrainOutcome};
+
+    #[test]
+    fn passive_tail_quiet_rejects_discarded_extdta() {
+        let outcome = CursorTailDrainOutcome {
+            frames: 3,
+            reads: 4,
+            discarded_extdta: 3,
+            discarded_extdta_bytes: 56_916,
+            timed_out: true,
+            pending_tail: 0,
+            ..CursorTailDrainOutcome::default()
+        };
+
+        assert_eq!(
+            passive_tail_quiet_reject_reason(outcome),
+            "discarded_extdta"
+        );
+    }
+
+    #[test]
+    fn passive_tail_quiet_allows_empty_timeout_only() {
+        let outcome = CursorTailDrainOutcome {
+            reads: 1,
+            timed_out: true,
+            pending_tail: 0,
+            ..CursorTailDrainOutcome::default()
+        };
+
+        assert_eq!(passive_tail_quiet_reject_reason(outcome), "none");
+    }
 }

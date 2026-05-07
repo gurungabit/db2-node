@@ -2538,12 +2538,13 @@ impl ClientInner {
                                 let tail_outcome = cursor.passive_tail_drain_from(self).await?;
                                 if tail_outcome.ran() && collect_diagnostics {
                                     diagnostics.push(format!(
-                                        "cursor_lob_materialized_tail rows={} extdta={} verified={} reuse_allowed={} trusted_quiet={} tail_frames={} tail_reads={} discarded_rows={} discarded_extdta={} discarded_extdta_bytes={} end_of_query={} timed_out={} max_reads_reached={} protocol_error={} pending_tail={} elapsed_ms={:.3} last_fetch=[{}]",
+                                        "cursor_lob_materialized_tail rows={} extdta={} verified={} reuse_allowed={} trusted_quiet={} quiet_reject_reason={} tail_frames={} tail_reads={} discarded_rows={} discarded_extdta={} discarded_extdta_bytes={} end_of_query={} timed_out={} max_reads_reached={} protocol_error={} pending_tail={} elapsed_ms={:.3} last_fetch=[{}]",
                                         rows.len(),
                                         extdta_payloads.len(),
                                         tail_outcome.verified(),
                                         tail_outcome.reuse_allowed(),
                                         tail_outcome.trusted_quiet,
+                                        tail_outcome.quiet_reject_reason,
                                         tail_outcome.frames,
                                         tail_outcome.reads,
                                         tail_outcome.discarded_rows,
