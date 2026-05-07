@@ -253,6 +253,17 @@ jobs:
         working-directory: crates/db2-napi
         run: find . -maxdepth 1 -name 'db2-node.*.node' | sort
 
+      - name: Embed README metadata
+        working-directory: crates/db2-napi
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs')
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'))
+          pkg.readmeFilename = 'README.md'
+          pkg.readme = fs.readFileSync('README.md', 'utf8')
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`)
+          NODE
+
       - name: Publish release
         working-directory: crates/db2-napi
         run: |

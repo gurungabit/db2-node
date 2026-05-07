@@ -4,7 +4,7 @@ Pure Rust DB2 driver for Node.js using the DRDA wire protocol directly. No IBM C
 
 ## Status
 
-`1.0.3` is the production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, IBM-compatible TLS certificate handling, validated z/OS QRYDSC descriptor decoding, and validated z/OS LOB materialization cleanup. It publishes the validated driver under the unscoped `db2-node` package name.
+`1.0.4` is the production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, IBM-compatible TLS certificate handling, validated z/OS QRYDSC descriptor decoding, and validated z/OS LOB materialization cleanup. It publishes the validated driver under the unscoped `db2-node` package name.
 
 ## Install
 
@@ -15,15 +15,15 @@ npm install db2-node
 You can also install the npm-packed artifact from a GitHub release:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.3/db2-node-1.0.3.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.4/db2-node-1.0.4.tgz
 ```
 
-Replace `v1.0.3` and `1.0.3` with the release version you want.
+Replace `v1.0.4` and `1.0.4` with the release version you want.
 
 Current production release tarball:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.3/db2-node-1.0.3.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.4/db2-node-1.0.4.tgz
 ```
 
 Prebuilt native binaries ship for supported platforms — no Rust toolchain needed:
@@ -306,7 +306,7 @@ The passive quiet path is fail-closed, but it is not a useful optimization for l
 
 ### Production validation
 
-The production soak for the validated driver line now published as `db2-node@1.0.3` passed:
+The production soak for the validated driver line now published as `db2-node@1.0.4` passed:
 
 | Mode | Cycles | Result |
 |------|--------|--------|
