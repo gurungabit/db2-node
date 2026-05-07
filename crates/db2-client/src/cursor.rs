@@ -217,7 +217,10 @@ impl Cursor {
 
         let mut writer = DssWriter::new(corr_id);
         if close_after_this_fetch {
-            let clsqry_data = db2_proto::commands::clsqry::build_clsqry(&self.pkgnamcsn);
+            let clsqry_data = db2_proto::commands::clsqry::build_clsqry_with_qryinsid(
+                &self.pkgnamcsn,
+                self.query_instance_id.as_deref(),
+            );
             writer.write_request(&cntqry_data, true);
             writer.set_correlation_id(close_corr_id.expect("close correlation id"));
             writer.write_request(&clsqry_data, false);
@@ -571,10 +574,21 @@ impl Cursor {
 
         let collect_diagnostics = crate::connection::query_diagnostics_enabled();
         let corr_id = inner.next_correlation_id();
-        let clsqry_data = db2_proto::commands::clsqry::build_clsqry(&self.pkgnamcsn);
+        let clsqry_data = db2_proto::commands::clsqry::build_clsqry_with_qryinsid(
+            &self.pkgnamcsn,
+            self.query_instance_id.as_deref(),
+        );
         let mut writer = DssWriter::new(corr_id);
         writer.write_request(&clsqry_data, false);
         let send_buf = writer.finish();
+        if collect_diagnostics {
+            self.last_fetch_diagnostics.push(format!(
+                "lob_close_send corr={} bytes={} qryinsid={}",
+                corr_id,
+                send_buf.len(),
+                self.query_instance_id.is_some()
+            ));
+        }
         inner.send_bytes(&send_buf).await?;
 
         let drain_timeout = zos_lob_close_drain_timeout();
