@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::env;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
@@ -98,6 +99,8 @@ pub struct Pool {
     config: PoolConfig,
     connections: Arc<Mutex<VecDeque<PooledConnection>>>,
     checked_out: Arc<Mutex<PoolCheckoutMap>>,
+    connection_create_lock: Arc<Mutex<()>>,
+    creating_connections: Arc<AtomicUsize>,
     semaphore: Arc<Semaphore>,
 }
 
@@ -111,6 +114,8 @@ impl Pool {
             config,
             connections: Arc::new(Mutex::new(VecDeque::new())),
             checked_out: Arc::new(Mutex::new(HashMap::new())),
+            connection_create_lock: Arc::new(Mutex::new(())),
+            creating_connections: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -130,6 +135,8 @@ impl Pool {
             config: config.clone(),
             connections: Arc::new(Mutex::new(VecDeque::new())),
             checked_out: Arc::new(Mutex::new(HashMap::new())),
+            connection_create_lock: Arc::new(Mutex::new(())),
+            creating_connections: Arc::new(AtomicUsize::new(0)),
             semaphore: Arc::new(Semaphore::new(config.max_connections as usize)),
         };
 
@@ -206,11 +213,8 @@ impl Pool {
             return Err(Error::Pool("max_connections must be > 0".into()));
         }
 
-        let target = self
-            .config
-            .min_connections
-            .max(1)
-            .min(self.config.max_connections) as usize;
+        let _create_guard = self.connection_create_lock.lock().await;
+        let target = self.target_idle_count();
         let current = self.total_count().await;
         let to_create = target.saturating_sub(current);
 
@@ -225,6 +229,12 @@ impl Pool {
         }
 
         Ok(to_create)
+    }
+
+    /// Return whether a background warmup could add an idle connection.
+    pub async fn warmup_needed(&self) -> bool {
+        !self.semaphore.is_closed()
+            && self.total_count().await + self.creating_count() < self.target_idle_count()
     }
 
     /// Close all connections in the pool.
@@ -286,6 +296,11 @@ impl Pool {
         idle + active
     }
 
+    /// Get the number of pool connections currently being opened.
+    pub fn creating_count(&self) -> usize {
+        self.creating_connections.load(Ordering::Relaxed)
+    }
+
     /// Get the configured maximum number of connections.
     pub fn max_connections(&self) -> u32 {
         self.config.max_connections
@@ -293,6 +308,7 @@ impl Pool {
 
     /// Create a new connection using the pool's configuration.
     async fn create_connection(&self) -> Result<Client, Error> {
+        let _creating = CreatingConnection::new(&self.creating_connections);
         debug!("Creating new pool connection");
         let config = self.config.connection.clone();
         let client = Client::connect_with(config).await?;
@@ -309,11 +325,69 @@ impl Pool {
             .await
             .map_err(|_| Error::Pool("Pool semaphore closed".into()))?;
 
-        // Try to reuse an idle connection.
+        if let Some(conn) = self.take_reusable_idle_connection().await {
+            trace!("Reusing pooled connection");
+            conn.client.attach_pool_checkout(&self.checked_out);
+            self.checked_out.lock().await.insert(
+                conn.client.pool_key(),
+                PoolCheckoutEntry {
+                    created_at: conn.created_at,
+                    _permit: permit,
+                },
+            );
+
+            return Ok(PooledConnection {
+                client: conn.client,
+                created_at: conn.created_at,
+                last_used: Instant::now(),
+            });
+        }
+
+        // No idle connection was available. Serialize connection creation so a
+        // foreground checkout can pick up a background warmup connection instead
+        // of opening a duplicate socket.
+        let _create_guard = self.connection_create_lock.lock().await;
+        if let Some(conn) = self.take_reusable_idle_connection().await {
+            trace!("Reusing pooled connection created by warmup");
+            conn.client.attach_pool_checkout(&self.checked_out);
+            self.checked_out.lock().await.insert(
+                conn.client.pool_key(),
+                PoolCheckoutEntry {
+                    created_at: conn.created_at,
+                    _permit: permit,
+                },
+            );
+
+            return Ok(PooledConnection {
+                client: conn.client,
+                created_at: conn.created_at,
+                last_used: Instant::now(),
+            });
+        }
+
+        // No idle connection is available after waiting for in-flight creation.
+        let client = self.create_connection().await?;
+        client.attach_pool_checkout(&self.checked_out);
+        self.checked_out.lock().await.insert(
+            client.pool_key(),
+            PoolCheckoutEntry {
+                created_at: Instant::now(),
+                _permit: permit,
+            },
+        );
+
+        Ok(PooledConnection {
+            client,
+            created_at: Instant::now(),
+            last_used: Instant::now(),
+        })
+    }
+
+    async fn take_reusable_idle_connection(&self) -> Option<PooledConnection> {
         loop {
             let maybe_conn = { self.connections.lock().await.pop_back() };
             let Some(conn) = maybe_conn else {
-                break;
+                return None;
             };
 
             if conn.created_at.elapsed() > self.config.max_lifetime {
@@ -341,39 +415,8 @@ impl Pool {
                 continue;
             }
 
-            trace!("Reusing pooled connection");
-            conn.client.attach_pool_checkout(&self.checked_out);
-            self.checked_out.lock().await.insert(
-                conn.client.pool_key(),
-                PoolCheckoutEntry {
-                    created_at: conn.created_at,
-                    _permit: permit,
-                },
-            );
-
-            return Ok(PooledConnection {
-                client: conn.client,
-                created_at: conn.created_at,
-                last_used: Instant::now(),
-            });
+            return Some(conn);
         }
-
-        // No idle connections available - create a new one
-        let client = self.create_connection().await?;
-        client.attach_pool_checkout(&self.checked_out);
-        self.checked_out.lock().await.insert(
-            client.pool_key(),
-            PoolCheckoutEntry {
-                created_at: Instant::now(),
-                _permit: permit,
-            },
-        );
-
-        Ok(PooledConnection {
-            client,
-            created_at: Instant::now(),
-            last_used: Instant::now(),
-        })
     }
 
     /// Return a connection to the pool for reuse.
@@ -427,11 +470,8 @@ impl Pool {
             return Ok(false);
         }
 
-        let target_idle = self
-            .config
-            .min_connections
-            .max(1)
-            .min(self.config.max_connections) as usize;
+        let _create_guard = self.connection_create_lock.lock().await;
+        let target_idle = self.target_idle_count();
         if target_idle == 0 || self.idle_count().await >= target_idle {
             return Ok(false);
         }
@@ -477,6 +517,30 @@ impl Pool {
     fn should_health_check(&self, conn: &PooledConnection) -> bool {
         self.config.health_check_interval.is_zero()
             || conn.last_used.elapsed() >= self.config.health_check_interval
+    }
+
+    fn target_idle_count(&self) -> usize {
+        self.config
+            .min_connections
+            .max(1)
+            .min(self.config.max_connections) as usize
+    }
+}
+
+struct CreatingConnection<'a> {
+    count: &'a AtomicUsize,
+}
+
+impl<'a> CreatingConnection<'a> {
+    fn new(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::Relaxed);
+        CreatingConnection { count }
+    }
+}
+
+impl Drop for CreatingConnection<'_> {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

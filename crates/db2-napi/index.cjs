@@ -124,6 +124,8 @@ function parseConnectionString(connectionString, options = {}) {
     }
     if (options.currentSchema != null) config.currentSchema = options.currentSchema
     if (options.fetchSize != null) config.fetchSize = Number(options.fetchSize)
+    if (options.minConnections != null) config.minConnections = Number(options.minConnections)
+    if (options.maxConnections != null) config.maxConnections = Number(options.maxConnections)
     if (options.ssl != null) config.ssl = parseBool(options.ssl)
     if (options.rejectUnauthorized != null) {
       config.rejectUnauthorized = parseBool(options.rejectUnauthorized)
@@ -504,9 +506,10 @@ function open(connectionString, options, callback) {
   return callbackOrPromise(
     async () => {
       const config = parseConnectionString(connectionString, options)
-      const pool = new JsPool({ ...config, maxConnections: 1 })
-      const validationClient = await pool.acquire()
-      await pool.release(validationClient)
+      const maxConnections = config.maxConnections == null ? 2 : config.maxConnections
+      const minConnections = config.minConnections == null ? Math.min(2, maxConnections) : config.minConnections
+      const pool = new JsPool({ ...config, minConnections, maxConnections })
+      await pool.connect()
       return new Database(null, async (releasedClient) => {
         if (releasedClient) await pool.release(releasedClient)
         await pool.close()

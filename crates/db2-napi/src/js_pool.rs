@@ -148,6 +148,7 @@ impl JsPool {
             Some((
                 self.inner.idle_count().await,
                 self.inner.active_count().await,
+                self.inner.creating_count(),
                 self.inner.max_connections() as usize,
             ))
         } else {
@@ -155,7 +156,9 @@ impl JsPool {
         };
         let acquire_path = acquire_state_before
             .as_ref()
-            .map(|(idle, active, max)| pool_acquire_path(*idle, *active, *max));
+            .map(|(idle, active, creating, max)| {
+                pool_acquire_path(*idle, *active, *creating, *max)
+            });
         let acquire_started = collect_diagnostics.then(Instant::now);
         let client = match self.inner.acquire().await {
             Ok(client) => client,
@@ -177,17 +180,22 @@ impl JsPool {
         if collect_diagnostics {
             napi_diagnostics.extend(client.take_connection_diagnostics().await);
         }
-        if let Some((idle_before, active_before, max_connections)) = acquire_state_before {
+        if let Some((idle_before, active_before, creating_before, max_connections)) =
+            acquire_state_before
+        {
             let idle_after = self.inner.idle_count().await;
             let active_after = self.inner.active_count().await;
+            let creating_after = self.inner.creating_count();
             napi_diagnostics.push(format!(
-                "napi_pool_acquire_state path={} idle_before={} active_before={} total_before={} idle_after={} active_after={} total_after={} max={}",
+                "napi_pool_acquire_state path={} idle_before={} active_before={} creating_before={} total_before={} idle_after={} active_after={} creating_after={} total_after={} max={}",
                 acquire_path.unwrap_or("unknown"),
                 idle_before,
                 active_before,
+                creating_before,
                 idle_before + active_before,
                 idle_after,
                 active_after,
+                creating_after,
                 idle_after + active_after,
                 max_connections
             ));
@@ -208,7 +216,7 @@ impl JsPool {
             "napi_pool_release_ms",
             release_started,
         );
-        let warmup_deferred = defer_background_warmup(&self.inner);
+        let warmup_deferred = defer_background_warmup(&self.inner).await;
         if collect_diagnostics && release_outcome.disconnected {
             let idle_after = self.inner.idle_count().await;
             let active_after = self.inner.active_count().await;
@@ -267,7 +275,7 @@ impl JsPool {
         let mut guard = client.inner.lock().await;
         if let Some(client) = guard.take() {
             let _ = self.inner.release_with_outcome(client).await;
-            let _ = defer_background_warmup(&self.inner);
+            let _ = defer_background_warmup(&self.inner).await;
         }
         Ok(())
     }
@@ -299,9 +307,16 @@ impl JsPool {
     }
 }
 
-fn pool_acquire_path(idle: usize, active: usize, max_connections: usize) -> &'static str {
+fn pool_acquire_path(
+    idle: usize,
+    active: usize,
+    creating: usize,
+    max_connections: usize,
+) -> &'static str {
     if idle > 0 {
         "idle"
+    } else if creating > 0 {
+        "warmup"
     } else if active < max_connections {
         "new"
     } else {
@@ -309,8 +324,11 @@ fn pool_acquire_path(idle: usize, active: usize, max_connections: usize) -> &'st
     }
 }
 
-fn defer_background_warmup(pool: &Arc<db2_client::Pool>) -> bool {
+async fn defer_background_warmup(pool: &Arc<db2_client::Pool>) -> bool {
     if !use_background_pool_warmup() {
+        return false;
+    }
+    if !pool.warmup_needed().await {
         return false;
     }
 
