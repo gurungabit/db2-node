@@ -2,6 +2,14 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.1](https://github.com/gurungabit/db2-node/compare/v1.0.0...v1.0.1) (2026-05-07)
+
+
+### Bug Fixes
+
+* default IBM server certificate strings to hostname validation off ([7aef4a2](https://github.com/gurungabit/db2-node/commit/7aef4a29c046d4b6be4524f099f8cc4f4657be66))
+* support Db2 CLI hostname validation off ([4fac63d](https://github.com/gurungabit/db2-node/commit/4fac63d4233d6c9d683a33f62d6bd58c762cb267))
+
 ## [1.0.0](https://github.com/gurungabit/db2-node/releases/tag/v1.0.0) (2026-05-06)
 
 ### Release
