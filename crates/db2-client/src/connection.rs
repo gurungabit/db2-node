@@ -2532,8 +2532,19 @@ impl ClientInner {
                         );
                         extdta_payloads.extend(more_extdta_payloads);
                         if !rows_need_extdta_payloads(&rows, &cursor.descriptors) {
+                            let close_after_materialize = use_zos_lob_close_after_materialization();
                             if done {
                                 zos_lob_cleanup_verified = true;
+                            } else if close_after_materialize
+                                && !use_zos_lob_passive_tail_before_close()
+                            {
+                                if collect_diagnostics {
+                                    diagnostics.push(format!(
+                                        "cursor_lob_materialized_tail skipped=active_close rows={} extdta={}",
+                                        rows.len(),
+                                        extdta_payloads.len()
+                                    ));
+                                }
                             } else {
                                 let tail_outcome = cursor.passive_tail_drain_from(self).await?;
                                 if tail_outcome.ran() && collect_diagnostics {
@@ -2561,9 +2572,7 @@ impl ClientInner {
                                 }
                                 zos_lob_cleanup_verified = tail_outcome.reuse_allowed();
                             }
-                            if !zos_lob_cleanup_verified
-                                && use_zos_lob_close_after_materialization()
-                            {
+                            if !zos_lob_cleanup_verified && close_after_materialize {
                                 let close_outcome = cursor.close_from(self).await?;
                                 zos_lob_cleanup_verified = close_outcome.verified();
                                 if collect_diagnostics {
@@ -5075,6 +5084,15 @@ fn use_zos_lob_commit_after_materialization() -> bool {
 
 fn use_zos_lob_close_after_materialization() -> bool {
     env::var("DB2_ZOS_LOB_CLOSE_AFTER_MATERIALIZE")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(false)
+}
+
+fn use_zos_lob_passive_tail_before_close() -> bool {
+    env::var("DB2_ZOS_LOB_PASSIVE_TAIL_BEFORE_CLOSE")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
