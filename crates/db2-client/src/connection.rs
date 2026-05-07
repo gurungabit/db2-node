@@ -5050,7 +5050,7 @@ fn use_zos_lob_close_after_materialization() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn use_zos_lob_disconnect_after_materialization() -> bool {
