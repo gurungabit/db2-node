@@ -49,45 +49,35 @@ fn test_ebcdic_lowercase() {
 
 #[test]
 fn test_rdbnam_padding() {
-    // RDBNAM must be exactly 18 bytes, EBCDIC-encoded, right-padded with 0x40 (EBCDIC space)
+    // RDBNAM is sent trimmed for z/OS compatibility.
     let padded = pad_rdbnam("testdb");
-    assert_eq!(padded.len(), 18, "padded RDBNAM must be exactly 18 bytes");
+    assert_eq!(padded.len(), 6, "RDBNAM should not be padded");
 
-    // Verify the first 6 bytes are EBCDIC for "testdb"
     let expected_prefix = utf8_to_ebcdic037("testdb");
     assert_eq!(
-        &padded[..6],
-        &expected_prefix[..],
-        "prefix should be EBCDIC 'testdb'"
+        &padded, &expected_prefix,
+        "RDBNAM should be EBCDIC 'testdb'"
     );
-
-    // Remaining 12 bytes should be EBCDIC space (0x40)
-    for (i, &byte) in padded.iter().enumerate().take(18).skip(6) {
-        assert_eq!(
-            byte, 0x40,
-            "byte {} should be EBCDIC space (0x40), got 0x{:02X}",
-            i, byte
-        );
-    }
 }
 
 #[test]
 fn test_rdbnam_padding_exact_length() {
-    // If the name is exactly 18 characters, no padding is needed
-    let name = "ABCDEFGHIJKLMNOPQR"; // 18 chars
+    // Db2 for z/OS location names are limited to 16 bytes.
+    let name = "ABCDEFGHIJKLMNOP"; // 16 chars
     let padded = pad_rdbnam(name);
-    assert_eq!(padded.len(), 18);
-    // Should all be EBCDIC letters, no 0x40 padding
+    assert_eq!(padded.len(), 16);
     let roundtrip = ebcdic037_to_utf8(&padded);
     assert_eq!(roundtrip, name);
 }
 
 #[test]
 fn test_rdbnam_padding_truncation() {
-    // If the name is longer than 18 characters, it should be truncated
+    // If the name is longer than 16 characters, it should be truncated.
     let name = "THIS_IS_A_VERY_LONG_DATABASE_NAME";
     let padded = pad_rdbnam(name);
-    assert_eq!(padded.len(), 18, "padded RDBNAM must always be 18 bytes");
+    assert_eq!(padded.len(), 16, "RDBNAM should be capped at 16 bytes");
+    let roundtrip = ebcdic037_to_utf8(&padded);
+    assert_eq!(roundtrip, "THIS_IS_A_VERY_L");
 }
 
 #[test]
