@@ -2645,11 +2645,23 @@ impl ClientInner {
             )));
         }
 
-        Ok(QueryResult::with_rows_and_diagnostics(
-            rows,
-            columns,
-            diagnostics,
-        ))
+        let mut result = QueryResult::with_rows_and_diagnostics(rows, columns, diagnostics);
+        if self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().map_or(false, is_db2_zos_server)
+            && use_zos_lob_disconnect_after_materialization()
+            && result_has_zos_lob_materialization(&result)
+        {
+            if collect_diagnostics {
+                result.diagnostics.push(format!(
+                    "zos_lob_disconnect_after_materialization=true rows={} columns={}",
+                    result.row_count,
+                    result.columns.len()
+                ));
+            }
+            self.reset_session_state(false).await;
+        }
+
+        Ok(result)
     }
 
     fn query_frame_drain_timeout(
@@ -4971,6 +4983,15 @@ fn use_zos_select_metadata_cache() -> bool {
 
 fn use_zos_select_cached_empty_retry() -> bool {
     env::var("DB2_ZOS_SELECT_CACHED_EMPTY_RETRY")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
+}
+
+fn use_zos_lob_disconnect_after_materialization() -> bool {
+    env::var("DB2_ZOS_LOB_DISCONNECT_AFTER_MATERIALIZE")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
