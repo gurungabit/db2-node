@@ -1,6 +1,6 @@
-# @gurungabit/db2-node
+# db2-node
 
-`@gurungabit/db2-node` is a pure Rust DB2 driver for Node.js. It speaks the DRDA wire protocol directly, so there is no IBM CLI, ODBC, or `libdb2` runtime dependency.
+`db2-node` is a pure Rust DB2 driver for Node.js. It speaks the DRDA wire protocol directly, so there is no IBM CLI, ODBC, or `libdb2` runtime dependency.
 
 This repository contains the driver, the protocol implementation, the Node.js bindings, the docs site, and the integration test harness used to ship the npm package.
 
@@ -8,7 +8,7 @@ This repository contains the driver, the protocol implementation, the Node.js bi
 
 - `crates/db2-proto` — low-level DRDA protocol encoding/decoding
 - `crates/db2-client` — async Rust client, pooling, transactions, TLS, prepared statements
-- `crates/db2-napi` — `napi-rs` bindings published as the `@gurungabit/db2-node` npm package
+- `crates/db2-napi` — `napi-rs` bindings published as the `db2-node` npm package
 - `tests/integration` — Rust integration tests against a real DB2 instance
 - `tests/node` — Node.js integration tests against the public JS API
 - `docs` — MkDocs Material docs site
@@ -18,25 +18,25 @@ This repository contains the driver, the protocol implementation, the Node.js bi
 ## Package Quick Start
 
 ```bash
-npm install @gurungabit/db2-node
+npm install db2-node
 ```
 
 Install from a GitHub release tarball:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.0/gurungabit-db2-node-1.0.0.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.2/db2-node-1.0.2.tgz
 ```
 
-Replace `v1.0.0` and `1.0.0` with the release version you want.
+Replace `v1.0.2` and `1.0.2` with the release version you want.
 
 Current production release tarball:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.1/gurungabit-db2-node-1.0.1.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.2/db2-node-1.0.2.tgz
 ```
 
 ```ts
-import { Client } from "@gurungabit/db2-node";
+import { Client } from "db2-node";
 
 const client = new Client({
   host: "localhost",
@@ -79,7 +79,7 @@ The z/OS LOB cleanup behavior has two supported production modes:
 
 Keep `DB2_ZOS_LOB_TRUST_PASSIVE_TAIL_QUIET` off in production. It is fail-closed, but it is not a useful performance path for large z/OS CLOB workloads.
 
-The `1.0.1` production soak passed 100/100 default-mode cycles and 50/50 active-close cycles with no wrong row counts, zero-row corruption, stale `EXTDTA`, or unhandled driver errors. A BI_RENEW validation query also passed all 10 partitions, fetching 301 records through IBM-compatible TLS hostname validation and z/OS QRYDSC late text descriptors.
+The `1.0.2` npm package carries the validated driver line under the unscoped `db2-node` package name. The production soak passed 100/100 default-mode cycles and 50/50 active-close cycles with no wrong row counts, zero-row corruption, stale `EXTDTA`, or unhandled driver errors. A BI_RENEW validation query also passed all 10 partitions, fetching 301 records through IBM-compatible TLS hostname validation and z/OS QRYDSC late text descriptors.
 
 ## Local Development
 
@@ -190,7 +190,7 @@ The deployed docs site lives at `https://gurungabit.github.io/db2-node/`.
 
 ## Release Flow
 
-- The npm package is `@gurungabit/db2-node`
+- The npm package is `db2-node`
 - `.github/workflows/release-please.yml` opens and updates a release PR from `main`
 - Merging that release PR creates the next `v*` tag
 - Tag pushes matching `v*` trigger `.github/workflows/release.yml`
@@ -203,7 +203,7 @@ The deployed docs site lives at `https://gurungabit.github.io/db2-node/`.
 
 ## Status
 
-The `1.0.1` release is production-ready for the validated DB2 LUW and Db2 for z/OS paths:
+The `1.0.2` release is production-ready for the validated DB2 LUW and Db2 for z/OS paths:
 
 - Rust and Node integration suites are green
 - TLS behavior is covered in both Rust and Node tests

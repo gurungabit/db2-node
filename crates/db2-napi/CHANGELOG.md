@@ -2,6 +2,13 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.2](https://github.com/gurungabit/db2-node/releases/tag/v1.0.2) (2026-05-07)
+
+### Packaging
+
+- publish the production package under the unscoped `db2-node` npm name
+- update install docs, release automation metadata, and compatibility-layer messages for the unscoped package name
+
 ## [1.0.1](https://github.com/gurungabit/db2-node/releases/tag/v1.0.1) (2026-05-07)
 
 ### Bug Fixes

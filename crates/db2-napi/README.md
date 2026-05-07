@@ -1,29 +1,29 @@
-# @gurungabit/db2-node
+# db2-node
 
 Pure Rust DB2 driver for Node.js using the DRDA wire protocol directly. No IBM CLI, ODBC, or `libdb2` dependency is required at runtime.
 
 ## Status
 
-`1.0.1` is the production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, IBM-compatible TLS certificate handling, validated z/OS QRYDSC descriptor decoding, and validated z/OS LOB materialization cleanup.
+`1.0.2` is the production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, IBM-compatible TLS certificate handling, validated z/OS QRYDSC descriptor decoding, and validated z/OS LOB materialization cleanup. It publishes the validated driver under the unscoped `db2-node` package name.
 
 ## Install
 
 ```bash
-npm install @gurungabit/db2-node
+npm install db2-node
 ```
 
 You can also install the npm-packed artifact from a GitHub release:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.0/gurungabit-db2-node-1.0.0.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.2/db2-node-1.0.2.tgz
 ```
 
-Replace `v1.0.0` and `1.0.0` with the release version you want.
+Replace `v1.0.2` and `1.0.2` with the release version you want.
 
 Current production release tarball:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.1/gurungabit-db2-node-1.0.1.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.2/db2-node-1.0.2.tgz
 ```
 
 Prebuilt native binaries ship for supported platforms — no Rust toolchain needed:
@@ -35,7 +35,7 @@ Prebuilt native binaries ship for supported platforms — no Rust toolchain need
 ## Quick Start
 
 ```ts
-import { Client } from '@gurungabit/db2-node'
+import { Client } from 'db2-node'
 
 const client = new Client({
   host: 'localhost',
@@ -59,7 +59,7 @@ await client.close()
 CommonJS also works:
 
 ```js
-const { Client } = require('@gurungabit/db2-node')
+const { Client } = require('db2-node')
 ```
 
 ## Connection Options
@@ -90,7 +90,7 @@ const { Client } = require('@gurungabit/db2-node')
 ## Pool
 
 ```ts
-import { Pool } from '@gurungabit/db2-node'
+import { Pool } from 'db2-node'
 
 const pool = new Pool({
   host: 'localhost',
@@ -306,7 +306,7 @@ The passive quiet path is fail-closed, but it is not a useful optimization for l
 
 ### Production validation
 
-The production soak for the `1.0.1` release passed:
+The production soak for the validated driver line now published as `db2-node@1.0.2` passed:
 
 | Mode | Cycles | Result |
 |------|--------|--------|
@@ -315,7 +315,7 @@ The production soak for the `1.0.1` release passed:
 
 Across both soaks there were no wrong row counts, zero-row corruption, stale `EXTDTA`, or unhandled driver errors.
 
-The `1.0.1` z/OS descriptor validation also passed all 10 BI_RENEW partitions, fetching 301 total records. That path exercises IBM-style `SSLServerCertificate` plus `SSLClientHostnameValidation=OFF`, and QRYDSC late fixed/varying EBCDIC text descriptors such as `PEND_KEY`, `PEND_INFO`, and `PEND_DATE`.
+The z/OS descriptor validation also passed all 10 BI_RENEW partitions, fetching 301 total records. That path exercises IBM-style `SSLServerCertificate` plus `SSLClientHostnameValidation=OFF`, and QRYDSC late fixed/varying EBCDIC text descriptors such as `PEND_KEY`, `PEND_INFO`, and `PEND_DATE`.
 
 ## Server Info
 

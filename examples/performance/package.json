@@ -1,7 +1,7 @@
 {
   "name": "db2-performance-suite",
   "version": "1.0.0",
-  "description": "Comprehensive performance and edge-case tests for @gurungabit/db2-node",
+  "description": "Comprehensive performance and edge-case tests for db2-node",
   "type": "module",
   "scripts": {
     "all": "npx tsx src/run-all.ts",
@@ -16,7 +16,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@gurungabit/db2-node": "^0.1.1"
+    "db2-node": "^1.0.2"
   },
   "devDependencies": {
     "@types/node": "^25.5.2",

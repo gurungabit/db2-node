@@ -14,7 +14,7 @@
  *   npm run pool
  */
 
-import { Pool, Client } from "@gurungabit/db2-node";
+import { Pool, Client } from "db2-node";
 import {
   createPool,
   poolConfig,

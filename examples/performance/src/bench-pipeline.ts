@@ -12,7 +12,7 @@
  *   npm run pipeline
  */
 
-import { Client, Pool } from "@gurungabit/db2-node";
+import { Client, Pool } from "db2-node";
 import {
   createClient,
   createPool,

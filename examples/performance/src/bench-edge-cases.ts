@@ -17,7 +17,7 @@
  *   npm run edge
  */
 
-import { Client } from "@gurungabit/db2-node";
+import { Client } from "db2-node";
 import {
   createClient,
   uniqueTable,
