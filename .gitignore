@@ -3,6 +3,7 @@ node_modules/
 *.node
 *.pcap
 *.bin
+*.tgz
 .env
 .tmp-docs-public/
 

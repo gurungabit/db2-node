@@ -267,13 +267,18 @@ jobs:
 
       - name: Pack GitHub install tarball
         working-directory: crates/db2-napi
-        run: npm pack --json
+        run: |
+          set -euo pipefail
+          rm -rf package-dist
+          mkdir package-dist
+          TARBALL="$(npm pack --json | node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync(0, 'utf8')); process.stdout.write(data[0].filename);")"
+          mv "${TARBALL}" package-dist/
 
       - name: Upload npm tarball artifact
         uses: actions/upload-artifact@v7.0.0
         with:
           name: npm-package-tarball
-          path: crates/db2-napi/*.tgz
+          path: crates/db2-napi/package-dist/*.tgz
           if-no-files-found: error
 
   github-release:

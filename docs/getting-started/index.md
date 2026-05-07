@@ -220,7 +220,7 @@ The driver sends `CLSQRY`, drains remaining `EXTDTA`, waits for DB2's close ackn
 
 Keep `DB2_ZOS_LOB_TRUST_PASSIVE_TAIL_QUIET` off in production. It is fail-closed, but it is not a useful performance path for large z/OS CLOB workloads.
 
-Production candidate soak coverage for this release series:
+Production soak coverage for the `1.0.0` release:
 
 | Mode | Cycles | Result |
 |------|--------|--------|

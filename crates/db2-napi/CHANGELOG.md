@@ -2,6 +2,15 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.0](https://github.com/gurungabit/db2-node/releases/tag/v1.0.0) (2026-05-06)
+
+### Release
+
+- promote the validated DB2 LUW and Db2 for z/OS driver line to the first production release
+- publish stable npm installs on the `latest` dist-tag
+- document default and active-close z/OS LOB production modes
+- remove stale checked-in npm tarballs from future GitHub release artifacts
+
 ## [0.1.7-zos.198](https://github.com/gurungabit/db2-node/releases/tag/v0.1.7-zos.198) (2026-05-06)
 
 ### Documentation

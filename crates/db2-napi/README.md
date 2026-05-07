@@ -4,7 +4,7 @@ Pure Rust DB2 driver for Node.js using the DRDA wire protocol directly. No IBM C
 
 ## Status
 
-`0.1.x` is an early release series focused on DB2 LUW connectivity, DB2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, and TLS.
+`1.0.0` is the production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, TLS, and validated z/OS LOB materialization cleanup.
 
 ## Install
 
@@ -15,10 +15,10 @@ npm install @gurungabit/db2-node
 You can also install the npm-packed artifact from a GitHub release:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v0.1.7-zos.198/gurungabit-db2-node-0.1.7-zos.198.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.0/gurungabit-db2-node-1.0.0.tgz
 ```
 
-Replace `0.1.7-zos.198` with the release version you want.
+Replace `v1.0.0` and `1.0.0` with the release version you want.
 
 Prebuilt native binaries ship for supported platforms — no Rust toolchain needed:
 
@@ -284,7 +284,7 @@ The passive quiet path is fail-closed, but it is not a useful optimization for l
 
 ### Production validation
 
-The production candidate soak for this release series passed:
+The production soak for the `1.0.0` release passed:
 
 | Mode | Cycles | Result |
 |------|--------|--------|

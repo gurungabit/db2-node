@@ -24,10 +24,10 @@ npm install @gurungabit/db2-node
 Install from a GitHub release tarball:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v0.1.7-zos.198/gurungabit-db2-node-0.1.7-zos.198.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.0/gurungabit-db2-node-1.0.0.tgz
 ```
 
-Replace `0.1.7-zos.198` with the release version you want.
+Replace `v1.0.0` and `1.0.0` with the release version you want.
 
 ```ts
 import { Client } from "@gurungabit/db2-node";
@@ -63,7 +63,7 @@ The z/OS LOB cleanup behavior has two supported production modes:
 
 Keep `DB2_ZOS_LOB_TRUST_PASSIVE_TAIL_QUIET` off in production. It is fail-closed, but it is not a useful performance path for large z/OS CLOB workloads.
 
-The production candidate soak passed 100/100 default-mode cycles and 50/50 active-close cycles with no wrong row counts, zero-row corruption, stale `EXTDTA`, or unhandled driver errors.
+The production soak passed 100/100 default-mode cycles and 50/50 active-close cycles with no wrong row counts, zero-row corruption, stale `EXTDTA`, or unhandled driver errors.
 
 ## Local Development
 
@@ -187,12 +187,12 @@ The deployed docs site lives at `https://gurungabit.github.io/db2-node/`.
 
 ## Status
 
-The local workspace is in strong release shape:
+The `1.0.0` release is production-ready for the validated DB2 LUW and Db2 for z/OS paths:
 
 - Rust and Node integration suites are green
 - TLS behavior is covered in both Rust and Node tests
 - Prepared statements, pooling, reconnect behavior, and timeout handling have all been hardened
-- The remaining release-risk item is validating the tag-driven publish pipeline with a real release candidate tag
+- Db2 for z/OS LOB materialization has passed default-mode and active-close soak testing with no stale `EXTDTA` corruption
 
 ## License
 
