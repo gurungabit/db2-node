@@ -252,7 +252,15 @@ fn parse_sda_triplet(data: &[u8], col_index: usize) -> Option<ColumnDescriptor> 
 ///     - If not null: data bytes (fixed or variable length depending on type)
 ///   - Variable-length types have a 2-byte BE length prefix before the data.
 pub fn decode_row(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2Value>, usize)> {
-    if data.len() >= 2 && data[0] == 0xFF {
+    decode_row_with_prefix(data, columns, true)
+}
+
+fn decode_row_with_prefix(
+    data: &[u8],
+    columns: &[ColumnDescriptor],
+    allow_prefix: bool,
+) -> Result<(Vec<Db2Value>, usize)> {
+    if allow_prefix && data.len() >= 2 && data[0] == 0xFF {
         let (values, consumed) = decode_row_body(&data[2..], columns)?;
         return Ok((values, consumed + 2));
     }
@@ -265,7 +273,7 @@ fn decode_row_body(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2
     let mut offset = 0;
 
     for col in columns {
-        if columns.len() == 1 && col.nullable && matches!(col.db2_type, Db2Type::Boolean) {
+        if col.nullable && matches!(col.db2_type, Db2Type::Boolean) {
             if offset >= data.len() {
                 return Err(ProtoError::BufferTooShort {
                     expected: offset + 1,
@@ -342,7 +350,7 @@ fn decode_rows_from_buffer(
     let mut offset = 0;
 
     while offset < buffer.len() {
-        match decode_row(&buffer[offset..], columns) {
+        match decode_row_with_prefix(&buffer[offset..], columns, offset == 0) {
             Ok((row, consumed)) => {
                 if consumed == 0 {
                     break;
@@ -486,7 +494,7 @@ fn find_partial_row_start(
         return None;
     }
     if matches!(
-        decode_row_strict(&buffer[offset..], columns),
+        decode_row_strict(&buffer[offset..], columns, offset == 0),
         Err(ProtoError::BufferTooShort { .. })
     ) {
         return Some(offset);
@@ -498,7 +506,7 @@ fn find_partial_row_start(
             && pos + 1 < buffer.len()
             && buffer[pos + 1] == 0x00
             && matches!(
-                decode_row_strict(&buffer[pos..], columns),
+                decode_row_strict(&buffer[pos..], columns, pos == 0),
                 Err(ProtoError::BufferTooShort { .. })
             )
         {
@@ -509,8 +517,12 @@ fn find_partial_row_start(
     None
 }
 
-fn decode_row_strict(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2Value>, usize)> {
-    if data.len() >= 2 && data[0] == 0xFF {
+fn decode_row_strict(
+    data: &[u8],
+    columns: &[ColumnDescriptor],
+    allow_prefix: bool,
+) -> Result<(Vec<Db2Value>, usize)> {
+    if allow_prefix && data.len() >= 2 && data[0] == 0xFF {
         let (values, consumed) = decode_row_body(&data[2..], columns)?;
         return Ok((values, consumed + 2));
     }
@@ -1097,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_nullable_boolean_uses_indicator_in_multi_column_rows() {
+    fn test_decode_nullable_boolean_uses_compact_marker_in_multi_column_rows() {
         let cols = vec![
             ColumnDescriptor {
                 column_index: 0,
@@ -1125,13 +1137,57 @@ mod tests {
 
         let mut row_data = Vec::new();
         row_data.extend_from_slice(&1i32.to_le_bytes());
-        row_data.push(0x00);
         row_data.push(0x01);
 
         let (values, consumed) = decode_row(&row_data, &cols).unwrap();
         assert_eq!(consumed, row_data.len());
         assert_eq!(values[0], Db2Value::Integer(1));
         assert_eq!(values[1], Db2Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_decode_rows_applies_consistency_prefix_only_once() {
+        let cols = vec![
+            ColumnDescriptor {
+                column_index: 0,
+                drda_type: 0x02,
+                length: 4,
+                precision: 0,
+                scale: 0,
+                nullable: false,
+                ccsid: 0,
+                db2_type: Db2Type::Integer,
+                byte_order: ByteOrder::LittleEndian,
+            },
+            ColumnDescriptor {
+                column_index: 1,
+                drda_type: 0xBF,
+                length: 2,
+                precision: 0,
+                scale: 0,
+                nullable: true,
+                ccsid: 0,
+                db2_type: Db2Type::Boolean,
+                byte_order: ByteOrder::BigEndian,
+            },
+        ];
+
+        let mut rows_data = vec![0xFF, 0x00];
+        rows_data.extend_from_slice(&1i32.to_le_bytes());
+        rows_data.push(0x01);
+        rows_data.extend_from_slice(&2i32.to_le_bytes());
+        rows_data.push(0x00);
+        rows_data.extend_from_slice(&3i32.to_le_bytes());
+        rows_data.push(0xFF);
+
+        let rows = decode_rows(&rows_data, &cols).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0][0], Db2Value::Integer(1));
+        assert_eq!(rows[0][1], Db2Value::Boolean(true));
+        assert_eq!(rows[1][0], Db2Value::Integer(2));
+        assert_eq!(rows[1][1], Db2Value::Boolean(false));
+        assert_eq!(rows[2][0], Db2Value::Integer(3));
+        assert_eq!(rows[2][1], Db2Value::Null);
     }
 
     #[test]
