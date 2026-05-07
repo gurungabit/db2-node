@@ -82,6 +82,10 @@ impl Transport {
         config: &Config,
         mut diagnostics: Option<&mut Vec<String>>,
     ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Error> {
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            diagnostics.push(tls_mode_diagnostic(config.ssl_config.as_ref()));
+        }
+
         let tls_config_started = diagnostics.as_ref().map(|_| Instant::now());
         let tls_config = Self::build_tls_config(config.ssl_config.as_ref())?;
         push_transport_elapsed(
@@ -96,10 +100,13 @@ impl Transport {
             .to_owned();
 
         let tls_handshake_started = diagnostics.as_ref().map(|_| Instant::now());
-        let tls_stream = connector
-            .connect(server_name, stream)
-            .await
-            .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
+        let tls_stream = connector.connect(server_name, stream).await.map_err(|e| {
+            Error::Tls(format!(
+                "TLS handshake failed: {}; {}",
+                e,
+                tls_mode_diagnostic(config.ssl_config.as_ref())
+            ))
+        })?;
         push_transport_elapsed(
             &mut diagnostics,
             "db2_connect_tls_handshake_ms",
@@ -163,6 +170,24 @@ fn push_transport_elapsed(
             started.elapsed().as_secs_f64() * 1000.0
         ));
     }
+}
+
+fn tls_mode_diagnostic(ssl_config: Option<&SslConfig>) -> String {
+    let reject_unauthorized = ssl_config
+        .map(|ssl| ssl.reject_unauthorized)
+        .unwrap_or(true);
+    let validate_hostname = ssl_config
+        .map(|ssl| ssl.validate_server_name)
+        .unwrap_or(true);
+    let ca_cert = ssl_config
+        .and_then(|ssl| ssl.ca_cert.as_ref())
+        .map(|path| !path.is_empty())
+        .unwrap_or(false);
+
+    format!(
+        "db2_connect_tls_mode reject_unauthorized={} validate_hostname={} ca_cert={}",
+        reject_unauthorized, validate_hostname, ca_cert
+    )
 }
 
 fn build_verified_tls_config(

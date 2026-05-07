@@ -61,6 +61,22 @@ function parseBool(value) {
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
 }
 
+function diagnosticsEnabled() {
+  return parseBool(process.env.DB2_QUERY_DIAGNOSTICS) || parseBool(process.env.DB2_QUERY_DIAGNOSTICS_STDERR)
+}
+
+function emitCompatConnectionDiagnostics(config, source) {
+  if (!diagnosticsEnabled()) return
+  const host = config.host ? String(config.host) : ''
+  const port = config.port == null ? '' : String(config.port)
+  const database = config.database ? String(config.database) : ''
+  const sslClientHostnameValidation =
+    config.sslClientHostnameValidation == null ? 'Basic' : String(config.sslClientHostnameValidation)
+  console.error(
+    `[db2-diagnostics] compat_connection_config source=${source} host=${host} port=${port} database=${database} ssl=${Boolean(config.ssl)} reject_unauthorized=${config.rejectUnauthorized == null ? 'default' : Boolean(config.rejectUnauthorized)} ca_cert=${Boolean(config.caCert)} ssl_client_hostname_validation=${sslClientHostnameValidation}`
+  )
+}
+
 function parseConnectionString(connectionString, options = {}) {
   if (connectionString && typeof connectionString === 'object') {
     return { ...connectionString }
@@ -513,6 +529,7 @@ function open(connectionString, options, callback) {
   return callbackOrPromise(
     async () => {
       const config = parseConnectionString(connectionString, options)
+      emitCompatConnectionDiagnostics(config, 'open')
       const maxConnections = config.maxConnections == null ? 2 : config.maxConnections
       const minConnections = config.minConnections == null ? Math.min(2, maxConnections) : config.minConnections
       const pool = new JsPool({ ...config, minConnections, maxConnections })
@@ -600,6 +617,7 @@ class CompatPool {
   init(size, connectionString) {
     this._maxPoolSize = Number(size) || this._maxPoolSize
     const config = parseConnectionString(connectionString)
+    emitCompatConnectionDiagnostics(config, 'pool_init')
     config.minConnections = this._maxPoolSize
     config.maxConnections = this._maxPoolSize
     this._native = new JsPool(config)
@@ -619,6 +637,7 @@ class CompatPool {
       async () => {
         if (!this._native) {
           const config = parseConnectionString(connectionString)
+          emitCompatConnectionDiagnostics(config, 'pool_open')
           config.maxConnections = this._maxPoolSize
           this._native = new JsPool(config)
         }
