@@ -1,6 +1,6 @@
 # db2-node
 
-`@gurungabit/db2-node` is a zero-dependency DB2 driver for Node.js, built in pure Rust. It speaks the IBM DRDA wire protocol directly, so there is no IBM CLI, ODBC, `libdb2`, or OpenSSL runtime dependency to install.
+`db2-node` is a zero-dependency DB2 driver for Node.js, built in pure Rust. It speaks the IBM DRDA wire protocol directly, so there is no IBM CLI, ODBC, `libdb2`, or OpenSSL runtime dependency to install.
 
 ## Start Here
 
@@ -20,7 +20,7 @@
 ## Quick Example
 
 ```typescript
-import { Client } from '@gurungabit/db2-node';
+import { Client } from 'db2-node';
 
 const client = new Client({
   host: 'localhost',

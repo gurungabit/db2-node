@@ -1,6 +1,6 @@
 # db2-node Performance & Edge Case Suite
 
-Comprehensive benchmarks for `@gurungabit/db2-node` covering CRUD, batch operations, data pipelines, BLOB handling, edge cases, and connection pool stress tests.
+Comprehensive benchmarks for `db2-node` covering CRUD, batch operations, data pipelines, BLOB handling, edge cases, and connection pool stress tests.
 
 ## Quick Start
 

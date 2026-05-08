@@ -1,6 +1,6 @@
-# @gurungabit/db2-node
+# db2-node
 
-`@gurungabit/db2-node` is a pure Rust DB2 driver for Node.js. It speaks the DRDA wire protocol directly, so there is no IBM CLI, ODBC, or `libdb2` runtime dependency.
+`db2-node` is a pure Rust DB2 driver for Node.js. It speaks the DRDA wire protocol directly, so there is no IBM CLI, ODBC, or `libdb2` runtime dependency.
 
 This repository contains the driver, the protocol implementation, the Node.js bindings, the docs site, and the integration test harness used to ship the npm package.
 
@@ -8,7 +8,7 @@ This repository contains the driver, the protocol implementation, the Node.js bi
 
 - `crates/db2-proto` — low-level DRDA protocol encoding/decoding
 - `crates/db2-client` — async Rust client, pooling, transactions, TLS, prepared statements
-- `crates/db2-napi` — `napi-rs` bindings published as the `@gurungabit/db2-node` npm package
+- `crates/db2-napi` — `napi-rs` bindings published as the `db2-node` npm package
 - `tests/integration` — Rust integration tests against a real DB2 instance
 - `tests/node` — Node.js integration tests against the public JS API
 - `docs` — VitePress docs site
@@ -18,19 +18,19 @@ This repository contains the driver, the protocol implementation, the Node.js bi
 ## Package Quick Start
 
 ```bash
-npm install @gurungabit/db2-node
+npm install db2-node
 ```
 
 Install from a GitHub release tarball:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.0/gurungabit-db2-node-1.0.0.tgz
+npm install https://github.com/db2-node/db2-node/releases/download/v1.0.0/db2-node-1.0.0.tgz
 ```
 
 Replace `v1.0.0` and `1.0.0` with the release version you want.
 
 ```ts
-import { Client } from "@gurungabit/db2-node";
+import { Client } from "db2-node";
 
 const client = new Client({
   host: "localhost",
@@ -186,11 +186,11 @@ Then open:
 
 - `http://localhost:5173/db2-node/`
 
-The deployed docs site lives at `https://gurungabit.github.io/db2-node/`.
+The deployed docs site lives at `https://db2-node.github.io/`.
 
 ## Release Flow
 
-- The npm package is `@gurungabit/db2-node`
+- The npm package is `db2-node`
 - `.github/workflows/release-please.yml` opens and updates a release PR from `main`
 - Merging that release PR creates the next `v*` tag
 - Tag pushes matching `v*` trigger `.github/workflows/release.yml`

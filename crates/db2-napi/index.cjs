@@ -44,7 +44,7 @@ function callbackOrPromiseMany(work, callback, mapValues) {
 
 function unsupportedSync(name) {
   throw new Error(
-    `${name} is not supported by @gurungabit/db2-node's ibm_db compatibility layer; use the async/callback API`
+    `${name} is not supported by db2-node's ibm_db compatibility layer; use the async/callback API`
   )
 }
 
@@ -182,7 +182,7 @@ function parseConnectionString(connectionString, options = {}) {
 
   if (!config.host) {
     throw new Error(
-      'HOSTNAME/HOST is required by @gurungabit/db2-node; DSN-only local ODBC strings are not supported'
+      'HOSTNAME/HOST is required by db2-node; DSN-only local ODBC strings are not supported'
     )
   }
   if (!config.database) throw new Error('DATABASE or DSN is required')

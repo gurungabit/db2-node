@@ -8,7 +8,7 @@
  *   npm run blob
  */
 
-import { Client } from "@gurungabit/db2-node";
+import { Client } from "db2-node";
 import {
   createClient,
   uniqueTable,

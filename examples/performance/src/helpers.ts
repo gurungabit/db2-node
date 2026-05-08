@@ -2,7 +2,7 @@
  * Shared helpers for the performance benchmark suite.
  */
 
-import { Client, Pool, type ConnectionConfig, type PoolConfig } from "@gurungabit/db2-node";
+import { Client, Pool, type ConnectionConfig, type PoolConfig } from "db2-node";
 
 // ---------------------------------------------------------------------------
 // Connection config

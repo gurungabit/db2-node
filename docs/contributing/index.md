@@ -13,7 +13,7 @@ This guide covers the development setup, testing infrastructure, and contributio
 
 ```bash
 # Clone the repo
-git clone https://github.com/gurungabit/db2-node.git
+git clone https://github.com/db2-node/db2-node.git
 cd db2-node
 
 # Build everything

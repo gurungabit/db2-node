@@ -9,7 +9,7 @@
  *   BATCH_TOTAL=500000 npm run batch
  */
 
-import { Client } from "@gurungabit/db2-node";
+import { Client } from "db2-node";
 import {
   createClient,
   uniqueTable,
