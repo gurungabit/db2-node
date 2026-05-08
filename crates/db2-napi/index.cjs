@@ -61,6 +61,31 @@ function parseBool(value) {
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
 }
 
+function normalizeParam(value) {
+  if (value === undefined) return null
+  if (value === null) return null
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) {
+    return Array.from(value)
+  }
+  if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(value)) {
+    return Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
+  }
+  if (typeof ArrayBuffer !== 'undefined' && value instanceof ArrayBuffer) {
+    return Array.from(new Uint8Array(value))
+  }
+  return value
+}
+
+function normalizeParams(params) {
+  if (!Array.isArray(params)) return undefined
+  return params.map(normalizeParam)
+}
+
+function normalizeParamRows(paramRows) {
+  if (!Array.isArray(paramRows)) return paramRows
+  return paramRows.map((params) => normalizeParams(params) || [])
+}
+
 function diagnosticsEnabled() {
   return parseBool(process.env.DB2_QUERY_DIAGNOSTICS) || parseBool(process.env.DB2_QUERY_DIAGNOSTICS_STDERR)
 }
@@ -187,7 +212,7 @@ function normalizeQueryArgs(sqlQuery, bindingParameters, callback) {
     throw new TypeError('sqlQuery must be a SQL string or an object with a sql field')
   }
 
-  return { sql, params: Array.isArray(params) ? params : undefined, callback: cb, noResults }
+  return { sql, params: normalizeParams(params), callback: cb, noResults }
 }
 
 function sqlcaFromResult(result) {
@@ -303,7 +328,7 @@ class ODBCStatement {
     }
     const params = Array.isArray(bindingParameters) ? bindingParameters : this._boundParams
     return callbackOrPromiseMany(
-      async () => new ODBCResult(await this._stmt.execute(params || null)),
+      async () => new ODBCResult(await this._stmt.execute(normalizeParams(params) || null)),
       callback,
       (result) => [result, undefined]
     )
@@ -321,7 +346,7 @@ class ODBCStatement {
     const params = Array.isArray(bindingParameters) ? bindingParameters : this._boundParams
     return callbackOrPromise(
       async () => {
-        const result = await this._stmt.execute(params || null)
+        const result = await this._stmt.execute(normalizeParams(params) || null)
         return result.rowCount || 0
       },
       callback
@@ -579,7 +604,7 @@ class CompatPool {
       callback = params
       params = undefined
     }
-    return callbackOrPromise(() => this._requireNative().query(sql, params || null), callback)
+    return callbackOrPromise(() => this._requireNative().query(sql, normalizeParams(params) || null), callback)
   }
 
   acquire(callback) {
@@ -679,6 +704,136 @@ class CompatPool {
   }
 }
 
+class PreparedStatement {
+  constructor(stmt) {
+    this._native = stmt
+  }
+
+  static fromNative(stmt) {
+    return new PreparedStatement(stmt)
+  }
+
+  execute(params) {
+    return this._native.execute(normalizeParams(params) || null)
+  }
+
+  executeBatch(paramRows) {
+    return this._native.executeBatch(normalizeParamRows(paramRows))
+  }
+
+  close() {
+    return this._native.close()
+  }
+}
+
+class Transaction {
+  constructor(transaction) {
+    this._native = transaction
+  }
+
+  static fromNative(transaction) {
+    return new Transaction(transaction)
+  }
+
+  query(sql, params) {
+    return this._native.query(sql, normalizeParams(params) || null)
+  }
+
+  async prepare(sql) {
+    return PreparedStatement.fromNative(await this._native.prepare(sql))
+  }
+
+  commit() {
+    return this._native.commit()
+  }
+
+  rollback() {
+    return this._native.rollback()
+  }
+}
+
+class Client {
+  constructor(config) {
+    this._native = new JsClient(config)
+  }
+
+  static fromNative(client) {
+    const wrapper = Object.create(Client.prototype)
+    wrapper._native = client
+    return wrapper
+  }
+
+  connect() {
+    return this._native.connect()
+  }
+
+  query(sql, params) {
+    return this._native.query(sql, normalizeParams(params) || null)
+  }
+
+  async prepare(sql) {
+    return PreparedStatement.fromNative(await this._native.prepare(sql))
+  }
+
+  async beginTransaction() {
+    return Transaction.fromNative(await this._native.beginTransaction())
+  }
+
+  close() {
+    return this._native.close()
+  }
+
+  serverInfo() {
+    return this._native.serverInfo()
+  }
+}
+
+class Pool {
+  constructor(config) {
+    this._native = new JsPool(config)
+  }
+
+  connect() {
+    return this._native.connect()
+  }
+
+  warmup() {
+    return this._native.warmup()
+  }
+
+  query(sql, params) {
+    return this._native.query(sql, normalizeParams(params) || null)
+  }
+
+  async acquire() {
+    return Client.fromNative(await this._native.acquire())
+  }
+
+  release(client) {
+    return this._native.release(client && client._native ? client._native : client)
+  }
+
+  close() {
+    return this._native.close()
+  }
+
+  idleCount() {
+    return this._native.idleCount()
+  }
+
+  activeCount() {
+    return this._native.activeCount()
+  }
+
+  totalCount() {
+    return this._native.totalCount()
+  }
+
+  maxConnections() {
+    return this._native.maxConnections()
+  }
+}
+
 function debug(value) {
   debugEnabled = Boolean(value)
   return debugEnabled
@@ -706,15 +861,15 @@ const api = {
   NativePool: JsPool,
   NativePreparedStatement: JsPreparedStatement,
   NativeTransaction: JsTransaction,
-  Client: JsClient,
-  Pool: JsPool,
+  Client,
+  Pool,
   CompatPool,
   IbmDbPool: CompatPool,
   Database,
   ODBCResult,
   ODBCStatement,
-  PreparedStatement: JsPreparedStatement,
-  Transaction: JsTransaction,
+  PreparedStatement,
+  Transaction,
   open,
   openSync,
   debug,

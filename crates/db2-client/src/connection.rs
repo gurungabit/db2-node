@@ -5744,11 +5744,13 @@ fn encode_parameter_value(
             db2_proto::types::encode_decfloat(&decimal, *digits).map_err(Error::from)?
         }
         Db2Type::Char(len) => encode_fixed_string(value, *len as usize, descriptor.ccsid)?,
-        Db2Type::VarChar(_)
-        | Db2Type::LongVarChar
-        | Db2Type::Clob
-        | Db2Type::LobChar(_)
-        | Db2Type::Xml => encode_ld_string(value, descriptor.ccsid)?,
+        Db2Type::VarChar(_) | Db2Type::LongVarChar | Db2Type::Clob | Db2Type::Xml => {
+            encode_ld_string(value, descriptor.ccsid)?
+        }
+        Db2Type::Graphic(len) => encode_fixed_graphic(value, *len as usize, descriptor)?,
+        Db2Type::VarGraphic(_) | Db2Type::DbClob | Db2Type::LobChar(_) => {
+            encode_ld_graphic(value, descriptor)?
+        }
         Db2Type::Binary(len) => encode_fixed_binary(value, *len as usize)?,
         Db2Type::VarBinary(_) | Db2Type::Blob | Db2Type::LobBytes(_) => encode_ld_binary(value)?,
         Db2Type::RowId(len) => encode_fixed_string(value, *len as usize, descriptor.ccsid)?,
@@ -5756,13 +5758,7 @@ fn encode_parameter_value(
         Db2Type::Time => encode_exact_string(value, 8, descriptor.ccsid)?,
         Db2Type::Timestamp => encode_timestamp(value, descriptor.ccsid)?,
         Db2Type::Boolean => vec![if expect_bool(value)? { 1 } else { 0 }],
-        Db2Type::Graphic(_)
-        | Db2Type::VarGraphic(_)
-        | Db2Type::DbClob
-        | Db2Type::BlobLocator
-        | Db2Type::ClobLocator
-        | Db2Type::DbClobLocator
-        | Db2Type::Null => {
+        Db2Type::BlobLocator | Db2Type::ClobLocator | Db2Type::DbClobLocator | Db2Type::Null => {
             return Err(Error::Other(format!(
                 "unsupported parameter type for SQLDTA encoding: {:?}",
                 descriptor.db2_type
@@ -5855,7 +5851,17 @@ fn encode_ld_string(value: &db2_proto::types::Db2Value, ccsid: u16) -> Result<Ve
 }
 
 fn encode_text_bytes(value: &db2_proto::types::Db2Value, ccsid: u16) -> Result<Vec<u8>, Error> {
-    let text = match value {
+    let text = extract_text(value)?;
+
+    if matches!(ccsid, 37 | 500) {
+        Ok(db2_proto::codepage::utf8_to_ebcdic037(text))
+    } else {
+        Ok(text.as_bytes().to_vec())
+    }
+}
+
+fn extract_text(value: &db2_proto::types::Db2Value) -> Result<&str, Error> {
+    match value {
         db2_proto::types::Db2Value::Char(v)
         | db2_proto::types::Db2Value::VarChar(v)
         | db2_proto::types::Db2Value::Clob(v)
@@ -5864,20 +5870,67 @@ fn encode_text_bytes(value: &db2_proto::types::Db2Value, ccsid: u16) -> Result<V
         | db2_proto::types::Db2Value::Timestamp(v)
         | db2_proto::types::Db2Value::Decimal(v)
         | db2_proto::types::Db2Value::RowId(v)
-        | db2_proto::types::Db2Value::Xml(v) => v.as_str(),
-        _ => {
-            return Err(Error::Other(format!(
-                "expected string-compatible parameter, got {:?}",
-                value
-            )))
-        }
-    };
-
-    if matches!(ccsid, 37 | 500) {
-        Ok(db2_proto::codepage::utf8_to_ebcdic037(text))
-    } else {
-        Ok(text.as_bytes().to_vec())
+        | db2_proto::types::Db2Value::Xml(v) => Ok(v.as_str()),
+        _ => Err(Error::Other(format!(
+            "expected string-compatible parameter, got {:?}",
+            value
+        ))),
     }
+}
+
+fn encode_fixed_graphic(
+    value: &db2_proto::types::Db2Value,
+    len: usize,
+    descriptor: &db2_proto::fdoca::ColumnDescriptor,
+) -> Result<Vec<u8>, Error> {
+    let mut bytes = encode_graphic_text_bytes(value)?;
+    let target_len = if graphic_length_is_character_count(descriptor) {
+        len.saturating_mul(2)
+    } else {
+        len
+    };
+    if bytes.len() > target_len {
+        bytes.truncate(target_len);
+    } else if bytes.len() < target_len {
+        bytes.resize(target_len, 0x00);
+    }
+    Ok(bytes)
+}
+
+fn encode_ld_graphic(
+    value: &db2_proto::types::Db2Value,
+    descriptor: &db2_proto::fdoca::ColumnDescriptor,
+) -> Result<Vec<u8>, Error> {
+    let bytes = encode_graphic_text_bytes(value)?;
+    let length = if graphic_length_is_character_count(descriptor) {
+        bytes.len() / 2
+    } else {
+        bytes.len()
+    };
+    if length > u16::MAX as usize {
+        return Err(Error::Other(
+            "graphic string parameter too large for SQLDTA".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(2 + bytes.len());
+    out.extend_from_slice(&(length as u16).to_be_bytes());
+    out.extend_from_slice(&bytes);
+    Ok(out)
+}
+
+fn encode_graphic_text_bytes(value: &db2_proto::types::Db2Value) -> Result<Vec<u8>, Error> {
+    Ok(extract_text(value)?
+        .encode_utf16()
+        .flat_map(u16::to_be_bytes)
+        .collect())
+}
+
+fn graphic_length_is_character_count(descriptor: &db2_proto::fdoca::ColumnDescriptor) -> bool {
+    descriptor.ccsid == 1200
+        && matches!(
+            descriptor.byte_order,
+            db2_proto::fdoca::ByteOrder::LittleEndian
+        )
 }
 
 fn encode_fixed_binary(value: &db2_proto::types::Db2Value, len: usize) -> Result<Vec<u8>, Error> {
@@ -6508,6 +6561,10 @@ fn apply_extdta_payloads_to_rows(
                 | db2_proto::types::Db2Type::LobBytes(_) => {
                     *value = db2_proto::types::Db2Value::Blob(payload.to_vec());
                 }
+                db2_proto::types::Db2Type::Xml => {
+                    *value =
+                        db2_proto::types::Db2Value::Xml(decode_extdta_text(payload, descriptor));
+                }
                 db2_proto::types::Db2Type::Clob
                 | db2_proto::types::Db2Type::DbClob
                 | db2_proto::types::Db2Type::ClobLocator
@@ -6515,9 +6572,8 @@ fn apply_extdta_payloads_to_rows(
                 | db2_proto::types::Db2Type::LobChar(_)
                 | db2_proto::types::Db2Type::VarChar(_)
                 | db2_proto::types::Db2Type::VarGraphic(_) => {
-                    *value = db2_proto::types::Db2Value::Clob(
-                        String::from_utf8_lossy(payload).to_string(),
-                    );
+                    *value =
+                        db2_proto::types::Db2Value::Clob(decode_extdta_text(payload, descriptor));
                 }
                 _ => {}
             }
@@ -6552,6 +6608,7 @@ fn is_lob_descriptor(descriptor: &db2_proto::fdoca::ColumnDescriptor) -> bool {
             | db2_proto::types::Db2Type::DbClobLocator
             | db2_proto::types::Db2Type::LobBytes(_)
             | db2_proto::types::Db2Type::LobChar(_)
+            | db2_proto::types::Db2Type::Xml
     )
 }
 
@@ -6570,6 +6627,7 @@ fn descriptor_uses_extdta(descriptor: &db2_proto::fdoca::ColumnDescriptor) -> bo
 fn value_needs_extdta(value: &db2_proto::types::Db2Value) -> bool {
     match value {
         db2_proto::types::Db2Value::Clob(value) => value.starts_with("LOB locator 0x"),
+        db2_proto::types::Db2Value::Xml(value) => value.starts_with("LOB locator 0x"),
         db2_proto::types::Db2Value::Blob(value) => value.len() == 4,
         _ => false,
     }
@@ -6582,6 +6640,26 @@ fn extdta_value_payload(payload: &[u8], nullable: bool) -> &[u8] {
     } else {
         payload
     }
+}
+
+fn decode_extdta_text(payload: &[u8], descriptor: &db2_proto::fdoca::ColumnDescriptor) -> String {
+    if matches!(
+        descriptor.db2_type,
+        db2_proto::types::Db2Type::DbClob | db2_proto::types::Db2Type::DbClobLocator
+    ) || descriptor.ccsid == 1200
+    {
+        return decode_utf16be_lossy(payload);
+    }
+
+    String::from_utf8_lossy(payload).to_string()
+}
+
+fn decode_utf16be_lossy(payload: &[u8]) -> String {
+    let units = payload
+        .chunks_exact(2)
+        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    String::from_utf16_lossy(&units)
 }
 
 fn unwrap_extdta_payload(payload: &[u8]) -> &[u8] {

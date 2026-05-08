@@ -56,6 +56,30 @@ CommonJS also works:
 const { Client } = require('@gurungabit/db2-node')
 ```
 
+## Data Type Support
+
+The Rust driver covers Db2 for z/OS built-in scalar families: integer, floating point, `DECIMAL`/`NUMERIC`, `DECFLOAT`, character, graphic, binary, `BLOB`, `CLOB`, `DBCLOB`, date/time/timestamp, `ROWID`, `XML`, Boolean, nullable values, and distinct types through their source representation.
+
+JavaScript result values use these mappings:
+
+| Db2 type family | JavaScript value |
+|-----------------|------------------|
+| `SMALLINT`, `INTEGER`, `BIGINT`, floating point | `number` |
+| `DECIMAL`, `NUMERIC`, `DECFLOAT` | `string` |
+| `CHAR`, `VARCHAR`, `GRAPHIC`, `VARGRAPHIC`, `CLOB`, `DBCLOB`, `DATE`, `TIME`, `TIMESTAMP`, `ROWID`, `XML` | `string` |
+| `BINARY`, `VARBINARY`, `BLOB` | `Buffer` |
+| `BOOLEAN` | `boolean` |
+| nullable columns | `null` |
+
+For exact parameter typing, cast placeholders in SQL:
+
+```ts
+await client.query('VALUES CAST(? AS DECFLOAT(34))', ['123456789.00001'])
+await client.query('INSERT INTO files (payload) VALUES (CAST(? AS BLOB(1M)))', [
+  Buffer.from([0xde, 0xad, 0xbe, 0xef]),
+])
+```
+
 ## Connection Options
 
 | Option | Type | Default | Description |

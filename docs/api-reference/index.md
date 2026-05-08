@@ -13,14 +13,20 @@ interface ConnectionConfig {
   database: string;
   user: string;
   password: string;
+  securityMechanism?: 'encrypted' | 'encryptedPassword' | 'userPassword' | 'userOnly';
+  encryptionAlgorithm?: 'aes' | 'des';
+  credentialEncoding?: 'auto' | 'utf8' | 'ebcdic';
+  encryptedPasswordEncoding?: 'same' | 'utf8' | 'ebcdic';
+  encryptedPasswordTokenEncoding?: 'same' | 'utf8' | 'ebcdic';
   ssl?: boolean;                  // default: false
   rejectUnauthorized?: boolean;   // default: true (verify server cert)
   sslClientHostnameValidation?: 'Basic' | 'OFF'; // default: 'Basic'
   caCert?: string;                // path to CA certificate PEM file
   connectTimeout?: number;        // ms, default: 30000 (covers TCP + TLS)
   queryTimeout?: number;          // ms, default: 0 (no timeout)
-  frameDrainTimeout?: number;     // ms, default: 500
+  frameDrainTimeout?: number;     // ms, default: 25
   currentSchema?: string;
+  typeDefinitionName?: 'QTDSQLASC' | 'QTDSQL370' | 'QTDSQLX86' | 'QTDSQL400' | 'none';
   fetchSize?: number;             // rows per fetch, default: 100
 }
 ```
@@ -45,6 +51,7 @@ interface QueryResult {
   rows: Record<string, any>[];
   rowCount: number;
   columns: ColumnInfo[];
+  diagnostics: string[];
 }
 ```
 
@@ -54,11 +61,14 @@ interface QueryResult {
 interface ColumnInfo {
   name: string;
   typeName: string;
+  db2TypeName?: string;
   nullable: boolean;
   precision?: number;
   scale?: number;
 }
 ```
+
+`typeName` is the JavaScript-facing type name. `db2TypeName` is present when the underlying Db2 type needs to be preserved separately, for example `GRAPHIC(10)` exposed as public `CHAR(10)`.
 
 ### ServerInfo
 
@@ -122,6 +132,8 @@ Executes a SQL statement and returns the result.
 - `sql` — SQL statement. Use `?` for parameter placeholders.
 - `params` — Optional array of parameter values.
 
+Parameter values can be `string`, `number`, `boolean`, `null`, `Buffer`, `Uint8Array`, number arrays, or values that the server can cast from those representations. For exact `DECIMAL`, `DECFLOAT`, date/time, XML, and LOB typing, cast parameter markers in SQL.
+
 **Example**:
 ```typescript
 // Simple query
@@ -132,7 +144,15 @@ const result = await client.query(
   'SELECT * FROM employees WHERE dept_id = ? AND salary > ?',
   [1, 100000]
 );
+
+// Binary / BLOB parameter
+await client.query(
+  'INSERT INTO files (payload) VALUES (CAST(? AS BLOB(1M)))',
+  [Buffer.from([0xde, 0xad, 0xbe, 0xef])]
+);
 ```
+
+See [Data Type Support](../data-types/index.md) for the full Db2 for z/OS type mapping.
 
 ### client.prepare()
 

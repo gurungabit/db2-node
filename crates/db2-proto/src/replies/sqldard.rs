@@ -831,7 +831,7 @@ fn parse_column_descriptor(data: &[u8], index: usize) -> Result<ColumnMetadata> 
     let ccsid = decode_ccsid([data[14], data[15]]);
 
     let nullable = (sql_type & 0x0001) != 0;
-    let db2_type = db2_type_from_sqlda(sql_type, raw_length, precision, scale);
+    let db2_type = db2_type_from_sqlda(sql_type, raw_length, precision, scale, ccsid);
     let length = normalized_length(sql_type, raw_length, precision, &db2_type);
     let drda_type = drda_type_for(&db2_type, nullable);
     let name = extract_column_name(data).unwrap_or_else(|| format!("COL{}", index + 1));
@@ -892,7 +892,7 @@ fn parse_standard_column_descriptor(
     }
 
     let nullable = (sql_type & 0x0001) != 0;
-    let db2_type = db2_type_from_sqlda(sql_type, raw_length, precision, scale);
+    let db2_type = db2_type_from_sqlda(sql_type, raw_length, precision, scale, ccsid);
     let length = normalized_length(sql_type, raw_length, precision, &db2_type);
     let drda_type = drda_type_for(&db2_type, nullable);
 
@@ -1185,7 +1185,13 @@ fn decode_text(bytes: &[u8]) -> String {
     }
 }
 
-fn db2_type_from_sqlda(sql_type: u16, raw_length: u64, precision: u8, scale: u8) -> Db2Type {
+fn db2_type_from_sqlda(
+    sql_type: u16,
+    raw_length: u64,
+    precision: u8,
+    scale: u8,
+    ccsid: u16,
+) -> Db2Type {
     match sql_type & !1 {
         384 => Db2Type::Date,
         388 => Db2Type::Time,
@@ -1193,7 +1199,9 @@ fn db2_type_from_sqlda(sql_type: u16, raw_length: u64, precision: u8, scale: u8)
         404 => Db2Type::Blob,
         408 => Db2Type::Clob,
         412 => Db2Type::DbClob,
+        448 | 456 if ccsid == 0 => Db2Type::VarBinary(raw_length.min(u16::MAX as u64) as u16),
         448 | 456 => Db2Type::VarChar(raw_length.min(u16::MAX as u64) as u16),
+        452 if ccsid == 0 => Db2Type::Binary(raw_length.min(u16::MAX as u64) as u16),
         452 => Db2Type::Char(raw_length.min(u16::MAX as u64) as u16),
         464 | 472 => Db2Type::VarGraphic(raw_length.min(u16::MAX as u64) as u16),
         468 => Db2Type::Graphic(raw_length.min(u16::MAX as u64) as u16),

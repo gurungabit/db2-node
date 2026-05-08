@@ -132,6 +132,73 @@ describe('Data types: date and time', () => {
   });
 });
 
+describe('Data types: binary and LOB', () => {
+  let client: InstanceType<typeof Client>;
+  const table = `tmp_bin_${Date.now() % 1_000_000}`;
+
+  before(async () => {
+    client = new Client(cfg());
+    await client.connect();
+    await client.query(
+      `CREATE TABLE ${table} (
+        id INTEGER,
+        bin CHAR(4) FOR BIT DATA,
+        vb VARCHAR(8) FOR BIT DATA,
+        blob_col BLOB(1K),
+        clob_col CLOB(1K),
+        dbclob_col DBCLOB(1K),
+        xml_col XML,
+        g GRAPHIC(3),
+        vg VARGRAPHIC(10)
+      )`,
+    );
+  });
+  after(async () => {
+    await client.query(`DROP TABLE ${table}`).catch(() => {});
+    await client.close();
+  });
+
+  it('returns binary and BLOB values as Buffers', async () => {
+    await client.query(
+      `INSERT INTO ${table} VALUES (
+        1,
+        CAST(? AS CHAR(4) FOR BIT DATA),
+        CAST(? AS VARCHAR(8) FOR BIT DATA),
+        CAST(? AS BLOB(1K)),
+        CAST(? AS CLOB(1K)),
+        CAST(? AS DBCLOB(1K)),
+        XMLPARSE(DOCUMENT CAST(? AS CLOB(1K))),
+        CAST(? AS GRAPHIC(3)),
+        CAST(? AS VARGRAPHIC(10))
+      )`,
+      [
+        Buffer.from([0xde, 0xad, 0xbe, 0xef]),
+        [1, 2, 3, 4, 5],
+        Buffer.from([0xca, 0xfe, 0xca, 0xfe]),
+        'hello clob',
+        'wide text',
+        '<root>ok</root>',
+        'ABC',
+        'hello',
+      ],
+    );
+
+    const r = await client.query(`SELECT * FROM ${table}`);
+    assert.equal(r.rows.length, 1);
+    assert.ok(Buffer.isBuffer(r.rows[0].BIN));
+    assert.ok(Buffer.isBuffer(r.rows[0].VB));
+    assert.ok(Buffer.isBuffer(r.rows[0].BLOB_COL));
+    assert.deepEqual([...r.rows[0].BIN], [0xde, 0xad, 0xbe, 0xef]);
+    assert.deepEqual([...r.rows[0].VB], [1, 2, 3, 4, 5]);
+    assert.deepEqual([...r.rows[0].BLOB_COL], [0xca, 0xfe, 0xca, 0xfe]);
+    assert.ok(r.rows[0].CLOB_COL.includes('hello clob'));
+    assert.ok(r.rows[0].DBCLOB_COL.includes('wide text'));
+    assert.ok(r.rows[0].XML_COL.includes('<root>ok</root>'));
+    assert.equal(r.rows[0].G.trim(), 'ABC');
+    assert.equal(r.rows[0].VG, 'hello');
+  });
+});
+
 describe('Data types: NULL handling', () => {
   let client: InstanceType<typeof Client>;
 

@@ -947,6 +947,10 @@ fn apply_extdta_payloads_to_rows(
                 | db2_proto::types::Db2Type::LobBytes(_) => {
                     *value = db2_proto::types::Db2Value::Blob(payload.to_vec());
                 }
+                db2_proto::types::Db2Type::Xml => {
+                    *value =
+                        db2_proto::types::Db2Value::Xml(decode_extdta_text(payload, descriptor));
+                }
                 db2_proto::types::Db2Type::Clob
                 | db2_proto::types::Db2Type::DbClob
                 | db2_proto::types::Db2Type::ClobLocator
@@ -954,9 +958,8 @@ fn apply_extdta_payloads_to_rows(
                 | db2_proto::types::Db2Type::LobChar(_)
                 | db2_proto::types::Db2Type::VarChar(_)
                 | db2_proto::types::Db2Type::VarGraphic(_) => {
-                    *value = db2_proto::types::Db2Value::Clob(
-                        String::from_utf8_lossy(payload).to_string(),
-                    );
+                    *value =
+                        db2_proto::types::Db2Value::Clob(decode_extdta_text(payload, descriptor));
                 }
                 _ => {}
             }
@@ -1018,6 +1021,7 @@ fn is_lob_descriptor(descriptor: &db2_proto::fdoca::ColumnDescriptor) -> bool {
             | db2_proto::types::Db2Type::DbClobLocator
             | db2_proto::types::Db2Type::LobBytes(_)
             | db2_proto::types::Db2Type::LobChar(_)
+            | db2_proto::types::Db2Type::Xml
     )
 }
 
@@ -1038,6 +1042,7 @@ fn descriptor_uses_extdta(descriptor: &db2_proto::fdoca::ColumnDescriptor) -> bo
 fn value_needs_extdta(value: &db2_proto::types::Db2Value) -> bool {
     match value {
         db2_proto::types::Db2Value::Clob(value) => value.starts_with("LOB locator 0x"),
+        db2_proto::types::Db2Value::Xml(value) => value.starts_with("LOB locator 0x"),
         db2_proto::types::Db2Value::Blob(value) => value.len() == 4,
         _ => false,
     }
@@ -1050,6 +1055,26 @@ fn extdta_value_payload(payload: &[u8], nullable: bool) -> &[u8] {
     } else {
         payload
     }
+}
+
+fn decode_extdta_text(payload: &[u8], descriptor: &db2_proto::fdoca::ColumnDescriptor) -> String {
+    if matches!(
+        descriptor.db2_type,
+        db2_proto::types::Db2Type::DbClob | db2_proto::types::Db2Type::DbClobLocator
+    ) || descriptor.ccsid == 1200
+    {
+        return decode_utf16be_lossy(payload);
+    }
+
+    String::from_utf8_lossy(payload).to_string()
+}
+
+fn decode_utf16be_lossy(payload: &[u8]) -> String {
+    let units = payload
+        .chunks_exact(2)
+        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    String::from_utf16_lossy(&units)
 }
 
 fn unwrap_extdta_payload(payload: &[u8]) -> &[u8] {

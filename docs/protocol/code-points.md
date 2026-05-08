@@ -104,4 +104,4 @@ Used in MGRLVLLS negotiation to declare supported protocol capabilities.
 
 The complete list of 200+ code points can be found in:
 - Apache Derby [`CodePoint.java`](https://github.com/apache/derby/blob/trunk/java/org.apache.derby.drda/org/apache/derby/impl/drda/CodePoint.java)
-- [kanrichan/ibm_db](https://github.com/kanrichan/ibm_db/tree/main/drda) Go implementation
+- Wireshark DRDA dissector sources

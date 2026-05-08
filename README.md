@@ -11,7 +11,7 @@ This repository contains the driver, the protocol implementation, the Node.js bi
 - `crates/db2-napi` — `napi-rs` bindings published as the `@gurungabit/db2-node` npm package
 - `tests/integration` — Rust integration tests against a real DB2 instance
 - `tests/node` — Node.js integration tests against the public JS API
-- `docs` — MkDocs Material docs site
+- `docs` — VitePress docs site
 - `examples/demo.ts` / `examples/demo-million.ts` — repo-local examples for quick validation and benchmarking
 - `examples/todo-app` — full-stack example app using the published Node bindings
 
@@ -53,6 +53,12 @@ await client.close();
 ```
 
 Package-level usage and API details live in `crates/db2-napi/README.md`.
+
+## Data Type Coverage
+
+The Rust protocol layer recognizes Db2 for z/OS built-in data families: numeric, decimal floating point, character, graphic, binary, `BLOB`, `CLOB`, `DBCLOB`, datetime, `ROWID`, `XML`, Boolean, nullable values, and distinct types through their source representation. Binary and BLOB results are returned as Node `Buffer`s; exact decimal values are returned as strings.
+
+See `docs/data-types/index.md` for the full JavaScript mapping table.
 
 ## TLS Compatibility
 
@@ -164,7 +170,7 @@ DEMO_TOTAL_ROWS=100000 npx --yes tsx examples/demo-million.ts
 
 ## Docs Site
 
-Build the MkDocs Material site:
+Build the VitePress docs site:
 
 ```bash
 make docs-build
@@ -178,7 +184,7 @@ make docs-serve
 
 Then open:
 
-- `http://localhost:8000/db2-node/`
+- `http://localhost:5173/db2-node/`
 
 The deployed docs site lives at `https://gurungabit.github.io/db2-node/`.
 

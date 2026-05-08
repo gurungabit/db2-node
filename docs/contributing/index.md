@@ -114,15 +114,15 @@ This captures DRDA byte sequences for known operations and saves them in `tests/
 
 ## Documentation Site
 
-The docs site is built with Material for MkDocs. You can run it locally without installing Python or MkDocs on your machine:
+The docs site is built with VitePress:
 
 ```bash
 make docs-serve
 ```
 
-This serves the site at `http://localhost:8000/db2-node/`.
+This serves the site at `http://localhost:5173/db2-node/`.
 
-To build the static site into `.tmp-docs-public/`:
+To build the static site into `docs/.vitepress/dist/`:
 
 ```bash
 make docs-build
@@ -138,8 +138,8 @@ make docs-build
 | `make test-unit` | Unit tests only (no DB2) |
 | `make test-integration` | Integration tests (starts DB2 if needed) |
 | `make test-node` | Node.js tests |
-| `make docs-build` | Build the MkDocs site into `.tmp-docs-public/` |
-| `make docs-serve` | Serve the MkDocs site locally on port 8000 |
+| `make docs-build` | Build the VitePress site into `docs/.vitepress/dist/` |
+| `make docs-serve` | Serve the VitePress site locally on port 5173 |
 | `make db2-start` | Start DB2 container |
 | `make db2-stop` | Stop DB2 container |
 | `make db2-status` | Check DB2 status |

@@ -1,7 +1,4 @@
-.PHONY: all build test test-unit test-integration test-node db2-start db2-stop db2-status docs-build docs-serve clean
-
-MKDOCS_IMAGE ?= squidfunk/mkdocs-material:9.7.6
-DOCS_OUTPUT_DIR ?= .tmp-docs-public
+.PHONY: all build test test-unit test-integration test-node db2-start db2-stop db2-status docs-install docs-build docs-serve clean
 
 all: build test
 
@@ -37,13 +34,17 @@ test-integration: db2-ensure
 	cargo test --workspace --test '*' -- --test-threads=4
 
 test-node: db2-ensure
-	cd crates/db2-napi && npm install && npm test
+	cd crates/db2-napi && npm ci && npm run build
+	cd tests/node && npm ci && npm test
+
+docs-install:
+	cd docs && npm ci
 
 docs-build:
-	docker run --rm -v $(CURDIR):/docs $(MKDOCS_IMAGE) build --clean --site-dir $(DOCS_OUTPUT_DIR)
+	cd docs && npm ci && npm run build
 
 docs-serve:
-	docker run --rm -p 8000:8000 -v $(CURDIR):/docs $(MKDOCS_IMAGE) serve --dev-addr 0.0.0.0:8000
+	cd docs && npm install && npm run dev
 
 test: test-unit test-integration
 

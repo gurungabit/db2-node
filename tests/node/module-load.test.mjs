@@ -9,21 +9,23 @@ describe('Package exports', () => {
   it('supports CommonJS consumers with friendly aliases', () => {
     const pkg = require(packagePath)
 
-    assert.equal(pkg.Client, pkg.JsClient)
-    assert.equal(pkg.Pool, pkg.JsPool)
-    assert.equal(pkg.PreparedStatement, pkg.JsPreparedStatement)
-    assert.equal(pkg.Transaction, pkg.JsTransaction)
+    assert.equal(pkg.NativeClient, pkg.JsClient)
+    assert.equal(pkg.NativePool, pkg.JsPool)
+    assert.equal(pkg.NativePreparedStatement, pkg.JsPreparedStatement)
+    assert.equal(pkg.NativeTransaction, pkg.JsTransaction)
     assert.equal(typeof pkg.Client, 'function')
     assert.equal(typeof pkg.Pool, 'function')
+    assert.equal(typeof pkg.PreparedStatement, 'function')
+    assert.equal(typeof pkg.Transaction, 'function')
   })
 
   it('supports ESM consumers with friendly aliases', async () => {
     const pkg = await import(esmEntrypoint.href)
 
-    assert.equal(pkg.Client, pkg.JsClient)
-    assert.equal(pkg.Pool, pkg.JsPool)
-    assert.equal(pkg.PreparedStatement, pkg.JsPreparedStatement)
-    assert.equal(pkg.Transaction, pkg.JsTransaction)
+    assert.equal(pkg.NativeClient, pkg.JsClient)
+    assert.equal(pkg.NativePool, pkg.JsPool)
+    assert.equal(pkg.NativePreparedStatement, pkg.JsPreparedStatement)
+    assert.equal(pkg.NativeTransaction, pkg.JsTransaction)
     assert.equal(pkg.default.Client, pkg.Client)
   })
 })

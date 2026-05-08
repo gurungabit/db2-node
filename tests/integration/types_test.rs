@@ -340,6 +340,81 @@ async fn test_date_time_types() {
 }
 
 #[tokio::test]
+async fn test_binary_lob_graphic_xml_types() {
+    let client = connect().await;
+    let table = temp_table_name("exttypes");
+    drop_table(&client, &table).await;
+
+    client
+        .query(
+            &format!(
+                "CREATE TABLE {} (\
+                    bin CHAR(4) FOR BIT DATA, \
+                    vb VARCHAR(8) FOR BIT DATA, \
+                    b BLOB(1K), \
+                    c CLOB(1K), \
+                    d DBCLOB(1K), \
+                    x XML, \
+                    g GRAPHIC(3), \
+                    vg VARGRAPHIC(10)\
+                )",
+                table
+            ),
+            &[],
+        )
+        .await
+        .expect("create extended type table");
+
+    client
+        .query(
+            &format!(
+                "INSERT INTO {} VALUES (\
+                    X'DEADBEEF', \
+                    X'0102030405', \
+                    BLOB(X'CAFECAFE'), \
+                    CAST('hello clob' AS CLOB(1K)), \
+                    CAST('wide text' AS DBCLOB(1K)), \
+                    XMLPARSE(DOCUMENT '<root>ok</root>'), \
+                    CAST('ABC' AS GRAPHIC(3)), \
+                    CAST('hello' AS VARGRAPHIC(10))\
+                )",
+                table
+            ),
+            &[],
+        )
+        .await
+        .expect("insert extended type values");
+
+    let result = client
+        .query(&format!("SELECT * FROM {}", table), &[])
+        .await
+        .expect("select extended type values");
+    assert_eq!(result.rows.len(), 1);
+
+    let row = &result.rows[0];
+    let bin: Vec<u8> = row.get("BIN").expect("BINARY should decode");
+    let vb: Vec<u8> = row.get("VB").expect("VARBINARY should decode");
+    let blob: Vec<u8> = row.get("B").expect("BLOB should decode");
+    let clob: String = row.get("C").expect("CLOB should decode");
+    let dbclob: String = row.get("D").expect("DBCLOB should decode");
+    let xml: String = row.get("X").expect("XML should decode");
+    let graphic: String = row.get("G").expect("GRAPHIC should decode");
+    let vargraphic: String = row.get("VG").expect("VARGRAPHIC should decode");
+
+    assert_eq!(bin, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    assert_eq!(vb, vec![1, 2, 3, 4, 5]);
+    assert_eq!(blob, vec![0xCA, 0xFE, 0xCA, 0xFE]);
+    assert!(clob.contains("hello clob"));
+    assert!(dbclob.contains("wide text"));
+    assert!(xml.contains("<root>ok</root>"));
+    assert!(graphic.contains("ABC"));
+    assert!(vargraphic.contains("hello"));
+
+    drop_table(&client, &table).await;
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
 async fn test_boolean_type() {
     let client = connect().await;
     let table = temp_table_name("bool");

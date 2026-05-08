@@ -195,7 +195,9 @@ impl FromDb2Value for bool {
 impl FromDb2Value for Vec<u8> {
     fn from_db2_value(value: &db2_proto::types::Db2Value) -> Option<Self> {
         match value {
-            db2_proto::types::Db2Value::Blob(v) => Some(v.clone()),
+            db2_proto::types::Db2Value::Binary(v) | db2_proto::types::Db2Value::Blob(v) => {
+                Some(v.clone())
+            }
             _ => None,
         }
     }

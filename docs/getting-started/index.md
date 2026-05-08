@@ -51,7 +51,7 @@ await client.connect();
 | `caCert` | `string` | — | Path to CA certificate PEM file |
 | `connectTimeout` | `number` | `30000` | Connection timeout in ms (TCP + TLS) |
 | `queryTimeout` | `number` | `0` | Query timeout in ms (0 = no timeout) |
-| `frameDrainTimeout` | `number` | `500` | DRDA reply frame drain timeout in ms |
+| `frameDrainTimeout` | `number` | `25` | DRDA reply frame drain timeout in ms |
 | `currentSchema` | `string` | — | Default schema |
 | `fetchSize` | `number` | `100` | Rows per fetch batch |
 
@@ -65,6 +65,8 @@ console.log(result.rows);    // Array of row objects
 console.log(result.rowCount); // Number of rows
 console.log(result.columns);  // Column metadata
 ```
+
+See [Data Type Support](../data-types/index.md) for the Db2 for z/OS built-in type mapping, including BLOB, CLOB, DBCLOB, XML, ROWID, graphic strings, binary strings, and datetime values.
 
 ### Parameterized Queries
 

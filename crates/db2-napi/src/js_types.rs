@@ -422,7 +422,10 @@ fn db2_value_to_napi_value(
                 ToNapiValue::to_napi_value(env, if v.is_finite() { v } else { 0.0 })
             }
             Db2Value::Boolean(v) => ToNapiValue::to_napi_value(env, v),
-            Db2Value::Binary(v) | Db2Value::Blob(v) => ToNapiValue::to_napi_value(env, v),
+            Db2Value::Binary(v) | Db2Value::Blob(v) => {
+                let js_buffer = Env::from(env).create_buffer_with_data(v)?.into_raw();
+                Ok(js_buffer.raw())
+            }
             Db2Value::Decimal(v)
             | Db2Value::Char(v)
             | Db2Value::VarChar(v)
@@ -517,11 +520,53 @@ fn json_to_db2_value(val: &serde_json::Value) -> db2_proto::types::Db2Value {
                 .collect();
             Db2Value::Binary(bytes)
         }
-        serde_json::Value::Object(_) => {
-            // Objects are not directly supported; convert to string representation
-            Db2Value::VarChar(val.to_string())
+        serde_json::Value::Object(obj) => buffer_like_object_to_bytes(obj)
+            .map(Db2Value::Binary)
+            .unwrap_or_else(|| Db2Value::VarChar(val.to_string())),
+    }
+}
+
+fn buffer_like_object_to_bytes(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<u8>> {
+    if let (Some(serde_json::Value::String(kind)), Some(serde_json::Value::Array(data))) =
+        (obj.get("type"), obj.get("data"))
+    {
+        if kind == "Buffer" {
+            return json_number_array_to_bytes(data);
         }
     }
+
+    let mut entries = obj
+        .iter()
+        .map(|(key, value)| {
+            let index = key.parse::<usize>().ok()?;
+            let byte = value.as_u64().and_then(|n| u8::try_from(n).ok())?;
+            Some((index, byte))
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    entries.sort_by_key(|(index, _)| *index);
+    if entries
+        .iter()
+        .enumerate()
+        .any(|(expected, (index, _))| expected != *index)
+    {
+        return None;
+    }
+
+    Some(entries.into_iter().map(|(_, byte)| byte).collect())
+}
+
+fn json_number_array_to_bytes(values: &[serde_json::Value]) -> Option<Vec<u8>> {
+    values
+        .iter()
+        .map(|value| value.as_u64().and_then(|n| u8::try_from(n).ok()))
+        .collect()
 }
 
 /// Convert a db2_client::Error into a napi::Error with descriptive message.
@@ -650,5 +695,28 @@ mod tests {
         assert_eq!(public_type_name("RowId(40)"), "ROWID(40)");
         assert_eq!(raw_db2_type_name("RowId(40)", "ROWID(40)"), None);
         assert_eq!(raw_db2_type_name("Integer", "Integer"), None);
+    }
+
+    #[test]
+    fn json_params_accept_buffer_like_objects_as_binary() {
+        let node_buffer_json = serde_json::json!({
+            "type": "Buffer",
+            "data": [0, 1, 127, 255]
+        });
+        assert_eq!(
+            json_to_db2_value(&node_buffer_json),
+            db2_proto::types::Db2Value::Binary(vec![0, 1, 127, 255])
+        );
+
+        let indexed_object = serde_json::json!({
+            "0": 222,
+            "1": 173,
+            "2": 190,
+            "3": 239
+        });
+        assert_eq!(
+            json_to_db2_value(&indexed_object),
+            db2_proto::types::Db2Value::Binary(vec![222, 173, 190, 239])
+        );
     }
 }

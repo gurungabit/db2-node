@@ -46,7 +46,7 @@ async function main() {
         )
       `);
 
-      // Insert BLOBs using hex literals (driver doesn't support Buffer params)
+      // Insert BLOBs using hex literals so the benchmark data is deterministic.
       // Note: hex literal in SQL has 2 chars per byte, plus overhead.
       // DB2 has a limit on string constant length (~32KB), so max ~15KB via hex.
       const blobSizes = [

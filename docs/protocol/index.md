@@ -44,5 +44,4 @@ DRDA communication is structured in layers:
 
 ### Open-Source Implementations
 - [Apache Derby](https://github.com/apache/derby) — Java DRDA server + client (`org.apache.derby.impl.drda`)
-- [kanrichan/ibm_db](https://github.com/kanrichan/ibm_db/tree/main/drda) — Go DRDA implementation
 - Wireshark DRDA dissector — Filter: `drda`

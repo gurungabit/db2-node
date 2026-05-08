@@ -2,8 +2,11 @@
 
 `@gurungabit/db2-node` is a zero-dependency DB2 driver for Node.js, built in pure Rust. It speaks the IBM DRDA wire protocol directly, so there is no IBM CLI, ODBC, `libdb2`, or OpenSSL runtime dependency to install.
 
-[Get started](getting-started/index.md){ .md-button .md-button--primary }
-[Read the API](api-reference/index.md){ .md-button }
+## Start Here
+
+- [Getting Started](getting-started/index.md)
+- [API Reference](api-reference/index.md)
+- [Data Type Support](data-types/index.md)
 
 ## Why db2-node?
 
@@ -11,6 +14,7 @@
 - Pure Rust DRDA implementation
 - First-class Node.js bindings via `napi-rs`
 - Built-in pooling, transactions, prepared statements, and TLS
+- Db2 LUW and Db2 for z/OS type coverage for numeric, string, binary, LOB, datetime, XML, ROWID, and Boolean values
 - Searchable docs with section navigation and page outlines
 
 ## Quick Example
@@ -40,26 +44,10 @@ await client.close();
 
 ## Explore the docs
 
-<div class="grid cards" markdown>
-
-- :material-rocket-launch-outline: __Getting Started__
-  ---
-  Install the package, connect to DB2, and run your first query.
-  [Open the guide](getting-started/index.md)
-
-- :material-book-open-page-variant: __API Reference__
-  ---
-  See the TypeScript surface for connections, pooling, prepared statements, and transactions.
-  [Browse the API](api-reference/index.md)
-
-- :material-source-branch: __Architecture__
-  ---
-  Learn how the Rust crates, Node bindings, and transport layer fit together.
-  [Read the architecture](architecture/index.md)
-
-- :material-lan-connect: __Protocol__
-  ---
-  Drill into DRDA framing, DDM objects, query flow, and wire-level details.
-  [Explore the protocol](protocol/index.md)
-
-</div>
+| Page | What it covers |
+|------|----------------|
+| [Getting Started](getting-started/index.md) | Install the package, connect to DB2, and run your first query. |
+| [API Reference](api-reference/index.md) | TypeScript API for connections, pools, prepared statements, and transactions. |
+| [Data Type Support](data-types/index.md) | Db2 for z/OS built-in data type coverage and JavaScript mappings. |
+| [Architecture](architecture/index.md) | How the Rust crates, Node bindings, and transport layer fit together. |
+| [Protocol](protocol/index.md) | DRDA framing, DDM objects, query flow, and wire-level details. |

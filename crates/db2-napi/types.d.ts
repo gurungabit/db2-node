@@ -23,19 +23,53 @@ export {
 import type {
   JsClient,
   JsConnectionConfig,
-  JsPool,
+  JsQueryResult,
+  JsServerInfo,
   JsPoolConfig,
-  JsPreparedStatement,
-  JsTransaction,
   JsColumnInfo,
 } from './index.js'
 
 export type ConnectionString = string | JsConnectionConfig
+export type BinaryParameter = Uint8Array | ArrayBuffer | number[]
+export type QueryParameter = string | number | boolean | null | BinaryParameter
+export type QueryParameters = QueryParameter[]
 
-export const Client: typeof JsClient
-export const Pool: typeof JsPool
-export const PreparedStatement: typeof JsPreparedStatement
-export const Transaction: typeof JsTransaction
+export class Client {
+  constructor(config: JsConnectionConfig)
+  connect(): Promise<void>
+  query(sql: string, params?: QueryParameters | undefined | null): Promise<JsQueryResult>
+  prepare(sql: string): Promise<PreparedStatement>
+  beginTransaction(): Promise<Transaction>
+  close(): Promise<void>
+  serverInfo(): Promise<JsServerInfo>
+}
+
+export class Pool {
+  constructor(config: JsPoolConfig)
+  connect(): Promise<void>
+  warmup(): Promise<number>
+  query(sql: string, params?: QueryParameters | undefined | null): Promise<JsQueryResult>
+  acquire(): Promise<Client>
+  release(client: Client | JsClient): Promise<void>
+  close(): Promise<void>
+  idleCount(): Promise<number>
+  activeCount(): Promise<number>
+  totalCount(): Promise<number>
+  maxConnections(): number
+}
+
+export class PreparedStatement {
+  execute(params?: QueryParameters | undefined | null): Promise<JsQueryResult>
+  executeBatch(paramRows: Array<QueryParameters>): Promise<JsQueryResult>
+  close(): Promise<void>
+}
+
+export class Transaction {
+  query(sql: string, params?: QueryParameters | undefined | null): Promise<JsQueryResult>
+  prepare(sql: string): Promise<PreparedStatement>
+  commit(): Promise<void>
+  rollback(): Promise<void>
+}
 
 export interface Sqlca {
   rowCount: number
@@ -67,29 +101,29 @@ export class ODBCResult {
 }
 
 export class ODBCStatement {
-  bind(params: any[], callback?: (err?: Error | null) => void): Promise<void> | void
-  bindSync(params: any[]): boolean
+  bind(params: QueryParameters, callback?: (err?: Error | null) => void): Promise<void> | void
+  bindSync(params: QueryParameters): boolean
   execute(callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
-  execute(params?: any[]): Promise<ODBCResult>
-  execute(params: any[], callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
-  executeSync(params?: any[]): never
-  executeNonQuery(params?: any[]): Promise<number>
-  executeNonQuery(params: any[], callback: (err: Error | null, rowCount: number) => void): void
-  executeNonQuerySync(params?: any[]): never
+  execute(params?: QueryParameters): Promise<ODBCResult>
+  execute(params: QueryParameters, callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
+  executeSync(params?: QueryParameters): never
+  executeNonQuery(params?: QueryParameters): Promise<number>
+  executeNonQuery(params: QueryParameters, callback: (err: Error | null, rowCount: number) => void): void
+  executeNonQuerySync(params?: QueryParameters): never
   close(callback?: (err?: Error | null) => void): Promise<void> | void
   closeSync(): boolean
 }
 
 export class Database {
-  query(sql: string | { sql: string; params?: any[]; noResults?: boolean }, callback: IbmDbCallback<any[]>): void
-  query(sql: string | { sql: string; params?: any[]; noResults?: boolean }, params?: any[]): Promise<any[]>
-  query(sql: string | { sql: string; params?: any[]; noResults?: boolean }, params: any[], callback: IbmDbCallback<any[]>): void
-  querySync(sql: string, params?: any[]): never
+  query(sql: string | { sql: string; params?: QueryParameters; noResults?: boolean }, callback: IbmDbCallback<any[]>): void
+  query(sql: string | { sql: string; params?: QueryParameters; noResults?: boolean }, params?: QueryParameters): Promise<any[]>
+  query(sql: string | { sql: string; params?: QueryParameters; noResults?: boolean }, params: QueryParameters, callback: IbmDbCallback<any[]>): void
+  querySync(sql: string, params?: QueryParameters): never
   queryResult(sql: string, callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
-  queryResult(sql: string, params?: any[]): Promise<ODBCResult>
-  queryResult(sql: string, params: any[], callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
-  queryResultSync(sql: string, params?: any[]): never
-  queryStream(sql: string, params?: any[]): any
+  queryResult(sql: string, params?: QueryParameters): Promise<ODBCResult>
+  queryResult(sql: string, params: QueryParameters, callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
+  queryResultSync(sql: string, params?: QueryParameters): never
+  queryStream(sql: string, params?: QueryParameters): any
   prepare(sql: string, callback: (err: Error | null, stmt: ODBCStatement) => void): void
   prepare(sql: string): Promise<ODBCStatement>
   prepareSync(sql: string): never
@@ -112,9 +146,9 @@ export class CompatPool {
   constructor(config?: JsPoolConfig)
   connect(callback?: (err?: Error | null) => void): Promise<void> | void
   warmup(callback?: (err: Error | null, created?: number) => void): Promise<number> | void
-  query(sql: string, params?: any[]): Promise<any>
+  query(sql: string, params?: QueryParameters): Promise<any>
   query(sql: string, callback: (err: Error | null, result: any) => void): void
-  query(sql: string, params: any[], callback: (err: Error | null, result: any) => void): void
+  query(sql: string, params: QueryParameters, callback: (err: Error | null, result: any) => void): void
   acquire(): Promise<JsClient>
   acquire(callback: (err: Error | null, client: JsClient) => void): void
   release(client: JsClient, callback?: (err?: Error | null) => void): Promise<void> | void
