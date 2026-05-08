@@ -2,6 +2,15 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.7](https://github.com/db2-node/db2-node/releases/tag/v1.0.7) (2026-05-08)
+
+### Release
+
+- restore the validated Rust DRDA driver line as the official `db2-node` package
+- publish the unscoped `db2-node` npm package name
+- include VitePress documentation and expanded API reference coverage
+- support the extended Db2 scalar and LOB data type mapping used by DB2 LUW and Db2 for z/OS
+
 ## [1.0.0](https://github.com/db2-node/db2-node/releases/tag/v1.0.0) (2026-05-06)
 
 ### Release
