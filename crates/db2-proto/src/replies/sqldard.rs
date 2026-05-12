@@ -1500,9 +1500,7 @@ mod tests {
         data.extend_from_slice(b"COLZ9ID");
 
         let diagnostics = diagnose_column_names(&data);
-        assert!(diagnostics
-            .iter()
-            .any(|line| line.contains("text=COLZ9ID")));
+        assert!(diagnostics.iter().any(|line| line.contains("text=COLZ9ID")));
     }
 
     fn push_identifier(data: &mut Vec<u8>, value: &str) {

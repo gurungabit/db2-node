@@ -4,7 +4,7 @@ Pure Rust DB2 driver for Node.js using the DRDA wire protocol directly. No IBM C
 
 ## Status
 
-`1.0.8` is the current production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, TLS, `ibm_db` compatibility entry points, and validated z/OS LOB materialization cleanup.
+`1.0.9` is the current production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, TLS, `ibm_db` compatibility entry points, and validated z/OS LOB materialization cleanup.
 
 ## Install
 
@@ -15,10 +15,10 @@ npm install db2-node
 You can also install the npm-packed artifact from a GitHub release:
 
 ```bash
-npm install https://github.com/db2-node/db2-node/releases/download/v1.0.8/db2-node-1.0.8.tgz
+npm install https://github.com/db2-node/db2-node/releases/download/v1.0.9/db2-node-1.0.9.tgz
 ```
 
-Replace `v1.0.8` and `1.0.8` with the release version you want.
+Replace `v1.0.9` and `1.0.9` with the release version you want.
 
 Prebuilt native binaries ship for supported platforms — no Rust toolchain needed:
 
@@ -313,6 +313,8 @@ node app.js
 ```
 
 Do not set z/OS LOB cleanup environment variables for the default production path. If a z/OS LOB query cannot be proven clean after materialization, the driver disconnects that socket and warm-replaces it in the pool. This is the fastest mode for large CLOB result sets where preserving the exact same server session is not required.
+
+For aggregate or scalar results that filter CLOB-like text with `LIKE` or `NOT LIKE`, the driver uses a large statement package `EXCSQLSTT` path by default on Db2 for z/OS. This keeps CLOB predicate scans away from the one-shot cursor package path that can hit package-specific resource limits. Set `DB2_ZOS_LIKE_PREDICATE_EXCSQLSTT=0` only when diagnosing package behavior.
 
 Expected default diagnostics, when `DB2_QUERY_DIAGNOSTICS=1` is enabled for troubleshooting:
 

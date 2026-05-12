@@ -2,6 +2,14 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.9](https://github.com/db2-node/db2-node/releases/tag/v1.0.9) (2026-05-12)
+
+### Bug Fixes
+
+- route Db2 for z/OS non-LOB `SELECT` results with `LIKE` predicates through the large statement package `EXCSQLSTT` path, avoiding the direct cursor/package path that can trip CLOB predicate resource limits
+- preserve explicit `SELECT ... AS ...` aliases when Db2 metadata falls back to generated names such as `COL1`
+- decode mixed SQLERRMC token separators in z/OS SQL errors, including readable `SQLCODE=-905` / `SQLSTATE=57014` details
+
 ## [1.0.8](https://github.com/db2-node/db2-node/releases/tag/v1.0.8) (2026-05-12)
 
 ### Compatibility

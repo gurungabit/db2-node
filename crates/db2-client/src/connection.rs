@@ -527,7 +527,10 @@ impl ClientInner {
         if has_query_data {
             // Parse as query result with rows
             // Extract column info from SQLDARD if present, otherwise use empty
-            let column_info = self.parse_prepare_reply(&frames).unwrap_or_default();
+            let column_info = column_info_with_select_aliases(
+                sql,
+                self.parse_prepare_reply(&frames).unwrap_or_default(),
+            );
             self.process_query_reply(&frames, &column_info, None).await
         } else {
             self.process_execute_reply(&frames).await
@@ -786,10 +789,16 @@ impl ClientInner {
 
         let is_query = sql_is_query(sql);
         let use_zos_sqlstt = self.server_info.as_ref().is_some_and(is_db2_zos_server);
+        let prefer_zos_excsqlstt_output = params.is_empty()
+            && is_query
+            && use_zos_sqlstt
+            && self.zos_lob_internal_depth == 0
+            && sql_prefers_zos_non_lob_excsqlstt_output(sql);
         let optimized_zos_sql = if params.is_empty()
             && is_query
             && use_zos_sqlstt
             && self.zos_lob_internal_depth == 0
+            && !prefer_zos_excsqlstt_output
         {
             optimize_zos_select_sql(sql)
         } else {
@@ -797,8 +806,10 @@ impl ClientInner {
         };
         let sql = optimized_zos_sql.as_deref().unwrap_or(sql);
         ensure_sqlstt_sql_len(sql)?;
-        let use_zos_cursor_attributes =
-            is_query && use_zos_sqlstt && use_zos_read_only_cursor_attributes();
+        let use_zos_cursor_attributes = is_query
+            && use_zos_sqlstt
+            && use_zos_read_only_cursor_attributes()
+            && !prefer_zos_excsqlstt_output;
         let pkgnamcsn = self.direct_query_pkgnamcsn();
         let mut input_descriptors = Vec::new();
 
@@ -935,9 +946,27 @@ impl ClientInner {
                 } else {
                     None
                 };
-                let (package_id, section_number) = cache_section
-                    .map(|section| (DIRECT_QUERY_PKGID, section))
-                    .unwrap_or((DIRECT_QUERY_PKGID, ZOS_DIRECT_QUERY_SECTION));
+                let use_dedicated_zos_select_section =
+                    sql_uses_zos_like_predicate_large_package(sql);
+                let one_shot_section =
+                    if cache_section.is_none() && use_dedicated_zos_select_section {
+                        self.allocate_zos_cached_select_section()
+                    } else {
+                        None
+                    };
+                let allocated_section = cache_section.or(one_shot_section);
+                let (package_id, section_number) =
+                    if use_dedicated_zos_select_section && allocated_section.is_some() {
+                        (
+                            PREPARED_STATEMENT_PKGID,
+                            allocated_section.unwrap_or(ZOS_DIRECT_QUERY_SECTION),
+                        )
+                    } else {
+                        (
+                            DIRECT_QUERY_PKGID,
+                            allocated_section.unwrap_or(ZOS_DIRECT_QUERY_SECTION),
+                        )
+                    };
                 self.activate_section(package_id, section_number);
                 let pkgnamcsn = self.build_pkgnamcsn_for(package_id, section_number);
                 let global_cached_metadata = (!zos_select_lob_cache_denied)
@@ -952,7 +981,8 @@ impl ClientInner {
                 let mut zos_prepare_diagnostics = Vec::new();
                 if collect_diagnostics {
                     zos_prepare_diagnostics.push(format!(
-                        "zos_prepare_plan section={} cache_section={} metadata_cache_hit={} request_sqlda={} lob_cache_denied={}",
+                        "zos_prepare_plan package={} section={} cache_section={} metadata_cache_hit={} request_sqlda={} lob_cache_denied={}",
+                        package_id,
                         section_number,
                         cache_section.is_some(),
                         global_metadata_cache_hit,
@@ -979,7 +1009,7 @@ impl ClientInner {
                 let send_buf = writer.finish();
                 let prepare_send_started = collect_diagnostics.then(Instant::now);
                 if let Err(err) = self.send_bytes(&send_buf).await {
-                    if let Some(section_number) = cache_section {
+                    if let Some(section_number) = allocated_section {
                         self.release_prepared_section(section_number);
                     }
                     return Err(err);
@@ -1000,7 +1030,7 @@ impl ClientInner {
                 } {
                     Ok(frames) => frames,
                     Err(err) => {
-                        if let Some(section_number) = cache_section {
+                        if let Some(section_number) = allocated_section {
                             self.release_prepared_section(section_number);
                         }
                         return Err(err);
@@ -1018,15 +1048,19 @@ impl ClientInner {
                 let (column_info, result_descriptors) = match global_cached_metadata {
                     Some(metadata) => {
                         if let Err(err) = self.parse_prepare_reply(&frames) {
-                            if let Some(section_number) = cache_section {
+                            if let Some(section_number) = allocated_section {
                                 self.release_prepared_section(section_number);
                             }
                             return Err(err);
                         }
-                        (metadata.column_info, metadata.result_descriptors)
+                        (
+                            column_info_with_select_aliases(sql, metadata.column_info),
+                            metadata.result_descriptors,
+                        )
                     }
                     None => match self.parse_prepare_reply(&frames) {
                         Ok(column_info) => {
+                            let column_info = column_info_with_select_aliases(sql, column_info);
                             let result_descriptors = self.parse_prepare_result_descriptors(&frames);
                             if let Some(cache_key) = global_metadata_cache_key.as_deref() {
                                 let metadata_cache_stored = store_zos_select_metadata(
@@ -1046,7 +1080,7 @@ impl ClientInner {
                             (column_info, result_descriptors)
                         }
                         Err(err) => {
-                            if let Some(section_number) = cache_section {
+                            if let Some(section_number) = allocated_section {
                                 self.release_prepared_section(section_number);
                             }
                             return Err(err);
@@ -1096,11 +1130,12 @@ impl ClientInner {
                             }
                         }
                         result.diagnostics.extend(zos_prepare_diagnostics);
-                        if let Some(section_number) = cache_section {
+                        if let Some(section_number) = allocated_section {
                             let prepare_section_cacheable =
                                 zos_select_section_cacheable(&column_info, &result_descriptors);
-                            let section_cacheable =
-                                prepare_section_cacheable && !opened_result_has_lobs;
+                            let section_cacheable = cache_section.is_some()
+                                && prepare_section_cacheable
+                                && !opened_result_has_lobs;
                             if collect_diagnostics {
                                 result.diagnostics.push(format!(
                                     "zos_prepare_section_cache_store={} has_lobs={} prepare_has_lobs={} opened_has_lobs={}",
@@ -1134,7 +1169,7 @@ impl ClientInner {
                         return Ok(result);
                     }
                     Err(err) => {
-                        if let Some(section_number) = cache_section {
+                        if let Some(section_number) = allocated_section {
                             self.release_prepared_section(section_number);
                         }
                         return Err(err);
@@ -1155,7 +1190,8 @@ impl ClientInner {
             self.send_bytes(&send_buf).await?;
 
             let frames = self.read_prepare_reply_frames().await?;
-            let column_info = self.parse_prepare_reply(&frames)?;
+            let column_info =
+                column_info_with_select_aliases(sql, self.parse_prepare_reply(&frames)?);
             let result_descriptors = self.parse_prepare_result_descriptors(&frames);
 
             if params.is_empty() {
@@ -1288,7 +1324,7 @@ impl ClientInner {
         if self.zos_lob_internal_depth == 0
             && self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && !has_zos_lobs
-            && use_zos_non_lob_excsqlstt_output()
+            && sql_prefers_zos_non_lob_excsqlstt_output(sql)
         {
             return self
                 .execute_zos_select_with_excsqlstt_output(
@@ -3237,7 +3273,7 @@ impl Client {
                 }
             };
             let column_metadata = match guard.parse_prepare_reply(&frames) {
-                Ok(column_metadata) => column_metadata,
+                Ok(column_metadata) => column_info_with_select_aliases(sql, column_metadata),
                 Err(err) => {
                     guard.release_prepared_section(section_number);
                     return Err(err);
@@ -3432,6 +3468,405 @@ pub(crate) fn build_sqlstt_for_server(sql: &str, use_zos_format: bool) -> Vec<u8
     } else {
         db2_proto::commands::sqlstt::build_sqlstt(sql)
     }
+}
+
+fn column_info_with_select_aliases(sql: &str, mut columns: Vec<ColumnInfo>) -> Vec<ColumnInfo> {
+    if columns.is_empty() {
+        return columns;
+    }
+
+    let Some(aliases) = select_projection_aliases(sql) else {
+        return columns;
+    };
+    if aliases.len() != columns.len() {
+        return columns;
+    }
+
+    for (column, alias) in columns.iter_mut().zip(aliases) {
+        if let Some(alias) = alias {
+            column.name = alias;
+        }
+    }
+
+    columns
+}
+
+fn select_projection_aliases(sql: &str) -> Option<Vec<Option<String>>> {
+    let projection = top_level_select_projection(sql)?;
+    let items = split_top_level_select_items(projection);
+    if items.is_empty() {
+        return None;
+    }
+
+    Some(items.into_iter().map(explicit_select_alias).collect())
+}
+
+fn top_level_select_projection(sql: &str) -> Option<&str> {
+    let select_idx = find_top_level_keyword(sql, "SELECT", 0)?;
+    let select_end = select_idx + "SELECT".len();
+    let from_idx = find_top_level_keyword(sql, "FROM", select_end)?;
+    Some(&sql[select_end..from_idx])
+}
+
+fn split_top_level_select_items(projection: &str) -> Vec<&str> {
+    let bytes = projection.as_bytes();
+    let mut items = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut depth = 0usize;
+    let mut state = SqlScanState::Normal;
+
+    while i < bytes.len() {
+        match state {
+            SqlScanState::Normal => {
+                if starts_with_at(bytes, i, b"--") {
+                    state = SqlScanState::LineComment;
+                    i += 2;
+                    continue;
+                }
+                if starts_with_at(bytes, i, b"/*") {
+                    state = SqlScanState::BlockComment;
+                    i += 2;
+                    continue;
+                }
+                match bytes[i] {
+                    b'\'' => state = SqlScanState::SingleQuote,
+                    b'"' => state = SqlScanState::DoubleQuote,
+                    b'(' => depth += 1,
+                    b')' => depth = depth.saturating_sub(1),
+                    b',' if depth == 0 => {
+                        let item = projection[start..i].trim();
+                        if !item.is_empty() {
+                            items.push(item);
+                        }
+                        start = i + 1;
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            SqlScanState::SingleQuote => {
+                if bytes[i] == b'\'' {
+                    if starts_with_at(bytes, i + 1, b"'") {
+                        i += 2;
+                    } else {
+                        state = SqlScanState::Normal;
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            SqlScanState::DoubleQuote => {
+                if bytes[i] == b'"' {
+                    if starts_with_at(bytes, i + 1, b"\"") {
+                        i += 2;
+                    } else {
+                        state = SqlScanState::Normal;
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            SqlScanState::LineComment => {
+                if bytes[i] == b'\n' {
+                    state = SqlScanState::Normal;
+                }
+                i += 1;
+            }
+            SqlScanState::BlockComment => {
+                if starts_with_at(bytes, i, b"*/") {
+                    state = SqlScanState::Normal;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    let item = projection[start..].trim();
+    if !item.is_empty() {
+        items.push(item);
+    }
+
+    items
+}
+
+fn explicit_select_alias(item: &str) -> Option<String> {
+    let as_idx = find_last_top_level_keyword(item, "AS")?;
+    parse_alias_identifier(&item[as_idx + "AS".len()..])
+}
+
+fn parse_alias_identifier(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('"') {
+        return parse_quoted_identifier(trimmed);
+    }
+
+    let token_len = trimmed
+        .bytes()
+        .take_while(|byte| is_sql_identifier_byte(*byte))
+        .count();
+    if token_len == 0 {
+        return None;
+    }
+
+    Some(trimmed[..token_len].to_ascii_uppercase())
+}
+
+fn parse_quoted_identifier(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = text[1..].chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            if chars.peek().is_some_and(|next| *next == '"') {
+                chars.next();
+                out.push('"');
+            } else {
+                return Some(out);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SqlScanState {
+    Normal,
+    SingleQuote,
+    DoubleQuote,
+    LineComment,
+    BlockComment,
+}
+
+fn find_top_level_keyword(sql: &str, keyword: &str, start: usize) -> Option<usize> {
+    find_top_level_keyword_impl(sql, keyword, start, false)
+}
+
+fn find_last_top_level_keyword(sql: &str, keyword: &str) -> Option<usize> {
+    find_top_level_keyword_impl(sql, keyword, 0, true)
+}
+
+fn sql_prefers_zos_non_lob_excsqlstt_output(sql: &str) -> bool {
+    use_zos_non_lob_excsqlstt_output()
+        || (use_zos_like_predicate_excsqlstt_output() && sql_has_like_predicate(sql))
+}
+
+fn sql_uses_zos_like_predicate_large_package(sql: &str) -> bool {
+    use_zos_like_predicate_excsqlstt_output() && sql_has_like_predicate(sql)
+}
+
+fn sql_has_like_predicate(sql: &str) -> bool {
+    find_keyword_outside_literals(sql, "LIKE").is_some()
+}
+
+fn find_keyword_outside_literals(sql: &str, keyword: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let keyword = keyword.as_bytes();
+    let mut i = 0usize;
+    let mut state = SqlScanState::Normal;
+
+    while i < bytes.len() {
+        match state {
+            SqlScanState::Normal => {
+                if starts_with_at(bytes, i, b"--") {
+                    state = SqlScanState::LineComment;
+                    i += 2;
+                    continue;
+                }
+                if starts_with_at(bytes, i, b"/*") {
+                    state = SqlScanState::BlockComment;
+                    i += 2;
+                    continue;
+                }
+                match bytes[i] {
+                    b'\'' => {
+                        state = SqlScanState::SingleQuote;
+                        i += 1;
+                    }
+                    b'"' => {
+                        state = SqlScanState::DoubleQuote;
+                        i += 1;
+                    }
+                    _ => {
+                        if keyword_at(bytes, keyword, i) {
+                            return Some(i);
+                        }
+                        i += 1;
+                    }
+                }
+            }
+            SqlScanState::SingleQuote => {
+                if bytes[i] == b'\'' {
+                    if starts_with_at(bytes, i + 1, b"'") {
+                        i += 2;
+                    } else {
+                        state = SqlScanState::Normal;
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            SqlScanState::DoubleQuote => {
+                if bytes[i] == b'"' {
+                    if starts_with_at(bytes, i + 1, b"\"") {
+                        i += 2;
+                    } else {
+                        state = SqlScanState::Normal;
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            SqlScanState::LineComment => {
+                if bytes[i] == b'\n' {
+                    state = SqlScanState::Normal;
+                }
+                i += 1;
+            }
+            SqlScanState::BlockComment => {
+                if starts_with_at(bytes, i, b"*/") {
+                    state = SqlScanState::Normal;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn find_top_level_keyword_impl(
+    sql: &str,
+    keyword: &str,
+    start: usize,
+    last: bool,
+) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let keyword = keyword.as_bytes();
+    let mut i = start.min(bytes.len());
+    let mut depth = 0usize;
+    let mut state = SqlScanState::Normal;
+    let mut found = None;
+
+    while i < bytes.len() {
+        match state {
+            SqlScanState::Normal => {
+                if starts_with_at(bytes, i, b"--") {
+                    state = SqlScanState::LineComment;
+                    i += 2;
+                    continue;
+                }
+                if starts_with_at(bytes, i, b"/*") {
+                    state = SqlScanState::BlockComment;
+                    i += 2;
+                    continue;
+                }
+                match bytes[i] {
+                    b'\'' => {
+                        state = SqlScanState::SingleQuote;
+                        i += 1;
+                    }
+                    b'"' => {
+                        state = SqlScanState::DoubleQuote;
+                        i += 1;
+                    }
+                    b'(' => {
+                        depth += 1;
+                        i += 1;
+                    }
+                    b')' => {
+                        depth = depth.saturating_sub(1);
+                        i += 1;
+                    }
+                    _ => {
+                        if depth == 0 && keyword_at(bytes, keyword, i) {
+                            found = Some(i);
+                            if !last {
+                                return found;
+                            }
+                            i += keyword.len();
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            SqlScanState::SingleQuote => {
+                if bytes[i] == b'\'' {
+                    if starts_with_at(bytes, i + 1, b"'") {
+                        i += 2;
+                    } else {
+                        state = SqlScanState::Normal;
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            SqlScanState::DoubleQuote => {
+                if bytes[i] == b'"' {
+                    if starts_with_at(bytes, i + 1, b"\"") {
+                        i += 2;
+                    } else {
+                        state = SqlScanState::Normal;
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            SqlScanState::LineComment => {
+                if bytes[i] == b'\n' {
+                    state = SqlScanState::Normal;
+                }
+                i += 1;
+            }
+            SqlScanState::BlockComment => {
+                if starts_with_at(bytes, i, b"*/") {
+                    state = SqlScanState::Normal;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    found
+}
+
+fn keyword_at(bytes: &[u8], keyword: &[u8], index: usize) -> bool {
+    if index + keyword.len() > bytes.len() {
+        return false;
+    }
+    let prev_ok = index == 0 || !is_sql_identifier_byte(bytes[index - 1]);
+    let next_index = index + keyword.len();
+    let next_ok = next_index >= bytes.len() || !is_sql_identifier_byte(bytes[next_index]);
+    prev_ok
+        && next_ok
+        && bytes[index..next_index]
+            .iter()
+            .zip(keyword.iter())
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+}
+
+fn starts_with_at(bytes: &[u8], index: usize, needle: &[u8]) -> bool {
+    bytes
+        .get(index..index.saturating_add(needle.len()))
+        .is_some_and(|slice| slice == needle)
+}
+
+fn is_sql_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'#' | b'@')
 }
 
 fn optimize_zos_select_sql(sql: &str) -> Option<String> {
@@ -3931,6 +4366,15 @@ fn use_zos_non_lob_excsqlstt_output() -> bool {
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
         .unwrap_or(false)
+}
+
+fn use_zos_like_predicate_excsqlstt_output() -> bool {
+    env::var("DB2_ZOS_LIKE_PREDICATE_EXCSQLSTT")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(true)
 }
 
 fn use_zos_non_lob_open_data_drain() -> bool {
@@ -7040,11 +7484,63 @@ mod tests {
     }
 
     #[test]
+    fn select_projection_aliases_extract_explicit_aliases() {
+        let aliases = select_projection_aliases(
+            r#"
+            WITH src AS (SELECT COUNT(*) AS INNER_TOTAL FROM TBL_Q7R2)
+            SELECT COUNT(*) AS total_count,
+                   CAST(1 AS INTEGER) AS "One Value",
+                   NAME
+            FROM src
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            aliases,
+            vec![
+                Some("TOTAL_COUNT".to_string()),
+                Some("One Value".to_string()),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn column_info_with_select_aliases_replaces_generated_names() {
+        let columns = vec![
+            ColumnInfo::new("COL1".to_string(), "BigInt".to_string(), false),
+            ColumnInfo::new("NAME".to_string(), "VarChar(20)".to_string(), true),
+        ];
+
+        let columns = column_info_with_select_aliases(
+            "SELECT COUNT(*) AS total_count, NAME FROM TBL_Q7R2",
+            columns,
+        );
+
+        assert_eq!(columns[0].name, "TOTAL_COUNT");
+        assert_eq!(columns[1].name, "NAME");
+    }
+
+    #[test]
+    fn sql_has_like_predicate_ignores_literals_comments_and_identifiers() {
+        assert!(sql_has_like_predicate(
+            "SELECT COUNT(*) FROM T WHERE DOC NOT LIKE '%<DueDate>20%'"
+        ));
+        assert!(sql_has_like_predicate(
+            "SELECT * FROM T WHERE (DOC LIKE '%abc%')"
+        ));
+        assert!(!sql_has_like_predicate("SELECT 'LIKE' AS TEXT FROM T"));
+        assert!(!sql_has_like_predicate("SELECT LIKELY_COLUMN FROM T"));
+        assert!(!sql_has_like_predicate(
+            "SELECT * FROM T -- WHERE DOC LIKE '%x%'\nWHERE ID = 1"
+        ));
+    }
+
+    #[test]
     fn parse_fetch_first_row_limit_works_for_full_select() {
         assert_eq!(
-            parse_fetch_first_row_limit(
-                "SELECT * FROM SCM_M6T2.TBL_Q7R2 FETCH FIRST 3 ROWS ONLY"
-            ),
+            parse_fetch_first_row_limit("SELECT * FROM SCM_M6T2.TBL_Q7R2 FETCH FIRST 3 ROWS ONLY"),
             Some(3)
         );
         assert_eq!(parse_fetch_first_row_limit("SELECT * FROM T"), None);
@@ -7122,9 +7618,8 @@ mod tests {
         .unwrap();
 
         assert!(rewritten.contains("\"COL_E2K9_ID\""));
-        assert!(rewritten.contains(
-            "CAST(LENGTH(\"COL_F6N3_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_2\""
-        ));
+        assert!(rewritten
+            .contains("CAST(LENGTH(\"COL_F6N3_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_2\""));
         assert!(!rewritten.contains("DB2_GENERATED_ROWID_FOR_LOBS"));
         assert!(rewritten.ends_with("FETCH FIRST 3 ROWS ONLY"));
     }
@@ -7165,9 +7660,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(rewritten.contains(
-            "CAST(LENGTH(\"COL_F6N3_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_1\""
-        ));
+        assert!(rewritten
+            .contains("CAST(LENGTH(\"COL_F6N3_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_1\""));
         assert!(rewritten
             .contains("HEX(\"DB2_GENERATED_ROWID_FOR_LOBS\") AS \"DB2_GENERATED_ROWID_FOR_LOBS\""));
         assert!(!rewritten.contains("\"COL_E2K9_ID\""));
@@ -7444,9 +7938,9 @@ mod tests {
 
         assert!(sql.starts_with("SELECT ROW_NUMBER() OVER() AS \"DB2NODE_RN\", "));
         assert!(sql.contains("CAST(\"COL_E2K9_ID\" AS VARCHAR(128)) AS \"COL_E2K9_ID\""));
-        assert!(sql.contains(
-            "CAST(LENGTH(\"COL_F6N3_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_2\""
-        ));
+        assert!(
+            sql.contains("CAST(LENGTH(\"COL_F6N3_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_2\"")
+        );
         assert!(sql.contains(
             "CASE WHEN LENGTH(\"COL_F6N3_DOC\") >= 1 THEN CAST(SUBSTR(\"COL_F6N3_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_C2_K1\""
         ));

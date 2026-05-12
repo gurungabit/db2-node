@@ -244,6 +244,8 @@ node app.js
 
 This is the recommended default. If a z/OS LOB query cannot be proven clean after materialization, the driver disconnects that socket and warm-replaces it in the pool. This prevents stale `EXTDTA` from corrupting the next query and is the fastest mode for large CLOB workloads where preserving the exact same server session is not required.
 
+CLOB-like `LIKE` and `NOT LIKE` predicate scans that return aggregate or scalar results use a large statement package `EXCSQLSTT` path by default on Db2 for z/OS. Set `DB2_ZOS_LIKE_PREDICATE_EXCSQLSTT=0` only while diagnosing package-specific behavior.
+
 ### Active close mode
 
 Set `DB2_ZOS_LOB_CLOSE_AFTER_MATERIALIZE=1` when preserving the same DB2 connection is more important than individual large-LOB query latency:

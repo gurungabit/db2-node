@@ -257,12 +257,67 @@ fn decode_len_prefixed_string(data: &[u8], offset: usize) -> Result<(String, usi
     }
 
     let bytes = &data[start..end];
-    let text = if bytes.iter().all(|&b| (0x20..=0x7E).contains(&b)) {
-        String::from_utf8_lossy(bytes).to_string()
-    } else {
-        ebcdic037_to_utf8(bytes)
-    };
+    let text = decode_sqlcard_text(bytes);
     Ok((text, end))
+}
+
+fn decode_sqlcard_text(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+
+    let meaningful = bytes
+        .iter()
+        .filter(|byte| !is_sqlcard_token_separator(**byte))
+        .count();
+    let ascii_printable = bytes
+        .iter()
+        .filter(|byte| !is_sqlcard_token_separator(**byte))
+        .filter(|byte| (0x20..=0x7e).contains(*byte))
+        .count();
+
+    let decoded = if meaningful > 0 && ascii_printable * 100 / meaningful >= 80 {
+        decode_ascii_sqlcard_text(bytes)
+    } else {
+        decode_ebcdic_sqlcard_text(bytes)
+    };
+
+    normalize_sqlcard_text(&decoded)
+}
+
+fn decode_ascii_sqlcard_text(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| {
+            if is_sqlcard_token_separator(*byte) {
+                ' '
+            } else if (0x20..=0x7e).contains(byte) {
+                *byte as char
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
+fn decode_ebcdic_sqlcard_text(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for byte in bytes {
+        if is_sqlcard_token_separator(*byte) {
+            out.push(' ');
+        } else {
+            out.push_str(&ebcdic037_to_utf8(&[*byte]));
+        }
+    }
+    out
+}
+
+fn is_sqlcard_token_separator(byte: u8) -> bool {
+    matches!(byte, 0x00 | 0xff)
+}
+
+fn normalize_sqlcard_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -305,5 +360,31 @@ mod tests {
         let card = parse_sqlcard_data(&data).unwrap();
         assert_eq!(card.sqlcode, -804);
         assert_eq!(card.sqlstate, "07002");
+    }
+
+    #[test]
+    fn test_sqlcard_decodes_ascii_sqlerrmc_with_token_separators() {
+        let mut data = Vec::new();
+        data.push(0x00);
+        data.extend_from_slice(&(-905i32).to_be_bytes());
+        data.extend_from_slice(b"57014");
+        data.extend_from_slice(b"DSNXECP ");
+        data.push(0x00);
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..3 {
+            data.extend_from_slice(&0i32.to_le_bytes());
+        }
+        data.extend_from_slice(&[0x20; 11]);
+        data.extend_from_slice(&0u16.to_be_bytes());
+        let sqlerrmc = b"ASUTIME\xff000000000015015\xff00000100";
+        data.extend_from_slice(&(sqlerrmc.len() as u16).to_be_bytes());
+        data.extend_from_slice(sqlerrmc);
+        data.extend_from_slice(&0u16.to_be_bytes());
+
+        let card = parse_sqlcard_data(&data).unwrap();
+        assert_eq!(card.sqlcode, -905);
+        assert_eq!(card.sqlstate, "57014");
+        assert_eq!(card.sqlerrmc, "ASUTIME 000000000015015 00000100");
     }
 }

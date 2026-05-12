@@ -55,6 +55,8 @@ await client.query('INSERT INTO files (payload) VALUES (CAST(? AS BLOB(1M)))', [
 
 For Db2 for z/OS, LOB queries can leave external data frames queued after the requested rows are materialized. The default production mode disconnects and warm-replaces a connection when cleanup cannot be verified. Active close mode (`DB2_ZOS_LOB_CLOSE_AFTER_MATERIALIZE=1`) sends `CLSQRY`, drains remaining `EXTDTA`, and only reuses the socket after Db2 acknowledges the close.
 
+Aggregate or scalar queries that filter CLOB-like text with `LIKE` or `NOT LIKE` use a large statement package `EXCSQLSTT` path by default on Db2 for z/OS, even when the result itself is not a LOB. Set `DB2_ZOS_LIKE_PREDICATE_EXCSQLSTT=0` only while diagnosing package-specific behavior.
+
 See [Getting Started](../getting-started/index.md#db2-zos-lob-production-modes) for the production mode tradeoffs.
 
 ## Source Coverage
