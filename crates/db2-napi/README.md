@@ -4,7 +4,7 @@ Pure Rust DB2 driver for Node.js using the DRDA wire protocol directly. No IBM C
 
 ## Status
 
-`1.0.0` is the production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, TLS, and validated z/OS LOB materialization cleanup.
+`1.0.8` is the current production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, TLS, `ibm_db` compatibility entry points, and validated z/OS LOB materialization cleanup.
 
 ## Install
 
@@ -15,10 +15,10 @@ npm install db2-node
 You can also install the npm-packed artifact from a GitHub release:
 
 ```bash
-npm install https://github.com/db2-node/db2-node/releases/download/v1.0.0/db2-node-1.0.0.tgz
+npm install https://github.com/db2-node/db2-node/releases/download/v1.0.8/db2-node-1.0.8.tgz
 ```
 
-Replace `v1.0.0` and `1.0.0` with the release version you want.
+Replace `v1.0.8` and `1.0.8` with the release version you want.
 
 Prebuilt native binaries ship for supported platforms — no Rust toolchain needed:
 
@@ -55,6 +55,34 @@ CommonJS also works:
 ```js
 const { Client } = require('db2-node')
 ```
+
+## `ibm_db` Compatibility
+
+The CommonJS entry point also supports the common `ibm_db` shapes:
+
+```js
+const ibmdb = require('db2-node')
+
+const connStr = 'DATABASE=testdb;HOSTNAME=localhost;PORT=50000;PROTOCOL=TCPIP;UID=db2inst1;PWD=secret'
+
+const conn = await ibmdb.open(connStr)
+const rows = await conn.query('SELECT 1 AS V FROM SYSIBM.SYSDUMMY1')
+await conn.close()
+
+const db = ibmdb()
+await db.open(connStr)
+await db.close()
+
+const pool = new ibmdb.Pool()
+const pooled = await pool.open(connStr)
+await pooled.close()
+await pool.close()
+```
+
+`new ibmdb.Pool()` does not require connection config; use `pool.open(connStr)`,
+`pool.init(size, connStr)`, or `pool.initAsync(size, connStr)` in migration code.
+The modern `new Pool({ host, database, user, password })` form remains available,
+and the native constructor is exported as `Db2Pool`.
 
 ## Data Type Support
 
@@ -153,7 +181,7 @@ All connection options above, plus:
 | `maxLifetime` | `number` | `3600` | Recycle connections after this many seconds |
 | `healthCheckInterval` | `number` | `30` | Reuse an idle connection without a health-check round trip for this many seconds |
 
-`new Pool(config)` is intentionally synchronous and does not block on the network.
+`new Pool(config)` only builds local pool state and does not block on the network.
 Call `await pool.connect()` or `await pool.warmup()` during application startup to
 open the initial connection before measuring query latency. Without warmup, the
 first `pool.query()` includes TCP connect, TLS handshake, and DRDA authentication
@@ -324,7 +352,7 @@ The passive quiet path is fail-closed, but it is not a useful optimization for l
 
 ### Production validation
 
-The production soak for the `1.0.0` release passed:
+The production soak for the current `1.0.x` release line passed:
 
 | Mode | Cycles | Result |
 |------|--------|--------|

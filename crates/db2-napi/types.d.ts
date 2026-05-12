@@ -29,10 +29,25 @@ import type {
   JsColumnInfo,
 } from './index.js'
 
-export type ConnectionString = string | JsConnectionConfig
+export type ConnectionString = string | Record<string, any>
 export type BinaryParameter = Uint8Array | ArrayBuffer | number[]
 export type QueryParameter = string | number | boolean | null | BinaryParameter
 export type QueryParameters = QueryParameter[]
+
+export interface IbmDbPoolOptions {
+  maxPoolSize?: number
+  maxConnections?: number
+  connectTimeout?: number
+  queryTimeout?: number
+  idleTimeout?: number
+  maxLifetime?: number
+  healthCheckInterval?: number
+  currentSchema?: string
+  fetchSize?: number
+  ssl?: boolean
+  rejectUnauthorized?: boolean
+  sslClientHostnameValidation?: string
+}
 
 export class Client {
   constructor(config: JsConnectionConfig)
@@ -45,6 +60,29 @@ export class Client {
 }
 
 export class Pool {
+  constructor(config?: JsPoolConfig | IbmDbPoolOptions)
+  connect(callback?: (err?: Error | null) => void): Promise<void> | void
+  warmup(callback?: (err: Error | null, created?: number) => void): Promise<number> | void
+  query(sql: string, params?: QueryParameters): Promise<any>
+  query(sql: string, callback: (err: Error | null, result: any) => void): void
+  query(sql: string, params: QueryParameters, callback: (err: Error | null, result: any) => void): void
+  acquire(): Promise<Client>
+  acquire(callback: (err: Error | null, client: Client) => void): void
+  release(client: Client | JsClient, callback?: (err?: Error | null) => void): Promise<void> | void
+  close(callback?: (err?: Error | null) => void): Promise<void> | void
+  idleCount(): Promise<number>
+  activeCount(): Promise<number>
+  totalCount(): Promise<number>
+  maxConnections(callback?: (err: Error | null, count?: number) => void): number | void
+  open(connectionString: ConnectionString, callback: (err: Error | null, conn: Database) => void): void
+  open(connectionString: ConnectionString): Promise<Database>
+  init(size: number, connectionString: ConnectionString): boolean
+  initAsync(size: number, connectionString: ConnectionString, callback?: (err?: Error | null) => void): Promise<void> | void
+  setMaxPoolSize(size: number): boolean
+  setConnectTimeout(timeout: number): boolean
+}
+
+export class Db2Pool {
   constructor(config: JsPoolConfig)
   connect(): Promise<void>
   warmup(): Promise<number>
@@ -86,91 +124,74 @@ export class ODBCResult {
   diagnostics: string[]
   fetch(callback: (err: Error | null, row: any | false) => void): void
   fetch(): Promise<any | false>
-  fetchSync(): any | false
   fetchAll(callback: (err: Error | null, rows: any[]) => void): void
   fetchAll(): Promise<any[]>
-  fetchAllSync(): any[]
   fetchN(count: number, callback: (err: Error | null, rows: any[]) => void): void
   fetchN(count: number): Promise<any[]>
-  fetchNSync(count: number): any[]
-  getColumnNamesSync(): string[]
-  getColumnMetadataSync(): Array<Record<string, any>>
-  getSQLErrorSync(): null
   close(callback?: (err?: Error | null) => void): Promise<void> | void
-  closeSync(): boolean
 }
 
 export class ODBCStatement {
   bind(params: QueryParameters, callback?: (err?: Error | null) => void): Promise<void> | void
-  bindSync(params: QueryParameters): boolean
   execute(callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
   execute(params?: QueryParameters): Promise<ODBCResult>
   execute(params: QueryParameters, callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
-  executeSync(params?: QueryParameters): never
   executeNonQuery(params?: QueryParameters): Promise<number>
   executeNonQuery(params: QueryParameters, callback: (err: Error | null, rowCount: number) => void): void
-  executeNonQuerySync(params?: QueryParameters): never
   close(callback?: (err?: Error | null) => void): Promise<void> | void
-  closeSync(): boolean
 }
 
 export class Database {
+  open(connectionString: ConnectionString, callback: (err: Error | null, result?: boolean) => void): void
+  open(connectionString: ConnectionString, options: Record<string, any>, callback: (err: Error | null, result?: boolean) => void): void
+  open(connectionString: ConnectionString, options?: Record<string, any>): Promise<boolean>
   query(sql: string | { sql: string; params?: QueryParameters; noResults?: boolean }, callback: IbmDbCallback<any[]>): void
   query(sql: string | { sql: string; params?: QueryParameters; noResults?: boolean }, params?: QueryParameters): Promise<any[]>
   query(sql: string | { sql: string; params?: QueryParameters; noResults?: boolean }, params: QueryParameters, callback: IbmDbCallback<any[]>): void
-  querySync(sql: string, params?: QueryParameters): never
   queryResult(sql: string, callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
   queryResult(sql: string, params?: QueryParameters): Promise<ODBCResult>
   queryResult(sql: string, params: QueryParameters, callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
-  queryResultSync(sql: string, params?: QueryParameters): never
   queryStream(sql: string, params?: QueryParameters): any
   prepare(sql: string, callback: (err: Error | null, stmt: ODBCStatement) => void): void
   prepare(sql: string): Promise<ODBCStatement>
-  prepareSync(sql: string): never
   beginTransaction(callback?: (err?: Error | null) => void): Promise<void> | void
-  beginTransactionSync(): never
   commitTransaction(callback?: (err?: Error | null) => void): Promise<void> | void
-  commitTransactionSync(): never
   rollbackTransaction(callback?: (err?: Error | null) => void): Promise<void> | void
-  rollbackTransactionSync(): never
   close(callback?: (err?: Error | null) => void): Promise<void> | void
-  closeSync(): boolean
   setIsolationLevel(isolationLevel: number): boolean
   setAttr(attributeName: number | string, value: any, callback?: (err?: Error | null) => void): Promise<boolean> | void
-  setAttrSync(attributeName: number | string, value: any): boolean
   getInfo(infoType: number | string, callback?: (err: Error | null, value: any) => void): Promise<any> | void
-  getInfoSync(infoType: number | string): never
 }
 
 export class CompatPool {
-  constructor(config?: JsPoolConfig)
+  constructor(config?: JsPoolConfig | IbmDbPoolOptions)
   connect(callback?: (err?: Error | null) => void): Promise<void> | void
   warmup(callback?: (err: Error | null, created?: number) => void): Promise<number> | void
   query(sql: string, params?: QueryParameters): Promise<any>
   query(sql: string, callback: (err: Error | null, result: any) => void): void
   query(sql: string, params: QueryParameters, callback: (err: Error | null, result: any) => void): void
-  acquire(): Promise<JsClient>
-  acquire(callback: (err: Error | null, client: JsClient) => void): void
-  release(client: JsClient, callback?: (err?: Error | null) => void): Promise<void> | void
+  acquire(): Promise<Client>
+  acquire(callback: (err: Error | null, client: Client) => void): void
+  release(client: Client | JsClient, callback?: (err?: Error | null) => void): Promise<void> | void
   close(callback?: (err?: Error | null) => void): Promise<void> | void
-  closeSync(): boolean
   idleCount(callback?: (err: Error | null, count?: number) => void): Promise<number> | void
   activeCount(callback?: (err: Error | null, count?: number) => void): Promise<number> | void
   totalCount(callback?: (err: Error | null, count?: number) => void): Promise<number> | void
   maxConnections(callback?: (err: Error | null, count?: number) => void): number | void
   open(connectionString: ConnectionString, callback: (err: Error | null, conn: Database) => void): void
   open(connectionString: ConnectionString): Promise<Database>
-  openSync(connectionString: ConnectionString): never
   init(size: number, connectionString: ConnectionString): boolean
   initAsync(size: number, connectionString: ConnectionString, callback?: (err?: Error | null) => void): Promise<void> | void
   setMaxPoolSize(size: number): boolean
+  setConnectTimeout(timeout: number): boolean
 }
 
 export const IbmDbPool: typeof CompatPool
 
+export default function createDatabase(options?: Record<string, any>): Database
 export function open(connectionString: ConnectionString, callback: (err: Error | null, conn: Database) => void): void
 export function open(connectionString: ConnectionString, options: Record<string, any>, callback: (err: Error | null, conn: Database) => void): void
 export function open(connectionString: ConnectionString, options?: Record<string, any>): Promise<Database>
-export function openSync(connectionString: ConnectionString, options?: Record<string, any>): never
+export function close(db?: any): void
 export function debug(value: boolean): boolean
 export function convertRowsToColumns(rows: any[][]): { params: any[]; ArraySize: number }

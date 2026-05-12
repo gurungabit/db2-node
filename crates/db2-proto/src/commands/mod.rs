@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn test_build_pkgnamcsn_ebcdic_names() {
         let bytes = build_pkgnamcsn_ebcdic_names(
-            "DDFIC0A",
+            "DBX9Q2A",
             DEFAULT_RDBCOLID,
             DEFAULT_PKGID,
             &DEFAULT_PKGCNSTKN,
@@ -126,7 +126,7 @@ mod tests {
         );
 
         assert_eq!(bytes.len(), 64);
-        assert_eq!(&bytes[..7], &[0xC4, 0xC4, 0xC6, 0xC9, 0xC3, 0xF0, 0xC1]);
+        assert_eq!(&bytes[..7], &[0xC4, 0xC2, 0xE7, 0xF9, 0xD8, 0xF2, 0xC1]);
         assert_eq!(bytes[7], 0x40);
         assert_eq!(&bytes[54..62], b"SYSLVL01");
         assert_eq!(&bytes[62..64], &4u16.to_be_bytes());

@@ -41,6 +41,7 @@ interface PoolConfig extends ConnectionConfig {
   maxConnections?: number;    // default: 10
   idleTimeout?: number;       // seconds, default: 600 (10 min)
   maxLifetime?: number;       // seconds, default: 3600 (1 hour)
+  healthCheckInterval?: number; // seconds, default: 30
 }
 ```
 
@@ -198,15 +199,26 @@ Closes the current connection to the DB2 server. The same `Client` instance can 
 
 ## Pool
 
-The `Pool` class manages a pool of reusable connections for concurrent access.
+The `Pool` class manages reusable DB2 connections for concurrent access. It
+supports both the modern config-object constructor and the CommonJS `ibm_db`
+compatibility shape.
 
 ### Constructor
 
 ```typescript
-new Pool(config: PoolConfig)
+new Pool(config?: PoolConfig | IbmDbPoolOptions)
 ```
 
-Creates a new connection pool. Connections are created lazily on first use. The pool uses a semaphore to enforce `maxConnections`.
+When `config` contains connection settings such as `host`, `database`, `user`,
+and `password`, `Pool` creates a native `db2-node` pool. Connections are created
+lazily on first use, and the pool uses a semaphore to enforce `maxConnections`.
+
+When called as `new Pool()` or with pool-only options such as `maxPoolSize`,
+it behaves like `ibm_db.Pool`: call `pool.open(connectionString)`,
+`pool.init(size, connectionString)`, or `pool.initAsync(size, connectionString)`
+to initialize or acquire `Database` handles.
+
+The explicit native-style constructor is also exported as `Db2Pool`.
 
 ### pool.query()
 
@@ -272,7 +284,26 @@ Returns the total number of connections (idle + active).
 maxConnections(): number
 ```
 
-Returns the configured maximum number of connections (synchronous).
+Returns the configured maximum number of connections.
+
+### pool.open()
+
+```typescript
+open(connectionString: string | Record<string, any>): Promise<Database>
+```
+
+`ibm_db` compatibility API. Opens or reuses a pooled `Database` handle for the
+given IBM-style connection string or connection object. Callback style is also
+supported.
+
+### pool.init() / pool.initAsync()
+
+```typescript
+init(size: number, connectionString: string | Record<string, any>): boolean
+initAsync(size: number, connectionString: string | Record<string, any>): Promise<void>
+```
+
+Initializes a compatibility pool with a fixed max size for a connection string.
 
 ---
 

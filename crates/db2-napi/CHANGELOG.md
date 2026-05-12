@@ -2,6 +2,20 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.8](https://github.com/db2-node/db2-node/releases/tag/v1.0.8) (2026-05-12)
+
+### Compatibility
+
+- make the CommonJS entry point callable like `ibm_db`
+- make `new ibmdb.Pool()` work without connection config and support `open`, `init`, `initAsync`, and pool sizing APIs
+- keep the async native-style pool path available while exposing the explicit `Db2Pool` constructor
+- normalize IBM-style connection strings and connection objects through the compatibility API
+
+### Documentation
+
+- document selected `ibm_db` migration entry points
+- replace domain-specific fixture identifiers with neutral randomized test values
+
 ## [1.0.7](https://github.com/db2-node/db2-node/releases/tag/v1.0.7) (2026-05-08)
 
 ### Release

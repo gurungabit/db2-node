@@ -15,6 +15,7 @@ export const NativeTransaction = compat.NativeTransaction
 
 export const Client = compat.Client
 export const Pool = compat.Pool
+export const Db2Pool = compat.Db2Pool
 export const CompatPool = compat.CompatPool
 export const IbmDbPool = compat.IbmDbPool
 export const Database = compat.Database
@@ -24,7 +25,7 @@ export const PreparedStatement = compat.PreparedStatement
 export const Transaction = compat.Transaction
 
 export const open = compat.open
-export const openSync = compat.openSync
+export const close = compat.close
 export const debug = compat.debug
 export const convertRowsToColumns = compat.convertRowsToColumns
 

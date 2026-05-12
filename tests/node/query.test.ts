@@ -1,6 +1,6 @@
 /**
  * Query execution tests.
- * Ref: ibm_db test-query-select.js, test-querySync-select.js
+ * Ref: ibm_db test-query-select.js
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';

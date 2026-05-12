@@ -130,7 +130,8 @@ Transactions also support prepared statements via `tx.prepare()`.
 
 ## Connection Pool
 
-For applications with concurrent database access:
+For applications with concurrent database access, `Pool` supports the modern
+config-object API and the common `ibm_db` pool shape:
 
 ```typescript
 import { Pool } from 'db2-node';
@@ -158,6 +159,22 @@ try {
 await pool.close();
 ```
 
+CommonJS callers migrating from `ibm_db` can create a pool without connection
+config and open databases by connection string:
+
+```javascript
+const ibmdb = require('db2-node');
+
+const connStr = 'DATABASE=MYDB;HOSTNAME=localhost;PORT=50000;PROTOCOL=TCPIP;UID=db2inst1;PWD=password';
+const pool = new ibmdb.Pool();
+
+const db = await pool.open(connStr);
+const rows = await db.query('SELECT COUNT(*) AS cnt FROM employees');
+
+await db.close();
+await pool.close();
+```
+
 ### Pool Options
 
 All connection options above, plus:
@@ -168,6 +185,7 @@ All connection options above, plus:
 | `maxConnections` | `number` | `10` | Maximum total connections |
 | `idleTimeout` | `number` | `600` | Close idle connections after this many seconds (10 min) |
 | `maxLifetime` | `number` | `3600` | Recycle connections after this many seconds (1 hour) |
+| `healthCheckInterval` | `number` | `30` | Reuse an idle connection without a health-check round trip for this many seconds |
 
 ## TLS / SSL
 
@@ -238,7 +256,7 @@ The driver sends `CLSQRY`, drains remaining `EXTDTA`, waits for DB2's close ackn
 
 Keep `DB2_ZOS_LOB_TRUST_PASSIVE_TAIL_QUIET` off in production. It is fail-closed, but it is not a useful performance path for large z/OS CLOB workloads.
 
-Production soak coverage for the `1.0.0` release:
+Production soak coverage for the current `1.0.x` release line:
 
 | Mode | Cycles | Result |
 |------|--------|--------|

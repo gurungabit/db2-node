@@ -42,12 +42,6 @@ function callbackOrPromiseMany(work, callback, mapValues) {
   return promise.then((values) => values[0])
 }
 
-function unsupportedSync(name) {
-  throw new Error(
-    `${name} is not supported by db2-node's ibm_db compatibility layer; use the async/callback API`
-  )
-}
-
 function normalizeKey(key) {
   return String(key || '')
     .trim()
@@ -59,6 +53,178 @@ function parseBool(value) {
   if (typeof value === 'boolean') return value
   const normalized = String(value || '').trim().toLowerCase()
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
+}
+
+function hasConnectionConfig(value) {
+  if (!value || typeof value !== 'object') return false
+  return Object.keys(value).some((key) => {
+    const normalized = normalizeKey(key)
+    return (
+      normalized === 'HOST' ||
+      normalized === 'HOSTNAME' ||
+      normalized === 'SERVER' ||
+      normalized === 'DATABASE' ||
+      normalized === 'DB' ||
+      normalized === 'DSN' ||
+      normalized === 'UID' ||
+      normalized === 'USERID' ||
+      normalized === 'USER' ||
+      normalized === 'PWD' ||
+      normalized === 'PASSWORD'
+    )
+  })
+}
+
+function assignConnectionConfigValue(config, key, value, fromConnectionString = false) {
+  if (value == null) return
+  const normalized = normalizeKey(key)
+  const asNumber = () => Number(value)
+  const asString = () => String(value)
+  const timeoutMultiplier =
+    (fromConnectionString ||
+      (key !== 'connectTimeout' && key !== 'queryTimeout' && key !== 'frameDrainTimeout'))
+      ? 1000
+      : 1
+
+  switch (normalized) {
+    case 'HOST':
+    case 'HOSTNAME':
+    case 'SERVER':
+      config.host = asString()
+      break
+    case 'DATABASE':
+    case 'DB':
+    case 'DSN':
+      config.database = asString()
+      break
+    case 'UID':
+    case 'USERID':
+    case 'USER':
+      config.user = asString()
+      break
+    case 'PWD':
+    case 'PASSWORD':
+      config.password = asString()
+      break
+    case 'PORT':
+      config.port = asNumber()
+      break
+    case 'SECURITY':
+      if (String(value).trim().toLowerCase() === 'ssl') config.ssl = true
+      break
+    case 'SSL':
+      config.ssl = String(value).trim().toLowerCase() === 'ssl' || parseBool(value)
+      break
+    case 'REJECTUNAUTHORIZED':
+      config.rejectUnauthorized = parseBool(value)
+      break
+    case 'SSLSERVERCERTIFICATE':
+    case 'CACERT':
+      config.ssl = true
+      config.caCert = asString()
+      if (normalized === 'SSLSERVERCERTIFICATE' && config.sslClientHostnameValidation == null) {
+        config.sslClientHostnameValidation = 'OFF'
+      }
+      break
+    case 'SSLCLIENTHOSTNAMEVALIDATION':
+      config.sslClientHostnameValidation = asString()
+      break
+    case 'SECURITYMECHANISM':
+      config.securityMechanism = asString()
+      break
+    case 'ENCRYPTIONALGORITHM':
+      config.encryptionAlgorithm = asString()
+      break
+    case 'CREDENTIALENCODING':
+      config.credentialEncoding = asString()
+      break
+    case 'ENCRYPTEDPASSWORDENCODING':
+      config.encryptedPasswordEncoding = asString()
+      break
+    case 'ENCRYPTEDPASSWORDTOKENENCODING':
+      config.encryptedPasswordTokenEncoding = asString()
+      break
+    case 'CONNECTTIMEOUT':
+      config.connectTimeout = asNumber() * timeoutMultiplier
+      break
+    case 'QUERYTIMEOUT':
+      config.queryTimeout = asNumber() * timeoutMultiplier
+      break
+    case 'FRAMEDRAINTIMEOUT':
+      config.frameDrainTimeout = asNumber() * timeoutMultiplier
+      break
+    case 'CURRENTSCHEMA':
+      config.currentSchema = asString()
+      break
+    case 'TYPEDEFINITIONNAME':
+      config.typeDefinitionName = asString()
+      break
+    case 'FETCHSIZE':
+      config.fetchSize = asNumber()
+      break
+    case 'MINCONNECTIONS':
+      config.minConnections = asNumber()
+      break
+    case 'MAXCONNECTIONS':
+    case 'MAXPOOLSIZE':
+      config.maxConnections = asNumber()
+      break
+    case 'IDLETIMEOUT':
+      config.idleTimeout = asNumber()
+      break
+    case 'MAXLIFETIME':
+      config.maxLifetime = asNumber()
+      break
+    case 'HEALTHCHECKINTERVAL':
+      config.healthCheckInterval = asNumber()
+      break
+  }
+}
+
+function applyOpenOptions(config, options = {}) {
+  if (!options || typeof options !== 'object') return config
+  if (options.connectTimeout != null) {
+    config.connectTimeout = Number(options.connectTimeout) * 1000
+  }
+  if (options.queryTimeout != null) {
+    config.queryTimeout = Number(options.queryTimeout) * 1000
+  }
+  if (options.currentSchema != null) config.currentSchema = options.currentSchema
+  if (options.fetchSize != null) config.fetchSize = Number(options.fetchSize)
+  if (options.minConnections != null) config.minConnections = Number(options.minConnections)
+  if (options.maxConnections != null) config.maxConnections = Number(options.maxConnections)
+  if (options.maxPoolSize != null) config.maxConnections = Number(options.maxPoolSize)
+  if (options.idleTimeout != null) config.idleTimeout = Number(options.idleTimeout)
+  if (options.maxLifetime != null) config.maxLifetime = Number(options.maxLifetime)
+  if (options.healthCheckInterval != null) {
+    config.healthCheckInterval = Number(options.healthCheckInterval)
+  }
+  if (options.ssl != null) config.ssl = parseBool(options.ssl)
+  if (options.rejectUnauthorized != null) {
+    config.rejectUnauthorized = parseBool(options.rejectUnauthorized)
+  }
+  if (options.sslClientHostnameValidation != null) {
+    config.sslClientHostnameValidation = String(options.sslClientHostnameValidation)
+  }
+  return config
+}
+
+function validateConnectionConfig(config) {
+  if (config.host && String(config.host).includes(':') && config.port == null) {
+    const [host, port] = String(config.host).split(':')
+    config.host = host
+    config.port = Number(port)
+  }
+
+  if (!config.host) {
+    throw new Error(
+      'HOSTNAME/HOST is required by db2-node; DSN-only local ODBC strings are not supported'
+    )
+  }
+  if (!config.database) throw new Error('DATABASE or DSN is required')
+  if (!config.user) throw new Error('UID or USER is required')
+
+  return config
 }
 
 function normalizeParam(value) {
@@ -104,7 +270,12 @@ function emitCompatConnectionDiagnostics(config, source) {
 
 function parseConnectionString(connectionString, options = {}) {
   if (connectionString && typeof connectionString === 'object') {
-    return { ...connectionString }
+    const config = {}
+    for (const [key, value] of Object.entries(connectionString)) {
+      assignConnectionConfigValue(config, key, value)
+    }
+    applyOpenOptions(config, options)
+    return validateConnectionConfig(config)
   }
 
   if (typeof connectionString !== 'string') {
@@ -121,74 +292,12 @@ function parseConnectionString(connectionString, options = {}) {
     parts[key] = value
   }
 
-  const config = {
-    host: parts.HOSTNAME || parts.HOST || parts.SERVER || '',
-    database: parts.DATABASE || parts.DB || parts.DSN || '',
-    user: parts.UID || parts.USERID || parts.USER || '',
-    password: parts.PWD || parts.PASSWORD || '',
+  const config = {}
+  for (const [key, value] of Object.entries(parts)) {
+    assignConnectionConfigValue(config, key, value, true)
   }
-
-  if (config.host.includes(':') && !parts.PORT) {
-    const [host, port] = config.host.split(':')
-    config.host = host
-    config.port = Number(port)
-  } else if (parts.PORT) {
-    config.port = Number(parts.PORT)
-  }
-
-  const security = (parts.SECURITY || parts.SSL || '').toLowerCase()
-  if (security === 'ssl' || parseBool(parts.SSL)) {
-    config.ssl = true
-  }
-
-  if (parts.SSLSERVERCERTIFICATE) {
-    config.ssl = true
-    config.caCert = parts.SSLSERVERCERTIFICATE
-    config.sslClientHostnameValidation = 'OFF'
-  }
-  if (parts.SSLCLIENTHOSTNAMEVALIDATION) {
-    config.sslClientHostnameValidation = parts.SSLCLIENTHOSTNAMEVALIDATION
-  }
-
-  const schema = parts.CURRENTSCHEMA
-  if (schema) config.currentSchema = schema
-
-  if (parts.CONNECTTIMEOUT) {
-    config.connectTimeout = Number(parts.CONNECTTIMEOUT) * 1000
-  }
-  if (parts.QUERYTIMEOUT) {
-    config.queryTimeout = Number(parts.QUERYTIMEOUT) * 1000
-  }
-
-  if (options && typeof options === 'object') {
-    if (options.connectTimeout != null) {
-      config.connectTimeout = Number(options.connectTimeout) * 1000
-    }
-    if (options.queryTimeout != null) {
-      config.queryTimeout = Number(options.queryTimeout) * 1000
-    }
-    if (options.currentSchema != null) config.currentSchema = options.currentSchema
-    if (options.fetchSize != null) config.fetchSize = Number(options.fetchSize)
-    if (options.minConnections != null) config.minConnections = Number(options.minConnections)
-    if (options.maxConnections != null) config.maxConnections = Number(options.maxConnections)
-    if (options.ssl != null) config.ssl = parseBool(options.ssl)
-    if (options.rejectUnauthorized != null) {
-      config.rejectUnauthorized = parseBool(options.rejectUnauthorized)
-    }
-    if (options.sslClientHostnameValidation != null) {
-      config.sslClientHostnameValidation = String(options.sslClientHostnameValidation)
-    }
-  }
-
-  if (!config.host) {
-    throw new Error(
-      'HOSTNAME/HOST is required by db2-node; DSN-only local ODBC strings are not supported'
-    )
-  }
-  if (!config.database) throw new Error('DATABASE or DSN is required')
-  if (!config.user) throw new Error('UID or USER is required')
-
-  return config
+  applyOpenOptions(config, options)
+  return validateConnectionConfig(config)
 }
 
 function normalizeQueryArgs(sqlQuery, bindingParameters, callback) {
@@ -235,71 +344,38 @@ class ODBCResult {
 
   fetch(option, callback) {
     if (typeof option === 'function') callback = option
-    return callbackOrPromise(() => this.fetchSync(), callback)
-  }
-
-  fetchSync() {
-    if (this._closed) return false
-    if (this._offset >= this.rows.length) return false
-    return this.rows[this._offset++]
+    return callbackOrPromise(() => {
+      if (this._closed) return false
+      if (this._offset >= this.rows.length) return false
+      return this.rows[this._offset++]
+    }, callback)
   }
 
   fetchAll(option, callback) {
     if (typeof option === 'function') callback = option
-    return callbackOrPromise(() => this.fetchAllSync(), callback)
-  }
-
-  fetchAllSync() {
-    if (this._closed) return []
-    const rows = this.rows.slice(this._offset)
-    this._offset = this.rows.length
-    return rows
+    return callbackOrPromise(() => {
+      if (this._closed) return []
+      const rows = this.rows.slice(this._offset)
+      this._offset = this.rows.length
+      return rows
+    }, callback)
   }
 
   fetchN(count, option, callback) {
     if (typeof option === 'function') callback = option
-    return callbackOrPromise(() => this.fetchNSync(count), callback)
-  }
-
-  fetchNSync(count) {
-    if (this._closed) return []
-    const end = Math.min(this._offset + Number(count || 0), this.rows.length)
-    const rows = this.rows.slice(this._offset, end)
-    this._offset = end
-    return rows
-  }
-
-  getColumnNamesSync() {
-    return this.columns.map((column) => column.name)
-  }
-
-  getColumnMetadataSync() {
-    return this.columns.map((column, index) => ({
-      SQL_DESC_NAME: column.name,
-      SQL_DESC_TYPE_NAME: column.db2TypeName || column.typeName,
-      SQL_DESC_NULLABLE: column.nullable ? 1 : 0,
-      SQL_DESC_PRECISION: column.precision,
-      SQL_DESC_SCALE: column.scale,
-      index: index + 1,
-      name: column.name,
-      typeName: column.db2TypeName || column.typeName,
-      nullable: column.nullable,
-      precision: column.precision,
-      scale: column.scale,
-    }))
-  }
-
-  getSQLErrorSync() {
-    return null
+    return callbackOrPromise(() => {
+      if (this._closed) return []
+      const end = Math.min(this._offset + Number(count || 0), this.rows.length)
+      const rows = this.rows.slice(this._offset, end)
+      this._offset = end
+      return rows
+    }, callback)
   }
 
   close(callback) {
-    return callbackOrPromise(() => this.closeSync(), callback)
-  }
-
-  closeSync() {
-    this._closed = true
-    return true
+    return callbackOrPromise(() => {
+      this._closed = true
+    }, callback)
   }
 }
 
@@ -312,13 +388,8 @@ class ODBCStatement {
 
   bind(bindingParameters, callback) {
     return callbackOrPromise(() => {
-      this.bindSync(bindingParameters)
+      this._boundParams = Array.isArray(bindingParameters) ? bindingParameters : []
     }, callback)
-  }
-
-  bindSync(bindingParameters) {
-    this._boundParams = Array.isArray(bindingParameters) ? bindingParameters : []
-    return true
   }
 
   execute(bindingParameters, callback) {
@@ -332,10 +403,6 @@ class ODBCStatement {
       callback,
       (result) => [result, undefined]
     )
-  }
-
-  executeSync() {
-    return unsupportedSync('ODBCStatement.executeSync')
   }
 
   executeNonQuery(bindingParameters, callback) {
@@ -353,10 +420,6 @@ class ODBCStatement {
     )
   }
 
-  executeNonQuerySync() {
-    return unsupportedSync('ODBCStatement.executeNonQuerySync')
-  }
-
   close(closeOption, callback) {
     if (typeof closeOption === 'function') callback = closeOption
     return callbackOrPromise(async () => {
@@ -367,13 +430,6 @@ class ODBCStatement {
     }, callback)
   }
 
-  closeSync() {
-    if (!this._closed) {
-      this._closed = true
-      this._stmt.close().catch(() => {})
-    }
-    return true
-  }
 }
 
 class Database {
@@ -383,6 +439,7 @@ class Database {
     this._pool = pool
     this._closed = false
     this._transaction = null
+    this.connected = Boolean(client || pool)
   }
 
   _executor() {
@@ -394,6 +451,24 @@ class Database {
     if (!this._pool) throw new Error('Database is not connected')
     this._client = await this._pool.acquire()
     return this._client
+  }
+
+  open(connectionString, options, callback) {
+    if (typeof options === 'function') {
+      callback = options
+      options = undefined
+    }
+    return callbackOrPromise(async () => {
+      if (this.connected) await this.close()
+      const db = await open(connectionString, options)
+      this._client = db._client
+      this._onClose = db._onClose
+      this._pool = db._pool
+      this._closed = false
+      this._transaction = null
+      this.connected = true
+      return true
+    }, callback)
   }
 
   query(sqlQuery, bindingParameters, callback) {
@@ -412,10 +487,6 @@ class Database {
     )
   }
 
-  querySync() {
-    return unsupportedSync('Database.querySync')
-  }
-
   queryResult(sqlQuery, bindingParameters, callback) {
     const args = normalizeQueryArgs(sqlQuery, bindingParameters, callback)
     return callbackOrPromiseMany(
@@ -429,10 +500,6 @@ class Database {
       args.callback,
       (result) => [result, undefined]
     )
-  }
-
-  queryResultSync() {
-    return unsupportedSync('Database.queryResultSync')
   }
 
   queryStream(sqlQuery, bindingParameters) {
@@ -456,19 +523,11 @@ class Database {
     )
   }
 
-  prepareSync() {
-    return unsupportedSync('Database.prepareSync')
-  }
-
   beginTransaction(callback) {
     return callbackOrPromise(async () => {
       const client = await this._ensureClient()
       this._transaction = await client.beginTransaction()
     }, callback)
-  }
-
-  beginTransactionSync() {
-    return unsupportedSync('Database.beginTransactionSync')
   }
 
   commitTransaction(callback) {
@@ -480,10 +539,6 @@ class Database {
     }, callback)
   }
 
-  commitTransactionSync() {
-    return unsupportedSync('Database.commitTransactionSync')
-  }
-
   rollbackTransaction(callback) {
     return callbackOrPromise(async () => {
       if (this._transaction) {
@@ -491,10 +546,6 @@ class Database {
         this._transaction = null
       }
     }, callback)
-  }
-
-  rollbackTransactionSync() {
-    return unsupportedSync('Database.rollbackTransactionSync')
   }
 
   close(callback) {
@@ -511,12 +562,10 @@ class Database {
         await this._client.close()
       }
       this._client = null
+      this._pool = null
+      this._onClose = null
+      this.connected = false
     }, callback)
-  }
-
-  closeSync() {
-    this.close().catch(() => {})
-    return true
   }
 
   setIsolationLevel() {
@@ -528,10 +577,6 @@ class Database {
     return callbackOrPromise(() => true, callback)
   }
 
-  setAttrSync() {
-    return true
-  }
-
   getInfo(infoType, infoLength, callback) {
     if (typeof infoLength === 'function') callback = infoLength
     return callbackOrPromise(async () => {
@@ -540,9 +585,6 @@ class Database {
     }, callback)
   }
 
-  getInfoSync() {
-    return unsupportedSync('Database.getInfoSync')
-  }
 }
 
 function open(connectionString, options, callback) {
@@ -568,8 +610,24 @@ function open(connectionString, options, callback) {
   )
 }
 
-function openSync() {
-  return unsupportedSync('ibmdb.openSync')
+function stableConfigKey(config) {
+  const sorted = {}
+  for (const key of Object.keys(config).sort()) {
+    if (config[key] !== undefined) sorted[key] = config[key]
+  }
+  return JSON.stringify(sorted)
+}
+
+function connectionIdentityKey(config) {
+  const {
+    minConnections,
+    maxConnections,
+    idleTimeout,
+    maxLifetime,
+    healthCheckInterval,
+    ...identity
+  } = config
+  return stableConfigKey(identity)
 }
 
 class CompatPool {
@@ -577,18 +635,83 @@ class CompatPool {
     this._maxPoolSize = 10
     this._connections = new Set()
     this._native = null
-    this._nativeMode = Boolean(config)
+    this._nativeMode = false
+    this._pools = new Map()
+    this._connectionKey = null
+    this._openOptions = {}
 
     if (config) {
-      this._native = new JsPool(config)
+      if (hasConnectionConfig(config)) {
+        const nativeConfig = parseConnectionString(config)
+        this._maxPoolSize = nativeConfig.maxConnections || this._maxPoolSize
+        this._native = new JsPool(nativeConfig)
+        this._nativeMode = true
+        this._connectionKey = connectionIdentityKey(nativeConfig)
+        this._pools.set(this._connectionKey, {
+          pool: this._native,
+          config: nativeConfig,
+        })
+      } else {
+        this._applyPoolOptions(config)
+      }
+    }
+  }
+
+  _applyPoolOptions(options) {
+    if (!options || typeof options !== 'object') return
+    if (options.maxPoolSize != null) this._maxPoolSize = Number(options.maxPoolSize) || this._maxPoolSize
+    if (options.maxConnections != null) this._maxPoolSize = Number(options.maxConnections) || this._maxPoolSize
+    if (options.connectTimeout != null) this._openOptions.connectTimeout = Number(options.connectTimeout)
+    if (options.queryTimeout != null) this._openOptions.queryTimeout = Number(options.queryTimeout)
+    if (options.currentSchema != null) this._openOptions.currentSchema = options.currentSchema
+    if (options.fetchSize != null) this._openOptions.fetchSize = Number(options.fetchSize)
+    if (options.idleTimeout != null) this._openOptions.idleTimeout = Number(options.idleTimeout)
+    if (options.maxLifetime != null) this._openOptions.maxLifetime = Number(options.maxLifetime)
+    if (options.healthCheckInterval != null) {
+      this._openOptions.healthCheckInterval = Number(options.healthCheckInterval)
+    }
+    if (options.ssl != null) this._openOptions.ssl = options.ssl
+    if (options.rejectUnauthorized != null) {
+      this._openOptions.rejectUnauthorized = options.rejectUnauthorized
+    }
+    if (options.sslClientHostnameValidation != null) {
+      this._openOptions.sslClientHostnameValidation = options.sslClientHostnameValidation
     }
   }
 
   _requireNative() {
     if (!this._native) {
-      throw new Error('CompatPool is not initialized; pass a config to new CompatPool(config) or call init/initAsync/open first')
+      throw new Error('Pool is not initialized; pass a connection config to new Pool(config) or call init/initAsync/open first')
     }
     return this._native
+  }
+
+  _getOrCreateNativePool(connectionString, source, overrides = {}) {
+    const config = parseConnectionString(connectionString, this._openOptions)
+    Object.assign(config, overrides)
+    if (config.maxConnections == null) config.maxConnections = this._maxPoolSize
+    const key = connectionIdentityKey(config)
+    let entry = this._pools.get(key)
+    if (!entry) {
+      emitCompatConnectionDiagnostics(config, source)
+      if (this._native && !this._connectionKey) {
+        entry = {
+          pool: this._native,
+          config,
+        }
+        this._pools.set(key, entry)
+        this._connectionKey = key
+        return entry
+      }
+      entry = {
+        pool: new JsPool(config),
+        config,
+      }
+      this._pools.set(key, entry)
+    }
+    this._native = entry.pool
+    this._connectionKey = key
+    return entry
   }
 
   connect(callback) {
@@ -608,11 +731,17 @@ class CompatPool {
   }
 
   acquire(callback) {
-    return callbackOrPromise(() => this._requireNative().acquire(), callback)
+    return callbackOrPromise(
+      async () => Client.fromNative(await this._requireNative().acquire()),
+      callback
+    )
   }
 
   release(client, callback) {
-    return callbackOrPromise(() => this._requireNative().release(client), callback)
+    return callbackOrPromise(
+      () => this._requireNative().release(client && client._native ? client._native : client),
+      callback
+    )
   }
 
   idleCount(callback) {
@@ -629,9 +758,9 @@ class CompatPool {
 
   maxConnections(callback) {
     if (typeof callback === 'function') {
-      return callbackOrPromise(() => this._requireNative().maxConnections(), callback)
+      return callbackOrPromise(() => this._native ? this._native.maxConnections() : this._maxPoolSize, callback)
     }
-    return this._requireNative().maxConnections()
+    return this._native ? this._native.maxConnections() : this._maxPoolSize
   }
 
   setMaxPoolSize(size) {
@@ -639,13 +768,17 @@ class CompatPool {
     return true
   }
 
+  setConnectTimeout(timeout) {
+    this._openOptions.connectTimeout = Number(timeout)
+    return true
+  }
+
   init(size, connectionString) {
     this._maxPoolSize = Number(size) || this._maxPoolSize
-    const config = parseConnectionString(connectionString)
-    emitCompatConnectionDiagnostics(config, 'pool_init')
-    config.minConnections = this._maxPoolSize
-    config.maxConnections = this._maxPoolSize
-    this._native = new JsPool(config)
+    this._getOrCreateNativePool(connectionString, 'pool_init', {
+      minConnections: this._maxPoolSize,
+      maxConnections: this._maxPoolSize,
+    })
     this._nativeMode = false
     return true
   }
@@ -660,20 +793,15 @@ class CompatPool {
   open(connectionString, callback) {
     return callbackOrPromise(
       async () => {
-        if (!this._native) {
-          const config = parseConnectionString(connectionString)
-          emitCompatConnectionDiagnostics(config, 'pool_open')
-          config.maxConnections = this._maxPoolSize
-          this._native = new JsPool(config)
-        }
+        const { pool } = this._getOrCreateNativePool(connectionString, 'pool_open')
 
-        const validationClient = await this._native.acquire()
-        await this._native.release(validationClient)
+        const validationClient = await pool.acquire()
+        await pool.release(validationClient)
 
         const db = new Database(null, async (releasedClient) => {
-          if (releasedClient) await this._native.release(releasedClient)
+          if (releasedClient) await pool.release(releasedClient)
           this._connections.delete(db)
-        }, this._native)
+        }, pool)
         this._connections.add(db)
         return db
       },
@@ -681,27 +809,24 @@ class CompatPool {
     )
   }
 
-  openSync() {
-    return unsupportedSync('Pool.openSync')
-  }
-
   close(callback) {
-    if (this._nativeMode) {
-      return callbackOrPromise(() => this._requireNative().close(), callback)
-    }
     return callbackOrPromise(async () => {
       for (const connection of Array.from(this._connections)) {
         await connection.close().catch(() => {})
       }
       this._connections.clear()
-      if (this._native) await this._native.close()
+      const pools = new Set(Array.from(this._pools.values()).map((entry) => entry.pool))
+      if (this._native) pools.add(this._native)
+      for (const pool of pools) {
+        await pool.close()
+      }
+      this._pools.clear()
+      this._native = null
+      this._connectionKey = null
+      this._nativeMode = false
     }, callback)
   }
 
-  closeSync() {
-    this.close().catch(() => {})
-    return true
-  }
 }
 
 class PreparedStatement {
@@ -834,9 +959,21 @@ class Pool {
   }
 }
 
+function createDatabase() {
+  return new Database()
+}
+
 function debug(value) {
   debugEnabled = Boolean(value)
   return debugEnabled
+}
+
+function closeDatabaseHandle(db) {
+  if (db && typeof db === 'object') {
+    for (const key of Object.keys(db)) {
+      delete db[key]
+    }
+  }
 }
 
 function convertRowsToColumns(rows) {
@@ -851,7 +988,7 @@ function convertRowsToColumns(rows) {
   return { params, ArraySize: rows.length }
 }
 
-const api = {
+const api = Object.assign(createDatabase, {
   ...native,
   JsClient,
   JsPool,
@@ -862,7 +999,8 @@ const api = {
   NativePreparedStatement: JsPreparedStatement,
   NativeTransaction: JsTransaction,
   Client,
-  Pool,
+  Pool: CompatPool,
+  Db2Pool: Pool,
   CompatPool,
   IbmDbPool: CompatPool,
   Database,
@@ -871,7 +1009,7 @@ const api = {
   PreparedStatement,
   Transaction,
   open,
-  openSync,
+  close: closeDatabaseHandle,
   debug,
   convertRowsToColumns,
   _compat: {
@@ -881,7 +1019,7 @@ const api = {
     Database,
     Pool: CompatPool,
   },
-}
+})
 
 module.exports = api
 module.exports.default = api

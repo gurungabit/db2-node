@@ -7002,21 +7002,21 @@ mod tests {
     #[test]
     fn build_zos_select_star_metadata_query_uses_zos_catalog() {
         let query = build_zos_select_star_metadata_query(
-            "SELECT * FROM FIREINSP.INSP_RPT FETCH FIRST 3 ROWS ONLY",
+            "SELECT * FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 3 ROWS ONLY",
             None,
         )
         .unwrap();
 
         assert_eq!(
             query,
-            "SELECT NAME, COLTYPE FROM SYSIBM.SYSCOLUMNS WHERE TBCREATOR = 'FIREINSP' AND TBNAME = 'INSP_RPT' ORDER BY COLNO"
+            "SELECT NAME, COLTYPE FROM SYSIBM.SYSCOLUMNS WHERE TBCREATOR = 'SCM_M6T2' AND TBNAME = 'TBL_H8Q4' ORDER BY COLNO"
         );
     }
 
     #[test]
     fn build_zos_select_star_metadata_query_does_not_recurse_on_catalog_query() {
         assert!(build_zos_select_star_metadata_query(
-            "SELECT NAME, COLTYPE FROM SYSIBM.SYSCOLUMNS WHERE TBCREATOR = 'FIREINSP'",
+            "SELECT NAME, COLTYPE FROM SYSIBM.SYSCOLUMNS WHERE TBCREATOR = 'SCM_M6T2'",
             None,
         )
         .is_none());
@@ -7025,25 +7025,25 @@ mod tests {
     #[test]
     fn parse_simple_select_star_supports_current_schema_and_quoted_names() {
         let parsed = parse_simple_select_star(
-            " select * from \"FireInsp\".\"INSP_RPT\" fetch first 1 row only ",
+            " select * from \"ScmM6t2\".\"TBL_H8Q4\" fetch first 1 row only ",
             Some("IGNORED"),
         )
         .unwrap();
 
-        assert_eq!(parsed.schema, "FireInsp");
-        assert_eq!(parsed.table, "INSP_RPT");
+        assert_eq!(parsed.schema, "ScmM6t2");
+        assert_eq!(parsed.table, "TBL_H8Q4");
         assert_eq!(parsed.suffix, "fetch first 1 row only");
 
-        let parsed = parse_simple_select_star("SELECT * FROM INSP_RPT", Some("FIREINSP")).unwrap();
-        assert_eq!(parsed.schema, "FIREINSP");
-        assert_eq!(parsed.table, "INSP_RPT");
+        let parsed = parse_simple_select_star("SELECT * FROM TBL_H8Q4", Some("SCM_M6T2")).unwrap();
+        assert_eq!(parsed.schema, "SCM_M6T2");
+        assert_eq!(parsed.table, "TBL_H8Q4");
     }
 
     #[test]
     fn parse_fetch_first_row_limit_works_for_full_select() {
         assert_eq!(
             parse_fetch_first_row_limit(
-                "SELECT * FROM FIREINSP.PLCY_SNPST FETCH FIRST 3 ROWS ONLY"
+                "SELECT * FROM SCM_M6T2.TBL_Q7R2 FETCH FIRST 3 ROWS ONLY"
             ),
             Some(3)
         );
@@ -7054,11 +7054,11 @@ mod tests {
     fn optimize_zos_select_sql_adds_read_only_and_optimize_for_fetch_first() {
         assert_eq!(
             optimize_zos_select_sql(
-                "SELECT * FROM FIREINSP.PLCY_SNPST FETCH FIRST 3 ROWS ONLY"
+                "SELECT * FROM SCM_M6T2.TBL_Q7R2 FETCH FIRST 3 ROWS ONLY"
             )
             .as_deref(),
             Some(
-                "SELECT * FROM FIREINSP.PLCY_SNPST FETCH FIRST 3 ROWS ONLY FOR FETCH ONLY OPTIMIZE FOR 3 ROWS"
+                "SELECT * FROM SCM_M6T2.TBL_Q7R2 FETCH FIRST 3 ROWS ONLY FOR FETCH ONLY OPTIMIZE FOR 3 ROWS"
             )
         );
     }
@@ -7092,14 +7092,14 @@ mod tests {
                 Row::new(
                     vec!["NAME".to_string(), "COLTYPE".to_string()],
                     vec![
-                        Db2Value::VarChar("INSP_RPT_ID".to_string()),
+                        Db2Value::VarChar("COL_E2K9_ID".to_string()),
                         Db2Value::Char("DECIMAL ".to_string()),
                     ],
                 ),
                 Row::new(
                     vec!["NAME".to_string(), "COLTYPE".to_string()],
                     vec![
-                        Db2Value::VarChar("INSP_RPT_DETL_DOC".to_string()),
+                        Db2Value::VarChar("COL_F6N3_DOC".to_string()),
                         Db2Value::Char("CLOB    ".to_string()),
                     ],
                 ),
@@ -7115,15 +7115,15 @@ mod tests {
         );
 
         let rewritten = build_zos_select_star_lob_base_query(
-            "SELECT * FROM FIREINSP.INSP_RPT FETCH FIRST 3 ROWS ONLY",
+            "SELECT * FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 3 ROWS ONLY",
             None,
             &metadata,
         )
         .unwrap();
 
-        assert!(rewritten.contains("\"INSP_RPT_ID\""));
+        assert!(rewritten.contains("\"COL_E2K9_ID\""));
         assert!(rewritten.contains(
-            "CAST(LENGTH(\"INSP_RPT_DETL_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_2\""
+            "CAST(LENGTH(\"COL_F6N3_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_2\""
         ));
         assert!(!rewritten.contains("DB2_GENERATED_ROWID_FOR_LOBS"));
         assert!(rewritten.ends_with("FETCH FIRST 3 ROWS ONLY"));
@@ -7136,14 +7136,14 @@ mod tests {
                 Row::new(
                     vec!["COL1".to_string(), "COL2".to_string()],
                     vec![
-                        Db2Value::VarChar("INSP_RPT_ID".to_string()),
+                        Db2Value::VarChar("COL_E2K9_ID".to_string()),
                         Db2Value::Char("DECIMAL ".to_string()),
                     ],
                 ),
                 Row::new(
                     vec!["COL1".to_string(), "COL2".to_string()],
                     vec![
-                        Db2Value::VarChar("INSP_RPT_DETL_DOC".to_string()),
+                        Db2Value::VarChar("COL_F6N3_DOC".to_string()),
                         Db2Value::Char("CLOB(1M)".to_string()),
                     ],
                 ),
@@ -7159,18 +7159,18 @@ mod tests {
         );
 
         let rewritten = build_zos_select_star_lob_base_query(
-            "SELECT INSP_RPT_DETL_DOC, DB2_GENERATED_ROWID_FOR_LOBS FROM FIREINSP.INSP_RPT FETCH FIRST 1 ROW ONLY",
+            "SELECT COL_F6N3_DOC, DB2_GENERATED_ROWID_FOR_LOBS FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 1 ROW ONLY",
             None,
             &metadata,
         )
         .unwrap();
 
         assert!(rewritten.contains(
-            "CAST(LENGTH(\"INSP_RPT_DETL_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_1\""
+            "CAST(LENGTH(\"COL_F6N3_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_1\""
         ));
         assert!(rewritten
             .contains("HEX(\"DB2_GENERATED_ROWID_FOR_LOBS\") AS \"DB2_GENERATED_ROWID_FOR_LOBS\""));
-        assert!(!rewritten.contains("\"INSP_RPT_ID\""));
+        assert!(!rewritten.contains("\"COL_E2K9_ID\""));
     }
 
     #[test]
@@ -7179,7 +7179,7 @@ mod tests {
             vec![Row::new(
                 vec!["COL1".to_string(), "COL2".to_string()],
                 vec![
-                    Db2Value::VarChar("INSP_RPT_DETL_DOC".to_string()),
+                    Db2Value::VarChar("COL_F6N3_DOC".to_string()),
                     Db2Value::Char("CLOB    ".to_string()),
                 ],
             )],
@@ -7189,7 +7189,7 @@ mod tests {
         assert_eq!(
             catalog_columns_from_query_result(&metadata),
             vec![CatalogColumn {
-                name: "INSP_RPT_DETL_DOC".to_string(),
+                name: "COL_F6N3_DOC".to_string(),
                 coltype: "CLOB".to_string()
             }]
         );
@@ -7209,14 +7209,14 @@ mod tests {
                 Row::new(
                     vec!["NAME".to_string(), "COLTYPE".to_string()],
                     vec![
-                        Db2Value::VarChar("INSP_RPT_ID".to_string()),
+                        Db2Value::VarChar("COL_E2K9_ID".to_string()),
                         Db2Value::Char("DECIMAL ".to_string()),
                     ],
                 ),
                 Row::new(
                     vec!["NAME".to_string(), "COLTYPE".to_string()],
                     vec![
-                        Db2Value::VarChar("INSP_RPT_DETL_DOC".to_string()),
+                        Db2Value::VarChar("COL_F6N3_DOC".to_string()),
                         Db2Value::Char("CLOB    ".to_string()),
                     ],
                 ),
@@ -7231,8 +7231,8 @@ mod tests {
                 .map(|column| column.name.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "INSP_RPT_ID",
-                "INSP_RPT_DETL_DOC",
+                "COL_E2K9_ID",
+                "COL_F6N3_DOC",
                 "DB2_GENERATED_ROWID_FOR_LOBS"
             ]
         );
@@ -7241,17 +7241,17 @@ mod tests {
     #[test]
     fn selected_catalog_columns_omits_generated_rowid_for_select_star() {
         let parsed = parse_simple_select_star(
-            "SELECT * FROM FIREINSP.INSP_RPT FETCH FIRST 1 ROW ONLY",
+            "SELECT * FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 1 ROW ONLY",
             None,
         )
         .unwrap();
         let columns = vec![
             CatalogColumn {
-                name: "INSP_RPT_ID".to_string(),
+                name: "COL_E2K9_ID".to_string(),
                 coltype: "DECIMAL".to_string(),
             },
             CatalogColumn {
-                name: "INSP_RPT_DETL_DOC".to_string(),
+                name: "COL_F6N3_DOC".to_string(),
                 coltype: "CLOB".to_string(),
             },
             CatalogColumn {
@@ -7267,23 +7267,23 @@ mod tests {
                 .iter()
                 .map(|column| column.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["INSP_RPT_ID", "INSP_RPT_DETL_DOC"]
+            vec!["COL_E2K9_ID", "COL_F6N3_DOC"]
         );
     }
 
     #[test]
     fn build_zos_lob_per_column_queries_materialize_values() {
         let parsed = parse_simple_select_star(
-            "SELECT * FROM FIREINSP.INSP_RPT FETCH FIRST 3 ROWS ONLY",
+            "SELECT * FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 3 ROWS ONLY",
             None,
         )
         .unwrap();
         let decimal_column = CatalogColumn {
-            name: "INSP_RPT_ID".to_string(),
+            name: "COL_E2K9_ID".to_string(),
             coltype: "DECIMAL".to_string(),
         };
         let clob_column = CatalogColumn {
-            name: "INSP_RPT_DETL_DOC".to_string(),
+            name: "COL_F6N3_DOC".to_string(),
             coltype: "CLOB".to_string(),
         };
         let rowid_column = CatalogColumn {
@@ -7293,38 +7293,38 @@ mod tests {
 
         assert_eq!(
             build_zos_lob_row_probe_query(&parsed),
-            "SELECT 1 AS \"DB2NODE_ROW_EXISTS\" FROM FIREINSP.INSP_RPT FETCH FIRST 3 ROWS ONLY"
+            "SELECT 1 AS \"DB2NODE_ROW_EXISTS\" FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 3 ROWS ONLY"
         );
         assert_eq!(
             build_zos_lob_length_query(&parsed, &clob_column, 1),
-            "SELECT CAST(LENGTH(\"INSP_RPT_DETL_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN\" FROM (SELECT \"INSP_RPT_DETL_DOC\", ROW_NUMBER() OVER() AS \"DB2NODE_RN\" FROM FIREINSP.INSP_RPT FETCH FIRST 3 ROWS ONLY) AS DB2NODE_LOB_SRC WHERE \"DB2NODE_RN\" = 1"
+            "SELECT CAST(LENGTH(\"COL_F6N3_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN\" FROM (SELECT \"COL_F6N3_DOC\", ROW_NUMBER() OVER() AS \"DB2NODE_RN\" FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 3 ROWS ONLY) AS DB2NODE_LOB_SRC WHERE \"DB2NODE_RN\" = 1"
         );
         assert_eq!(
             build_zos_scalar_value_query(&parsed, &decimal_column, 2),
-            "SELECT CAST(\"INSP_RPT_ID\" AS VARCHAR(128)) AS \"INSP_RPT_ID\" FROM (SELECT \"INSP_RPT_ID\", ROW_NUMBER() OVER() AS \"DB2NODE_RN\" FROM FIREINSP.INSP_RPT FETCH FIRST 3 ROWS ONLY) AS DB2NODE_LOB_SRC WHERE \"DB2NODE_RN\" = 2"
+            "SELECT CAST(\"COL_E2K9_ID\" AS VARCHAR(128)) AS \"COL_E2K9_ID\" FROM (SELECT \"COL_E2K9_ID\", ROW_NUMBER() OVER() AS \"DB2NODE_RN\" FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 3 ROWS ONLY) AS DB2NODE_LOB_SRC WHERE \"DB2NODE_RN\" = 2"
         );
         assert_eq!(
             build_zos_scalar_value_query(&parsed, &rowid_column, 1),
-            "SELECT HEX(\"DB2_GENERATED_ROWID_FOR_LOBS\") AS \"DB2_GENERATED_ROWID_FOR_LOBS\" FROM (SELECT \"DB2_GENERATED_ROWID_FOR_LOBS\", ROW_NUMBER() OVER() AS \"DB2NODE_RN\" FROM FIREINSP.INSP_RPT FETCH FIRST 3 ROWS ONLY) AS DB2NODE_LOB_SRC WHERE \"DB2NODE_RN\" = 1"
+            "SELECT HEX(\"DB2_GENERATED_ROWID_FOR_LOBS\") AS \"DB2_GENERATED_ROWID_FOR_LOBS\" FROM (SELECT \"DB2_GENERATED_ROWID_FOR_LOBS\", ROW_NUMBER() OVER() AS \"DB2NODE_RN\" FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 3 ROWS ONLY) AS DB2NODE_LOB_SRC WHERE \"DB2NODE_RN\" = 1"
         );
     }
 
     #[test]
     fn build_zos_lob_chunk_set_query_fetches_one_piece_for_all_rows() {
         let parsed = parse_simple_select_star(
-            "SELECT * FROM FIREINSP.INSP_RPT FETCH FIRST 3 ROWS ONLY",
+            "SELECT * FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 3 ROWS ONLY",
             None,
         )
         .unwrap();
         let column = CatalogColumn {
-            name: "INSP_RPT_DETL_DOC".to_string(),
+            name: "COL_F6N3_DOC".to_string(),
             coltype: "CLOB".to_string(),
         };
 
         let sql = build_zos_lob_chunk_set_query(&parsed, &column, 16001, 16000, 3, 6);
 
         assert!(sql.starts_with("SELECT \"DB2NODE_RN\", "));
-        assert!(sql.contains("CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 16001, 16000) AS VARCHAR(16000))"));
+        assert!(sql.contains("CAST(SUBSTR(\"COL_F6N3_DOC\", 16001, 16000) AS VARCHAR(16000))"));
         assert!(sql.contains("ROW_NUMBER() OVER() AS \"DB2NODE_RN\""));
         assert!(sql.contains("WHERE \"DB2NODE_RN\" BETWEEN 3 AND 6"));
         assert!(!sql.contains("OFFSET"));
@@ -7333,12 +7333,12 @@ mod tests {
     #[test]
     fn build_zos_lob_chunk_grid_query_fetches_multiple_pieces_for_row_batch() {
         let parsed = parse_simple_select_star(
-            "SELECT * FROM FIREINSP.INSP_RPT FETCH FIRST 10 ROWS ONLY",
+            "SELECT * FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 10 ROWS ONLY",
             None,
         )
         .unwrap();
         let column = CatalogColumn {
-            name: "INSP_RPT_DETL_DOC".to_string(),
+            name: "COL_F6N3_DOC".to_string(),
             coltype: "CLOB".to_string(),
         };
 
@@ -7352,13 +7352,13 @@ mod tests {
 
         assert!(sql.starts_with("SELECT \"DB2NODE_RN\", "));
         assert!(sql.contains(
-            "CASE WHEN LENGTH(\"INSP_RPT_DETL_DOC\") >= 1 THEN CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_CHUNK_1\""
+            "CASE WHEN LENGTH(\"COL_F6N3_DOC\") >= 1 THEN CAST(SUBSTR(\"COL_F6N3_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_CHUNK_1\""
         ));
         assert!(sql.contains(
-            "CASE WHEN LENGTH(\"INSP_RPT_DETL_DOC\") >= 16001 THEN CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 16001, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_CHUNK_2\""
+            "CASE WHEN LENGTH(\"COL_F6N3_DOC\") >= 16001 THEN CAST(SUBSTR(\"COL_F6N3_DOC\", 16001, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_CHUNK_2\""
         ));
         assert!(sql.contains(
-            "CASE WHEN LENGTH(\"INSP_RPT_DETL_DOC\") >= 32001 THEN CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 32001, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_CHUNK_3\""
+            "CASE WHEN LENGTH(\"COL_F6N3_DOC\") >= 32001 THEN CAST(SUBSTR(\"COL_F6N3_DOC\", 32001, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_CHUNK_3\""
         ));
         assert!(sql.contains("WHERE \"DB2NODE_RN\" BETWEEN 1 AND 3"));
         assert!(!sql.contains("OFFSET"));
@@ -7367,21 +7367,21 @@ mod tests {
     #[test]
     fn build_zos_lob_combined_chunk_grid_query_fetches_multiple_lob_columns() {
         let parsed = parse_simple_select_star(
-            "SELECT * FROM FIREINSP.INSP_RPT FETCH FIRST 10 ROWS ONLY",
+            "SELECT * FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 10 ROWS ONLY",
             None,
         )
         .unwrap();
         let columns = vec![
             CatalogColumn {
-                name: "INSP_RPT_ID".to_string(),
+                name: "COL_E2K9_ID".to_string(),
                 coltype: "DECIMAL".to_string(),
             },
             CatalogColumn {
-                name: "INSP_RPT_DETL_DOC".to_string(),
+                name: "COL_F6N3_DOC".to_string(),
                 coltype: "CLOB".to_string(),
             },
             CatalogColumn {
-                name: "UNDWR_ACTN_DETL_DOC".to_string(),
+                name: "COL_G1R7_DOC".to_string(),
                 coltype: "CLOB".to_string(),
             },
         ];
@@ -7404,13 +7404,13 @@ mod tests {
 
         assert!(sql.starts_with("SELECT \"DB2NODE_RN\", "));
         assert!(sql.contains(
-            "CASE WHEN LENGTH(\"INSP_RPT_DETL_DOC\") >= 1 THEN CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_C2_K1\""
+            "CASE WHEN LENGTH(\"COL_F6N3_DOC\") >= 1 THEN CAST(SUBSTR(\"COL_F6N3_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_C2_K1\""
         ));
         assert!(sql.contains(
-            "CASE WHEN LENGTH(\"UNDWR_ACTN_DETL_DOC\") >= 1 THEN CAST(SUBSTR(\"UNDWR_ACTN_DETL_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_C3_K1\""
+            "CASE WHEN LENGTH(\"COL_G1R7_DOC\") >= 1 THEN CAST(SUBSTR(\"COL_G1R7_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_C3_K1\""
         ));
         assert!(sql.contains(
-            "SELECT \"INSP_RPT_DETL_DOC\", \"UNDWR_ACTN_DETL_DOC\", ROW_NUMBER() OVER() AS \"DB2NODE_RN\""
+            "SELECT \"COL_F6N3_DOC\", \"COL_G1R7_DOC\", ROW_NUMBER() OVER() AS \"DB2NODE_RN\""
         ));
         assert!(sql.contains("WHERE \"DB2NODE_RN\" BETWEEN 1 AND 10"));
         assert!(!sql.contains("OFFSET"));
@@ -7419,17 +7419,17 @@ mod tests {
     #[test]
     fn build_zos_lob_initial_combined_grid_query_carries_lengths_scalars_and_chunks() {
         let parsed = parse_simple_select_star(
-            "SELECT * FROM FIREINSP.INSP_RPT FETCH FIRST 10 ROWS ONLY",
+            "SELECT * FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 10 ROWS ONLY",
             None,
         )
         .unwrap();
         let columns = vec![
             CatalogColumn {
-                name: "INSP_RPT_ID".to_string(),
+                name: "COL_E2K9_ID".to_string(),
                 coltype: "DECIMAL".to_string(),
             },
             CatalogColumn {
-                name: "INSP_RPT_DETL_DOC".to_string(),
+                name: "COL_F6N3_DOC".to_string(),
                 coltype: "CLOB".to_string(),
             },
         ];
@@ -7443,12 +7443,12 @@ mod tests {
         let sql = build_zos_lob_initial_combined_grid_query(&parsed, &columns, &specs);
 
         assert!(sql.starts_with("SELECT ROW_NUMBER() OVER() AS \"DB2NODE_RN\", "));
-        assert!(sql.contains("CAST(\"INSP_RPT_ID\" AS VARCHAR(128)) AS \"INSP_RPT_ID\""));
+        assert!(sql.contains("CAST(\"COL_E2K9_ID\" AS VARCHAR(128)) AS \"COL_E2K9_ID\""));
         assert!(sql.contains(
-            "CAST(LENGTH(\"INSP_RPT_DETL_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_2\""
+            "CAST(LENGTH(\"COL_F6N3_DOC\") AS VARCHAR(32)) AS \"DB2NODE_LOB_LEN_2\""
         ));
         assert!(sql.contains(
-            "CASE WHEN LENGTH(\"INSP_RPT_DETL_DOC\") >= 1 THEN CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_C2_K1\""
+            "CASE WHEN LENGTH(\"COL_F6N3_DOC\") >= 1 THEN CAST(SUBSTR(\"COL_F6N3_DOC\", 1, 16000) AS VARCHAR(16000)) ELSE CAST(NULL AS VARCHAR(16000)) END AS \"DB2NODE_LOB_C2_K1\""
         ));
         assert!(sql.contains("FETCH FIRST 10 ROWS ONLY"));
         assert!(!sql.contains("OFFSET"));
@@ -7457,7 +7457,7 @@ mod tests {
     #[test]
     fn zos_lob_rows_per_batch_caps_estimated_reply_bytes() {
         let clob_column = CatalogColumn {
-            name: "INSP_RPT_DETL_DOC".to_string(),
+            name: "COL_F6N3_DOC".to_string(),
             coltype: "CLOB".to_string(),
         };
         let dbclob_column = CatalogColumn {
@@ -7478,7 +7478,7 @@ mod tests {
             false,
         )]));
         assert!(column_info_has_lob_hint(&[ColumnInfo::new(
-            "INSP_RPT_DETL_DOC".to_string(),
+            "COL_F6N3_DOC".to_string(),
             "CLOB".to_string(),
             true,
         )]));
@@ -7489,14 +7489,14 @@ mod tests {
         let key = format!("unit:descriptorless-non-lob:{}", line!());
         let columns = vec![
             ColumnInfo::with_precision(
-                "PROP_ID".to_string(),
+                "COL_A3F9_ID".to_string(),
                 "Decimal { precision: 11, scale: 0 }".to_string(),
                 false,
                 11,
                 0,
             ),
             ColumnInfo::new(
-                "UNDWR_INSTRUCT_TXT".to_string(),
+                "COL_J9V2_TXT".to_string(),
                 "VARCHAR(4000)".to_string(),
                 true,
             ),
@@ -7506,7 +7506,7 @@ mod tests {
 
         let cached = lookup_zos_select_metadata(&key).expect("descriptorless metadata cached");
         assert_eq!(cached.column_info.len(), 2);
-        assert_eq!(cached.column_info[1].name, "UNDWR_INSTRUCT_TXT");
+        assert_eq!(cached.column_info[1].name, "COL_J9V2_TXT");
         assert_eq!(cached.column_info[1].type_name, "VARCHAR(4000)");
         assert!(cached.result_descriptors.is_empty());
     }
@@ -7515,7 +7515,7 @@ mod tests {
     fn zos_select_metadata_cache_skips_descriptorless_lob_hints() {
         let key = format!("unit:descriptorless-lob:{}", line!());
         let columns = vec![ColumnInfo::new(
-            "INSP_RPT_DETL_DOC".to_string(),
+            "COL_F6N3_DOC".to_string(),
             "VarChar(32777)".to_string(),
             true,
         )];
@@ -7528,7 +7528,7 @@ mod tests {
     fn zos_select_metadata_cache_allows_descriptorless_generic_text() {
         let key = format!("unit:descriptorless-generic-text:{}", line!());
         let columns = vec![ColumnInfo::new(
-            "INSP_RPT_DETL_DOC".to_string(),
+            "COL_F6N3_DOC".to_string(),
             "VARCHAR".to_string(),
             true,
         )];
@@ -7541,14 +7541,14 @@ mod tests {
     fn zos_select_section_cache_allows_descriptorless_non_lob_columns() {
         let columns = vec![
             ColumnInfo::with_precision(
-                "PROP_ID".to_string(),
+                "COL_A3F9_ID".to_string(),
                 "Decimal { precision: 11, scale: 0 }".to_string(),
                 false,
                 11,
                 0,
             ),
             ColumnInfo::new(
-                "UNDWR_INSTRUCT_TXT".to_string(),
+                "COL_J9V2_TXT".to_string(),
                 "VARCHAR(4000)".to_string(),
                 true,
             ),
@@ -7561,12 +7561,12 @@ mod tests {
     fn zos_select_section_cache_skips_descriptorless_lob_hints() {
         let columns = vec![
             ColumnInfo::new(
-                "INSP_RPT_ID".to_string(),
+                "COL_E2K9_ID".to_string(),
                 "Decimal { precision: 11, scale: 0 }".to_string(),
                 false,
             ),
             ColumnInfo::new(
-                "INSP_RPT_DETL_DOC".to_string(),
+                "COL_F6N3_DOC".to_string(),
                 "VarChar(32777)".to_string(),
                 true,
             ),
@@ -7578,7 +7578,7 @@ mod tests {
     #[test]
     fn zos_select_section_cache_allows_descriptorless_generic_text() {
         let prepare_columns = vec![ColumnInfo::new(
-            "INSP_RPT_DETL_DOC".to_string(),
+            "COL_F6N3_DOC".to_string(),
             "VARCHAR".to_string(),
             true,
         )];
@@ -7589,7 +7589,7 @@ mod tests {
     #[test]
     fn result_columns_lob_route_detects_opened_native_lob_metadata() {
         let opened_columns = vec![ColumnInfo::new(
-            "INSP_RPT_DETL_DOC".to_string(),
+            "COL_F6N3_DOC".to_string(),
             "VarChar(32777)".to_string(),
             true,
         )];
@@ -7601,11 +7601,11 @@ mod tests {
     fn result_lob_materialization_detects_extdta_clob_values() {
         let result = QueryResult::with_rows(
             vec![Row::new(
-                vec!["INSP_RPT_DETL_DOC".to_string()],
+                vec!["COL_F6N3_DOC".to_string()],
                 vec![Db2Value::Clob("materialized clob".to_string())],
             )],
             vec![ColumnInfo::new(
-                "INSP_RPT_DETL_DOC".to_string(),
+                "COL_F6N3_DOC".to_string(),
                 "VARCHAR".to_string(),
                 true,
             )],
@@ -7618,7 +7618,7 @@ mod tests {
     fn zos_select_metadata_cache_can_evict_lobs_discovered_after_open() {
         let key = format!("unit:opened-lob-evict:{}", line!());
         let prepare_columns = vec![ColumnInfo::new(
-            "INSP_RPT_DETL_DOC".to_string(),
+            "COL_F6N3_DOC".to_string(),
             "VARCHAR(4000)".to_string(),
             true,
         )];
@@ -7749,8 +7749,8 @@ mod tests {
     #[test]
     fn rewrite_zos_lob_select_materializes_clob_columns() {
         let columns = vec![
-            ColumnInfo::new("INSP_RPT_ID".to_string(), "Decimal".to_string(), false),
-            ColumnInfo::new("INSP_RPT_DETL_DOC".to_string(), "Clob".to_string(), true),
+            ColumnInfo::new("COL_E2K9_ID".to_string(), "Decimal".to_string(), false),
+            ColumnInfo::new("COL_F6N3_DOC".to_string(), "Clob".to_string(), true),
             ColumnInfo::new(
                 "DB2_GENERATED_ROWID_FOR_LOBS".to_string(),
                 "RowId(40)".to_string(),
@@ -7759,13 +7759,13 @@ mod tests {
         ];
 
         let rewritten = rewrite_zos_lob_select(
-            "SELECT * FROM FIREINSP.INSP_RPT FETCH FIRST 3 ROWS ONLY",
+            "SELECT * FROM SCM_M6T2.TBL_H8Q4 FETCH FIRST 3 ROWS ONLY",
             &columns,
         )
         .unwrap();
 
         assert!(rewritten.contains(
-            "CAST(SUBSTR(\"INSP_RPT_DETL_DOC\", 1, 32704) AS VARCHAR(32704)) AS \"INSP_RPT_DETL_DOC\""
+            "CAST(SUBSTR(\"COL_F6N3_DOC\", 1, 32704) AS VARCHAR(32704)) AS \"COL_F6N3_DOC\""
         ));
         assert!(rewritten.contains("\"DB2_GENERATED_ROWID_FOR_LOBS\""));
         assert!(rewritten.ends_with("AS DB2NODE_LOB_SRC"));
@@ -7774,19 +7774,19 @@ mod tests {
     #[test]
     fn rewrite_zos_lob_select_ignores_non_lob_columns() {
         let columns = vec![ColumnInfo::new(
-            "PROP_ID".to_string(),
+            "COL_A3F9_ID".to_string(),
             "Decimal".to_string(),
             false,
         )];
 
-        assert!(rewrite_zos_lob_select("SELECT PROP_ID FROM T", &columns).is_none());
+        assert!(rewrite_zos_lob_select("SELECT COL_A3F9_ID FROM T", &columns).is_none());
     }
 
     #[test]
     fn column_info_for_cursor_fetch_uses_qrydsc_types_when_sqldard_types_are_unknown() {
         let columns = vec![
-            ColumnInfo::new("INSP_RPT_ID".to_string(), "Unknown".to_string(), true),
-            ColumnInfo::new("INSP_RPT_DETL_DOC".to_string(), "Unknown".to_string(), true),
+            ColumnInfo::new("COL_E2K9_ID".to_string(), "Unknown".to_string(), true),
+            ColumnInfo::new("COL_F6N3_DOC".to_string(), "Unknown".to_string(), true),
         ];
         let descriptors = vec![
             db2_proto::fdoca::ColumnDescriptor {
@@ -7818,9 +7818,9 @@ mod tests {
 
         let merged = column_info_for_cursor_fetch(&columns, &descriptors);
 
-        assert_eq!(merged[0].name, "INSP_RPT_ID");
+        assert_eq!(merged[0].name, "COL_E2K9_ID");
         assert_eq!(merged[0].type_name, "Decimal { precision: 11, scale: 0 }");
-        assert_eq!(merged[1].name, "INSP_RPT_DETL_DOC");
+        assert_eq!(merged[1].name, "COL_F6N3_DOC");
         assert_eq!(merged[1].type_name, "VarGraphic(32704)");
     }
 }

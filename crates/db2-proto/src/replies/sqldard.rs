@@ -1368,13 +1368,13 @@ mod tests {
     #[test]
     fn test_scan_standard_sqldagroups_finds_padded_descriptors() {
         let mut data = vec![0; 96];
-        data.extend_from_slice(&standard_descriptor("POLICY_ID", 0, 0, 6, 484, 0));
-        data.extend_from_slice(&standard_descriptor("POLICY_NUM", 0, 0, 20, 464, 1200));
+        data.extend_from_slice(&standard_descriptor("COL_C8M4_ID", 0, 0, 6, 484, 0));
+        data.extend_from_slice(&standard_descriptor("COL_D5P1_NUM", 0, 0, 20, 464, 1200));
 
         let dard = parse_sqldard_data(&data).unwrap();
         assert_eq!(dard.num_columns, 2);
-        assert_eq!(dard.columns[0].name, "POLICY_ID");
-        assert_eq!(dard.columns[1].name, "POLICY_NUM");
+        assert_eq!(dard.columns[0].name, "COL_C8M4_ID");
+        assert_eq!(dard.columns[1].name, "COL_D5P1_NUM");
     }
 
     #[test]
@@ -1389,13 +1389,13 @@ mod tests {
         data.extend_from_slice(&1u16.to_be_bytes());
         data.extend_from_slice(&unnamed_standard_descriptor(4, 496, 0));
 
-        data.extend_from_slice(&standard_descriptor("POLICY_ID", 0, 0, 6, 484, 0));
-        data.extend_from_slice(&standard_descriptor("POLICY_NUM", 0, 0, 20, 464, 1200));
+        data.extend_from_slice(&standard_descriptor("COL_C8M4_ID", 0, 0, 6, 484, 0));
+        data.extend_from_slice(&standard_descriptor("COL_D5P1_NUM", 0, 0, 20, 464, 1200));
 
         let dard = parse_sqldard_data(&data).unwrap();
         assert_eq!(dard.num_columns, 2);
-        assert_eq!(dard.columns[0].name, "POLICY_ID");
-        assert_eq!(dard.columns[1].name, "POLICY_NUM");
+        assert_eq!(dard.columns[0].name, "COL_C8M4_ID");
+        assert_eq!(dard.columns[1].name, "COL_D5P1_NUM");
     }
 
     #[test]
@@ -1422,7 +1422,7 @@ mod tests {
     fn test_scan_column_names_ignores_sqltype_values() {
         let mut data = vec![0; 32];
         data.extend_from_slice(&standard_descriptor_with_type(
-            "POLICY_ID",
+            "COL_C8M4_ID",
             0,
             0,
             6,
@@ -1430,7 +1430,7 @@ mod tests {
             0,
         ));
         data.extend_from_slice(&standard_descriptor_with_type(
-            "POLICY_NUM",
+            "COL_D5P1_NUM",
             0,
             0,
             20,
@@ -1439,55 +1439,55 @@ mod tests {
         ));
 
         let names = scan_column_names(&data);
-        assert_eq!(names, vec!["POLICY_ID", "POLICY_NUM"]);
+        assert_eq!(names, vec!["COL_C8M4_ID", "COL_D5P1_NUM"]);
     }
 
     #[test]
     fn test_scan_column_names_extracts_repeated_qualified_pattern() {
         let mut data = Vec::new();
-        push_identifier(&mut data, "DDFIC0AG");
-        push_identifier(&mut data, "PROP_ID");
-        push_identifier(&mut data, "DDFIC0AG");
-        push_identifier(&mut data, "PLCY_SNPST");
-        push_identifier(&mut data, "FIREINSP");
-        push_identifier(&mut data, "PROP_ID");
+        push_identifier(&mut data, "SCM_Q8K2");
+        push_identifier(&mut data, "COL_A3F9_ID");
+        push_identifier(&mut data, "SCM_Q8K2");
+        push_identifier(&mut data, "TBL_Q7R2");
+        push_identifier(&mut data, "SCM_M6T2");
+        push_identifier(&mut data, "COL_A3F9_ID");
         data.extend_from_slice(&[0xFF, 0x00, 0x00, 0x00]);
-        push_identifier(&mut data, "AGRE_ACCES_KEY");
-        push_identifier(&mut data, "DDFIC0AG");
-        push_identifier(&mut data, "PLCY_SNPST");
-        push_identifier(&mut data, "FIREINSP");
-        push_identifier(&mut data, "AGRE_ACCES_KEY");
+        push_identifier(&mut data, "COL_B7K2_KEY");
+        push_identifier(&mut data, "SCM_Q8K2");
+        push_identifier(&mut data, "TBL_Q7R2");
+        push_identifier(&mut data, "SCM_M6T2");
+        push_identifier(&mut data, "COL_B7K2_KEY");
 
         let names = scan_column_names(&data);
-        assert_eq!(names, vec!["PROP_ID", "AGRE_ACCES_KEY"]);
+        assert_eq!(names, vec!["COL_A3F9_ID", "COL_B7K2_KEY"]);
     }
 
     #[test]
     fn test_scan_column_names_extracts_lob_descriptors_before_rdb_name() {
         let mut data = Vec::new();
-        push_identifier(&mut data, "DDFIC0AG");
-        push_identifier(&mut data, "INSP_RPT_ID");
-        push_identifier(&mut data, "DDFIC0AG");
-        push_identifier(&mut data, "INSP_RPT");
-        push_identifier(&mut data, "FIREINSP");
-        push_identifier(&mut data, "INSP_RPT_ID");
-        push_identifier(&mut data, "INSP_RPT_DETL_DOC");
-        push_identifier(&mut data, "DDFIC0AG");
-        push_identifier(&mut data, "UNDWR_ACTN_DETL_DOC");
-        push_identifier(&mut data, "DDFIC0AG");
+        push_identifier(&mut data, "SCM_Q8K2");
+        push_identifier(&mut data, "COL_E2K9_ID");
+        push_identifier(&mut data, "SCM_Q8K2");
+        push_identifier(&mut data, "TBL_H8Q4");
+        push_identifier(&mut data, "SCM_M6T2");
+        push_identifier(&mut data, "COL_E2K9_ID");
+        push_identifier(&mut data, "COL_F6N3_DOC");
+        push_identifier(&mut data, "SCM_Q8K2");
+        push_identifier(&mut data, "COL_G1R7_DOC");
+        push_identifier(&mut data, "SCM_Q8K2");
         push_identifier(&mut data, "DB2_GENERATED_ROWID_FOR_LOBS");
-        push_identifier(&mut data, "DDFIC0AG");
-        push_identifier(&mut data, "INSP_RPT");
-        push_identifier(&mut data, "FIREINSP");
+        push_identifier(&mut data, "SCM_Q8K2");
+        push_identifier(&mut data, "TBL_H8Q4");
+        push_identifier(&mut data, "SCM_M6T2");
         push_identifier(&mut data, "DB2_GENERATED_ROWID_FOR_LOBS");
 
         let names = scan_column_names(&data);
         assert_eq!(
             names,
             vec![
-                "INSP_RPT_ID",
-                "INSP_RPT_DETL_DOC",
-                "UNDWR_ACTN_DETL_DOC",
+                "COL_E2K9_ID",
+                "COL_F6N3_DOC",
+                "COL_G1R7_DOC",
                 "DB2_GENERATED_ROWID_FOR_LOBS"
             ]
         );
@@ -1496,13 +1496,13 @@ mod tests {
     #[test]
     fn test_diagnose_column_names_reports_len_prefixed_candidates() {
         let mut data = vec![0; 16];
-        data.extend_from_slice(&8u16.to_be_bytes());
-        data.extend_from_slice(b"POLICYID");
+        data.extend_from_slice(&7u16.to_be_bytes());
+        data.extend_from_slice(b"COLZ9ID");
 
         let diagnostics = diagnose_column_names(&data);
         assert!(diagnostics
             .iter()
-            .any(|line| line.contains("text=POLICYID")));
+            .any(|line| line.contains("text=COLZ9ID")));
     }
 
     fn push_identifier(data: &mut Vec<u8>, value: &str) {

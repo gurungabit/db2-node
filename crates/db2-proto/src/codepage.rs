@@ -169,8 +169,8 @@ mod tests {
 
     #[test]
     fn test_pad_rdbnam_trims_outer_whitespace() {
-        let padded = pad_rdbnam(" DDFIC0A ");
+        let padded = pad_rdbnam(" DBX9Q2A ");
         let back = ebcdic037_to_utf8(&padded);
-        assert_eq!(back, "DDFIC0A");
+        assert_eq!(back, "DBX9Q2A");
     }
 }
