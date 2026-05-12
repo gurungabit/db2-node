@@ -531,7 +531,8 @@ impl ClientInner {
                 sql,
                 self.parse_prepare_reply(&frames).unwrap_or_default(),
             );
-            self.process_query_reply(&frames, &column_info, None).await
+            self.process_query_reply(&frames, sql, &column_info, None)
+                .await
         } else {
             self.process_execute_reply(&frames).await
         }
@@ -1212,7 +1213,7 @@ impl ClientInner {
 
                 let frames = self.read_reply_frames().await?;
                 return self
-                    .process_query_reply(&frames, &column_info, Some(&result_descriptors))
+                    .process_query_reply(&frames, sql, &column_info, Some(&result_descriptors))
                     .await;
             }
 
@@ -1234,7 +1235,7 @@ impl ClientInner {
             self.send_bytes(&send_buf).await?;
 
             let frames = self.read_frames(2).await?;
-            self.process_query_reply(&frames, &column_info, Some(&result_descriptors))
+            self.process_query_reply(&frames, sql, &column_info, Some(&result_descriptors))
                 .await
         } else {
             // For DML: PRPSQLSTT + SQLSTT first, then EXCSQLSTT + SQLDTA
@@ -1523,6 +1524,7 @@ impl ClientInner {
         let result = self
             .process_query_reply_with_fetch_size(
                 &frames,
+                sql,
                 column_info,
                 Some(result_descriptors),
                 fetch_size_override,
@@ -1588,6 +1590,7 @@ impl ClientInner {
         let result = self
             .process_query_reply_with_fetch_size(
                 &frames,
+                sql,
                 column_info,
                 Some(result_descriptors),
                 fetch_size_override,
@@ -2273,10 +2276,11 @@ impl ClientInner {
     pub async fn process_query_reply_public(
         &mut self,
         frames: &[DssFrame],
+        sql: &str,
         column_info: &[ColumnInfo],
         initial_descriptors: Option<&[db2_proto::fdoca::ColumnDescriptor]>,
     ) -> Result<QueryResult, Error> {
-        self.process_query_reply(frames, column_info, initial_descriptors)
+        self.process_query_reply(frames, sql, column_info, initial_descriptors)
             .await
     }
 
@@ -2296,16 +2300,24 @@ impl ClientInner {
     async fn process_query_reply(
         &mut self,
         frames: &[DssFrame],
+        sql: &str,
         column_info: &[ColumnInfo],
         initial_descriptors: Option<&[db2_proto::fdoca::ColumnDescriptor]>,
     ) -> Result<QueryResult, Error> {
-        self.process_query_reply_with_fetch_size(frames, column_info, initial_descriptors, None)
-            .await
+        self.process_query_reply_with_fetch_size(
+            frames,
+            sql,
+            column_info,
+            initial_descriptors,
+            None,
+        )
+        .await
     }
 
     async fn process_query_reply_with_fetch_size(
         &mut self,
         frames: &[DssFrame],
+        sql: &str,
         column_info: &[ColumnInfo],
         initial_descriptors: Option<&[db2_proto::fdoca::ColumnDescriptor]>,
         fetch_size_override: Option<u32>,
@@ -2749,6 +2761,8 @@ impl ClientInner {
             )));
         }
 
+        let columns = column_info_with_select_aliases(sql, columns);
+        let rows = rows_with_result_column_names(rows, &columns);
         let mut result = QueryResult::with_rows_and_diagnostics(rows, columns, diagnostics);
         if end_of_query {
             zos_lob_cleanup_verified = true;
@@ -7271,6 +7285,27 @@ fn row_column_names(column_info: &[ColumnInfo], value_count: usize) -> Vec<Strin
     (0..value_count).map(|i| format!("COL{}", i + 1)).collect()
 }
 
+fn rows_with_result_column_names(rows: Vec<Row>, columns: &[ColumnInfo]) -> Vec<Row> {
+    if rows.is_empty() || columns.is_empty() {
+        return rows;
+    }
+
+    let column_names: Arc<[String]> = columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>()
+        .into();
+    rows.into_iter()
+        .map(|row| {
+            if row.len() == columns.len() {
+                Row::new_shared(column_names.clone(), row.into_values())
+            } else {
+                row
+            }
+        })
+        .collect()
+}
+
 fn column_info_from_descriptors(
     descriptors: &[db2_proto::fdoca::ColumnDescriptor],
 ) -> Vec<ColumnInfo> {
@@ -7520,6 +7555,56 @@ mod tests {
 
         assert_eq!(columns[0].name, "TOTAL_COUNT");
         assert_eq!(columns[1].name, "NAME");
+    }
+
+    #[test]
+    fn column_info_with_select_aliases_replaces_expression_aliases() {
+        let columns = vec![
+            ColumnInfo::new("COL1".to_string(), "Integer".to_string(), false),
+            ColumnInfo::new("COL2".to_string(), "Integer".to_string(), false),
+            ColumnInfo::new("COL3".to_string(), "BigInt".to_string(), false),
+        ];
+
+        let columns = column_info_with_select_aliases(
+            r#"
+            SELECT YEAR(c.INSP_CMPLT_DT) AS YR,
+                   MONTH(c.INSP_CMPLT_DT) AS MO,
+                   COUNT(*) AS CNT
+            FROM FIREINSP.INSP_RPT r
+            JOIN FIREINSP.INSP_CTL c ON r.INSP_RPT_ID = c.INSP_RPT_ID
+            GROUP BY YEAR(c.INSP_CMPLT_DT), MONTH(c.INSP_CMPLT_DT)
+            ORDER BY YR, MO
+            "#,
+            columns,
+        );
+
+        assert_eq!(columns[0].name, "YR");
+        assert_eq!(columns[1].name, "MO");
+        assert_eq!(columns[2].name, "CNT");
+    }
+
+    #[test]
+    fn rows_with_result_column_names_updates_row_lookup_names() {
+        let rows = vec![Row::new(
+            vec!["COL1".to_string(), "COL2".to_string(), "COL3".to_string()],
+            vec![
+                Db2Value::Integer(2026),
+                Db2Value::Integer(3),
+                Db2Value::Integer(76238),
+            ],
+        )];
+        let columns = vec![
+            ColumnInfo::new("YR".to_string(), "Integer".to_string(), false),
+            ColumnInfo::new("MO".to_string(), "Integer".to_string(), false),
+            ColumnInfo::new("CNT".to_string(), "Integer".to_string(), false),
+        ];
+
+        let rows = rows_with_result_column_names(rows, &columns);
+
+        assert_eq!(rows[0].get::<i32>("YR"), Some(2026));
+        assert_eq!(rows[0].get::<i32>("MO"), Some(3));
+        assert_eq!(rows[0].get::<i32>("CNT"), Some(76238));
+        assert_eq!(rows[0].get::<i32>("COL1"), None);
     }
 
     #[test]

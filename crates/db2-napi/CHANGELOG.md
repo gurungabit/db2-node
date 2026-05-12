@@ -2,6 +2,12 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.10](https://github.com/db2-node/db2-node/releases/tag/v1.0.10) (2026-05-12)
+
+### Bug Fixes
+
+- apply explicit `SELECT ... AS ...` aliases to final row objects when Db2 for z/OS returns generated expression names such as `COL1`, `COL2`, and `COL3`
+
 ## [1.0.9](https://github.com/db2-node/db2-node/releases/tag/v1.0.9) (2026-05-12)
 
 ### Bug Fixes

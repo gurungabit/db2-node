@@ -104,6 +104,7 @@ impl PreparedStatement {
                 guard
                     .process_query_reply_public(
                         &frames,
+                        &self.sql,
                         &self.column_metadata,
                         Some(&self.result_descriptors),
                     )
