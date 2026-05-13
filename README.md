@@ -24,10 +24,10 @@ npm install db2-node
 Install from a GitHub release tarball:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.12/db2-node-1.0.12.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.13/db2-node-1.0.13.tgz
 ```
 
-Replace `v1.0.12` and `1.0.12` with the release version you want.
+Replace `v1.0.13` and `1.0.13` with the release version you want.
 
 ```ts
 import { Client } from "db2-node";
@@ -209,7 +209,7 @@ The deployed docs site lives at `https://db2-node.github.io/`.
 
 ## Status
 
-The `1.0.12` release line is production-ready for the validated DB2 LUW and Db2 for z/OS paths:
+The `1.0.13` release line is production-ready for the validated DB2 LUW and Db2 for z/OS paths:
 
 - Rust and Node integration suites are green
 - TLS behavior is covered in both Rust and Node tests

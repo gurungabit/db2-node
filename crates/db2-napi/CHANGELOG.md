@@ -2,6 +2,14 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.13](https://github.com/gurungabit/db2-node/releases/tag/v1.0.13) (2026-05-13)
+
+### Bug Fixes
+
+- route simple Db2 for z/OS CLOB `SELECT` queries through chunked materialization before opening the native LOB cursor, avoiding stale cursor failures such as `SQLCODE=-514`
+- retry catalog-driven z/OS CLOB recovery directly after retryable session errors instead of falling back to the same failing native cursor path
+- recognize z/OS servers by `server_class` values containing `z/OS` or `MVS` when `server_release` is generic
+
 ## [1.0.12](https://github.com/gurungabit/db2-node/releases/tag/v1.0.12) (2026-05-13)
 
 ### Bug Fixes

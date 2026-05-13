@@ -1277,7 +1277,10 @@ impl ClientInner {
         cached_query_instance_id: Option<&[u8]>,
         cached_pipeline_fetch_after_open: bool,
     ) -> Result<ZosSelectOpenResult, Error> {
-        if self.zos_lob_internal_depth == 0 && !use_native_zos_lob_strategy() {
+        if self.zos_lob_internal_depth == 0
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
+            && !use_zos_native_lob_only()
+        {
             let current_schema = self.config.current_schema.clone();
             let prepare_columns =
                 catalog_columns_from_prepare_metadata(column_info, result_descriptors);
@@ -1537,22 +1540,17 @@ impl ClientInner {
                 started.elapsed().as_secs_f64() * 1000.0
             ));
         }
-        if use_native_zos_lob_strategy() {
-            return result.map(|mut result| {
-                result.diagnostics.extend(open_diagnostics);
-                ZosSelectOpenResult {
-                    result,
-                    query_instance_id,
-                    pipeline_fetch_after_open,
-                }
-            });
-        }
+        let retry_source = if use_native_zos_lob_strategy() {
+            "native-error"
+        } else {
+            "direct-decode-error"
+        };
         self.retry_zos_lob_chunking_after_decode_error(
             sql,
             result,
             column_info,
             result_descriptors,
-            "direct-decode-error",
+            retry_source,
         )
         .await
         .map(|mut result| {
@@ -1629,35 +1627,37 @@ impl ClientInner {
                         self.config.current_schema.as_deref(),
                         self.server_info.as_ref(),
                     ) {
-                        match self
-                            .execute_zos_select_lobs_chunked_from_catalog(
-                                sql,
-                                "session-error-retry",
-                            )
-                            .await
-                        {
-                            Ok(Some(mut result)) => {
-                                if query_diagnostics_enabled() {
-                                    result.diagnostics.push(format!(
-                                        "zos_lob_retry source=session-error reason={}",
-                                        sanitize_diagnostic_value(&original_error)
-                                    ));
-                                }
-                                return Ok(result);
-                            }
-                            Ok(None) => {}
-                            Err(retry_err)
-                                if attempts < 4
-                                    && should_retry_query_after_session_error(
-                                        sql, params, &retry_err,
-                                    ) =>
+                        loop {
+                            match self
+                                .execute_zos_select_lobs_chunked_from_catalog(
+                                    sql,
+                                    "session-error-retry",
+                                )
+                                .await
                             {
-                                attempts += 1;
-                                self.reset_session_state(false).await;
-                                self.establish_session().await?;
-                                continue;
+                                Ok(Some(mut result)) => {
+                                    if query_diagnostics_enabled() {
+                                        result.diagnostics.push(format!(
+                                            "zos_lob_retry source=session-error reason={}",
+                                            sanitize_diagnostic_value(&original_error)
+                                        ));
+                                    }
+                                    return Ok(result);
+                                }
+                                Ok(None) => break,
+                                Err(retry_err)
+                                    if attempts < 4
+                                        && should_retry_query_after_session_error(
+                                            sql, params, &retry_err,
+                                        ) =>
+                                {
+                                    attempts += 1;
+                                    self.reset_session_state(false).await;
+                                    self.establish_session().await?;
+                                    continue;
+                                }
+                                Err(retry_err) => return Err(retry_err),
                             }
-                            Err(_) => {}
                         }
                     }
                 }
@@ -1727,10 +1727,12 @@ impl ClientInner {
         catalog_columns: &[CatalogColumn],
         source: &str,
     ) -> Result<Option<QueryResult>, Error> {
-        let parsed = parse_simple_select_for_zos_lobs(sql, current_schema)
-            .ok_or_else(|| Error::Protocol("failed to parse simple z/OS LOB query".into()))?;
-        let catalog_columns = selected_catalog_columns(&parsed, catalog_columns)
-            .ok_or_else(|| Error::Protocol("failed to select z/OS catalog columns".into()))?;
+        let Some(parsed) = parse_simple_select_for_zos_lobs(sql, current_schema) else {
+            return Ok(None);
+        };
+        let Some(catalog_columns) = selected_catalog_columns(&parsed, catalog_columns) else {
+            return Ok(None);
+        };
         if !catalog_columns.iter().any(CatalogColumn::is_lob) {
             return Ok(None);
         }
@@ -2041,6 +2043,8 @@ impl ClientInner {
             return result;
         };
 
+        let retryable_session_error =
+            should_retry_query_after_session_error(sql, &[], &original_error);
         if self.zos_lob_internal_depth > 0
             || !self.server_info.as_ref().is_some_and(is_db2_zos_server)
             || !should_retry_zos_lob_chunking_after_decode_error(&original_error)
@@ -2105,6 +2109,9 @@ impl ClientInner {
                     return Ok(retry_result);
                 }
                 Ok(None) => {
+                    if retryable_session_error {
+                        return Err(original_error);
+                    }
                     let catalog_columns = catalog_columns_from_query_result(&metadata);
                     return Err(Error::Protocol(format!(
                         "{}; z/OS LOB retry skipped: catalog_columns={} lob_columns={} sql={}",
@@ -2124,6 +2131,10 @@ impl ClientInner {
                     )));
                 }
             }
+        }
+
+        if retryable_session_error {
+            return Err(original_error);
         }
 
         Err(Error::Protocol(format!(
@@ -3559,9 +3570,12 @@ pub(crate) fn ensure_sqlstt_sql_len(sql: &str) -> Result<(), Error> {
 }
 
 pub(crate) fn is_db2_zos_server(server_info: &ServerInfo) -> bool {
-    [&server_info.server_release, &server_info.server_class]
-        .iter()
-        .any(|value| value.trim_start().to_ascii_uppercase().starts_with("DSN"))
+    let release = server_info.server_release.trim_start().to_ascii_uppercase();
+    let class = server_info.server_class.trim_start().to_ascii_uppercase();
+    release.starts_with("DSN")
+        || class.starts_with("DSN")
+        || class.contains("Z/OS")
+        || class.contains("MVS")
 }
 
 pub(crate) fn build_sqlstt_for_server(sql: &str, use_zos_format: bool) -> Vec<u8> {
@@ -5057,10 +5071,12 @@ fn should_retry_zos_lob_chunking_after_decode_error(error: &Error) -> bool {
             message.contains("query ended with undecoded row data")
                 || message.contains("query fetch stalled while decoding row data")
                 || message.contains("z/OS LOB result requires transparent materialization")
+                || message_indicates_retryable_session_state(message)
         }
         Error::Timeout(message) => {
             message.contains("fetch timed out") && message.contains("has_lobs=true")
         }
+        Error::Sql { .. } => error_indicates_stale_session_state(error),
         _ => false,
     }
 }
@@ -7627,6 +7643,20 @@ mod tests {
     }
 
     #[test]
+    fn build_zos_select_metadata_query_supports_explicit_projection_with_in_list() {
+        let query = build_zos_select_star_metadata_query(
+            "SELECT INSP_RPT_ID, INSP_RPT_DETL_DOC FROM FIREINSP.INSP_RPT WHERE INSP_RPT_ID IN (1,2,3)",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            query,
+            "SELECT NAME, COLTYPE FROM SYSIBM.SYSCOLUMNS WHERE TBCREATOR = 'FIREINSP' AND TBNAME = 'INSP_RPT' ORDER BY COLNO"
+        );
+    }
+
+    #[test]
     fn build_zos_select_star_metadata_query_does_not_recurse_on_catalog_query() {
         assert!(build_zos_select_star_metadata_query(
             "SELECT NAME, COLTYPE FROM SYSIBM.SYSCOLUMNS WHERE TBCREATOR = 'SCM_M6T2'",
@@ -8552,6 +8582,18 @@ mod tests {
             &err,
         ));
         assert!(error_indicates_stale_session_state(&err));
+        assert!(should_retry_zos_lob_chunking_after_decode_error(&err));
+    }
+
+    #[test]
+    fn z_os_detection_accepts_server_class_when_release_is_generic() {
+        let server_info = ServerInfo {
+            server_release: "SQL12010".to_string(),
+            server_class: "DB2 for z/OS".to_string(),
+            ..Default::default()
+        };
+
+        assert!(is_db2_zos_server(&server_info));
     }
 
     #[test]
