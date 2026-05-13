@@ -2,6 +2,13 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.15](https://github.com/gurungabit/db2-node/releases/tag/v1.0.15) (2026-05-13)
+
+### Bug Fixes
+
+- keep Db2 for z/OS CLOB materialization fetch rows narrow by fetching one 16 KB CLOB chunk per generated row
+- avoid z/OS DRDA `SYNTAXRM` failures when full CLOB reads require multiple internal chunks for the same application query
+
 ## [1.0.14](https://github.com/gurungabit/db2-node/releases/tag/v1.0.14) (2026-05-13)
 
 ### Bug Fixes
