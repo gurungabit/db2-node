@@ -3614,7 +3614,12 @@ fn select_projection_aliases(sql: &str) -> Option<Vec<Option<String>>> {
         return None;
     }
 
-    Some(items.into_iter().map(explicit_select_alias).collect())
+    Some(
+        items
+            .into_iter()
+            .map(select_projection_output_name)
+            .collect(),
+    )
 }
 
 fn top_level_select_projection(sql: &str) -> Option<&str> {
@@ -3713,6 +3718,30 @@ fn split_top_level_select_items(projection: &str) -> Vec<&str> {
 fn explicit_select_alias(item: &str) -> Option<String> {
     let as_idx = find_last_top_level_keyword(item, "AS")?;
     parse_alias_identifier(&item[as_idx + "AS".len()..])
+}
+
+fn select_projection_output_name(item: &str) -> Option<String> {
+    explicit_select_alias(item).or_else(|| simple_projection_column_name(item))
+}
+
+fn simple_projection_column_name(item: &str) -> Option<String> {
+    let trimmed = item.trim();
+    let end = consume_identifier_ref(trimmed, 0)?;
+    if skip_ascii_whitespace(trimmed, end) != trimmed.len() {
+        return None;
+    }
+
+    let pieces = split_table_ref_parts(trimmed)?;
+    let name = pieces.last()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    if trimmed.contains('"') {
+        Some(name.to_string())
+    } else {
+        Some(name.to_ascii_uppercase())
+    }
 }
 
 fn parse_alias_identifier(text: &str) -> Option<String> {
@@ -7700,7 +7729,29 @@ mod tests {
             vec![
                 Some("TOTAL_COUNT".to_string()),
                 Some("One Value".to_string()),
-                None,
+                Some("NAME".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn select_projection_aliases_extract_qualified_column_names() {
+        let aliases = select_projection_aliases(
+            r#"
+            SELECT r.INSP_RPT_ID,
+                   r.INSP_RPT_DETL_DOC
+            FROM FIREINSP.INSP_RPT r
+            JOIN FIREINSP.INSP_CTL c ON r.INSP_RPT_ID = c.INSP_RPT_ID
+            ORDER BY r.INSP_RPT_ID
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            aliases,
+            vec![
+                Some("INSP_RPT_ID".to_string()),
+                Some("INSP_RPT_DETL_DOC".to_string()),
             ]
         );
     }
@@ -7719,6 +7770,22 @@ mod tests {
 
         assert_eq!(columns[0].name, "TOTAL_COUNT");
         assert_eq!(columns[1].name, "NAME");
+    }
+
+    #[test]
+    fn column_info_with_select_aliases_replaces_qualified_column_projection_names() {
+        let columns = vec![
+            ColumnInfo::new("COL1".to_string(), "Decimal".to_string(), false),
+            ColumnInfo::new("COL2".to_string(), "Clob".to_string(), true),
+        ];
+
+        let columns = column_info_with_select_aliases(
+            "SELECT r.INSP_RPT_ID, r.INSP_RPT_DETL_DOC FROM FIREINSP.INSP_RPT r",
+            columns,
+        );
+
+        assert_eq!(columns[0].name, "INSP_RPT_ID");
+        assert_eq!(columns[1].name, "INSP_RPT_DETL_DOC");
     }
 
     #[test]

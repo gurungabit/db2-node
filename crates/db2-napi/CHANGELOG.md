@@ -2,6 +2,13 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.14](https://github.com/gurungabit/db2-node/releases/tag/v1.0.14) (2026-05-13)
+
+### Bug Fixes
+
+- preserve bare and qualified projection column names such as `r.INSP_RPT_ID` when Db2 for z/OS returns generated names like `COL1`
+- prevent generated `COL1` result keys from causing application-built `IN (...)` lists to contain empty values during follow-up CLOB scans
+
 ## [1.0.13](https://github.com/gurungabit/db2-node/releases/tag/v1.0.13) (2026-05-13)
 
 ### Bug Fixes
