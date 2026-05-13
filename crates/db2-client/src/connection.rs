@@ -422,7 +422,8 @@ impl ClientInner {
         if matches!(
             err,
             Error::Connection(_) | Error::Io(_) | Error::Protocol(_) | Error::Tls(_)
-        ) {
+        ) || error_indicates_stale_session_state(&err)
+        {
             debug!(
                 "{} failed with a fatal connection/session error; resetting connection state",
                 operation
@@ -7407,12 +7408,31 @@ fn should_retry_query_after_session_error(sql: &str, params: &[&dyn ToSql], err:
 
     match err {
         Error::Connection(message) | Error::Protocol(message) => {
-            let message = message.to_ascii_lowercase();
-            message.contains("closed by server") || message.contains("qrynoprm")
+            message_indicates_retryable_session_state(message)
         }
+        Error::Sql { .. } => error_indicates_stale_session_state(err),
         Error::Io(_) | Error::Tls(_) => true,
         _ => false,
     }
+}
+
+fn error_indicates_stale_session_state(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Sql {
+            sqlcode: -502 | -514 | -518,
+            ..
+        }
+    )
+}
+
+fn message_indicates_retryable_session_state(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("closed by server")
+        || message.contains("qrynoprm")
+        || message.contains("sqlcode=-502")
+        || message.contains("sqlcode=-514")
+        || message.contains("sqlcode=-518")
 }
 
 fn sql_is_retryable_read_query(sql: &str) -> bool {
@@ -8401,5 +8421,71 @@ mod tests {
         assert_eq!(merged[0].type_name, "Decimal { precision: 11, scale: 0 }");
         assert_eq!(merged[1].name, "COL_F6N3_DOC");
         assert_eq!(merged[1].type_name, "VarGraphic(32704)");
+    }
+
+    #[test]
+    fn retry_read_query_after_invalid_zos_cursor_state() {
+        let params: [&dyn ToSql; 0] = [];
+        let err = Error::Sql {
+            sqlstate: "26501".to_string(),
+            sqlcode: -514,
+            message: "SQL_CURSH200C2".to_string(),
+        };
+
+        assert!(should_retry_query_after_session_error(
+            "SELECT INSP_RPT_ID, INSP_RPT_DETL_DOC FROM FIREINSP.INSP_RPT",
+            &params,
+            &err,
+        ));
+        assert!(error_indicates_stale_session_state(&err));
+    }
+
+    #[test]
+    fn retry_invalid_cursor_state_only_for_unparameterized_reads() {
+        let value = 1i32;
+        let params: [&dyn ToSql; 1] = [&value];
+        let err = Error::Sql {
+            sqlstate: "26501".to_string(),
+            sqlcode: -514,
+            message: "SQL_CURSH200C2".to_string(),
+        };
+
+        assert!(!should_retry_query_after_session_error(
+            "SELECT * FROM FIREINSP.INSP_RPT WHERE INSP_RPT_ID = ?",
+            &params,
+            &err,
+        ));
+        assert!(!should_retry_query_after_session_error(
+            "UPDATE FIREINSP.INSP_RPT SET INSP_RPT_ID = INSP_RPT_ID",
+            &[],
+            &err,
+        ));
+    }
+
+    #[test]
+    fn retry_read_query_after_wrapped_invalid_cursor_state() {
+        let params: [&dyn ToSql; 0] = [];
+        let err = Error::Protocol(
+            "z/OS LOB base failed: SQL Error [SQLSTATE=26501, SQLCODE=-514]: SQL_CURSH200C2"
+                .to_string(),
+        );
+
+        assert!(should_retry_query_after_session_error(
+            "SELECT INSP_RPT_ID, INSP_RPT_DETL_DOC FROM FIREINSP.INSP_RPT",
+            &params,
+            &err,
+        ));
+    }
+
+    #[test]
+    fn retry_read_query_does_not_retry_unrelated_protocol_errors() {
+        let params: [&dyn ToSql; 0] = [];
+        let err = Error::Protocol("query ended with undecoded row data".to_string());
+
+        assert!(!should_retry_query_after_session_error(
+            "SELECT INSP_RPT_ID, INSP_RPT_DETL_DOC FROM FIREINSP.INSP_RPT",
+            &params,
+            &err,
+        ));
     }
 }

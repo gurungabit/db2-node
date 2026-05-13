@@ -24,10 +24,10 @@ npm install db2-node
 Install from a GitHub release tarball:
 
 ```bash
-npm install https://github.com/db2-node/db2-node/releases/download/v1.0.10/db2-node-1.0.10.tgz
+npm install https://github.com/db2-node/db2-node/releases/download/v1.0.11/db2-node-1.0.11.tgz
 ```
 
-Replace `v1.0.10` and `1.0.10` with the release version you want.
+Replace `v1.0.11` and `1.0.11` with the release version you want.
 
 ```ts
 import { Client } from "db2-node";
@@ -80,6 +80,10 @@ The z/OS LOB cleanup behavior has two supported production modes:
 Keep `DB2_ZOS_LOB_TRUST_PASSIVE_TAIL_QUIET` off in production. It is fail-closed, but it is not a useful performance path for large z/OS CLOB workloads.
 
 CLOB-like `LIKE` and `NOT LIKE` predicate scans that return aggregate or scalar results use a large statement package `EXCSQLSTT` path by default on Db2 for z/OS, which avoids the one-shot cursor package path that can hit package-specific resource limits. Set `DB2_ZOS_LIKE_PREDICATE_EXCSQLSTT=0` only for package diagnostics.
+
+SQL errors surfaced through the JavaScript wrappers include `sqlstate`, `sqlcode`, and `retryable` fields when those values can be inferred. Stale z/OS cursor or statement section errors such as `SQLCODE=-502`, `SQLCODE=-514`, and `SQLCODE=-518` are marked retryable for read-query recovery.
+
+Prepared statements and transactions are session-bound by design. If a reconnect happens after a stale cursor, timeout, or connection failure, create a new prepared statement or start a new transaction and retry the whole application unit of work. The driver does not replay transaction bodies or write statements automatically.
 
 The production soak passed 100/100 default-mode cycles and 50/50 active-close cycles with no wrong row counts, zero-row corruption, stale `EXTDTA`, or unhandled driver errors.
 
@@ -205,7 +209,7 @@ The deployed docs site lives at `https://db2-node.github.io/`.
 
 ## Status
 
-The `1.0.10` release line is production-ready for the validated DB2 LUW and Db2 for z/OS paths:
+The `1.0.11` release line is production-ready for the validated DB2 LUW and Db2 for z/OS paths:
 
 - Rust and Node integration suites are green
 - TLS behavior is covered in both Rust and Node tests

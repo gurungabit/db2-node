@@ -246,6 +246,8 @@ This is the recommended default. If a z/OS LOB query cannot be proven clean afte
 
 CLOB-like `LIKE` and `NOT LIKE` predicate scans that return aggregate or scalar results use a large statement package `EXCSQLSTT` path by default on Db2 for z/OS. Set `DB2_ZOS_LIKE_PREDICATE_EXCSQLSTT=0` only while diagnosing package-specific behavior.
 
+Errors returned through the JavaScript wrapper APIs include `sqlstate`, `sqlcode`, and `retryable` fields when the driver can infer them from the DB2 error. Stale z/OS cursor or statement state (`SQLCODE=-502`, `SQLCODE=-514`, `SQLCODE=-518`) is marked retryable. For plain read queries the driver can reconnect and retry internally; for prepared statements and transactions, recreate the prepared statement or retry the whole transaction body because those resources are bound to one server session.
+
 ### Active close mode
 
 Set `DB2_ZOS_LOB_CLOSE_AFTER_MATERIALIZE=1` when preserving the same DB2 connection is more important than individual large-LOB query latency:

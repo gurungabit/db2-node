@@ -10,10 +10,42 @@ const {
 
 let debugEnabled = false
 
+const SQL_ERROR_RE = /SQLSTATE=([A-Z0-9]+),\s*SQLCODE=(-?\d+)/
+const RETRYABLE_SESSION_SQLCODES = new Set([-502, -514, -518])
+
+function enrichDb2Error(error) {
+  if (!error || typeof error !== 'object') return error
+
+  const message = String(error.message || error)
+  const match = SQL_ERROR_RE.exec(message)
+  if (match) {
+    if (error.sqlstate == null) error.sqlstate = match[1]
+    if (error.sqlcode == null) error.sqlcode = Number(match[2])
+  }
+
+  const normalized = message.toLowerCase()
+  const retryable =
+    RETRYABLE_SESSION_SQLCODES.has(Number(error.sqlcode)) ||
+    normalized.includes('closed by server') ||
+    normalized.includes('qrynoprm')
+
+  if (error.retryable == null) error.retryable = retryable
+  return error
+}
+
+function withDb2ErrorEnrichment(promise) {
+  return Promise.resolve(promise).catch((error) => {
+    throw enrichDb2Error(error)
+  })
+}
+
 function callbackOrPromise(work, callback, mapValue) {
   const promise = Promise.resolve()
     .then(work)
     .then((value) => (mapValue ? mapValue(value) : value))
+    .catch((error) => {
+      throw enrichDb2Error(error)
+    })
 
   if (typeof callback === 'function') {
     promise.then(
@@ -30,6 +62,9 @@ function callbackOrPromiseMany(work, callback, mapValues) {
   const promise = Promise.resolve()
     .then(work)
     .then((value) => (mapValues ? mapValues(value) : [value]))
+    .catch((error) => {
+      throw enrichDb2Error(error)
+    })
 
   if (typeof callback === 'function') {
     promise.then(
@@ -839,15 +874,15 @@ class PreparedStatement {
   }
 
   execute(params) {
-    return this._native.execute(normalizeParams(params) || null)
+    return withDb2ErrorEnrichment(this._native.execute(normalizeParams(params) || null))
   }
 
   executeBatch(paramRows) {
-    return this._native.executeBatch(normalizeParamRows(paramRows))
+    return withDb2ErrorEnrichment(this._native.executeBatch(normalizeParamRows(paramRows)))
   }
 
   close() {
-    return this._native.close()
+    return withDb2ErrorEnrichment(this._native.close())
   }
 }
 
@@ -861,19 +896,19 @@ class Transaction {
   }
 
   query(sql, params) {
-    return this._native.query(sql, normalizeParams(params) || null)
+    return withDb2ErrorEnrichment(this._native.query(sql, normalizeParams(params) || null))
   }
 
   async prepare(sql) {
-    return PreparedStatement.fromNative(await this._native.prepare(sql))
+    return PreparedStatement.fromNative(await withDb2ErrorEnrichment(this._native.prepare(sql)))
   }
 
   commit() {
-    return this._native.commit()
+    return withDb2ErrorEnrichment(this._native.commit())
   }
 
   rollback() {
-    return this._native.rollback()
+    return withDb2ErrorEnrichment(this._native.rollback())
   }
 }
 
@@ -889,23 +924,23 @@ class Client {
   }
 
   connect() {
-    return this._native.connect()
+    return withDb2ErrorEnrichment(this._native.connect())
   }
 
   query(sql, params) {
-    return this._native.query(sql, normalizeParams(params) || null)
+    return withDb2ErrorEnrichment(this._native.query(sql, normalizeParams(params) || null))
   }
 
   async prepare(sql) {
-    return PreparedStatement.fromNative(await this._native.prepare(sql))
+    return PreparedStatement.fromNative(await withDb2ErrorEnrichment(this._native.prepare(sql)))
   }
 
   async beginTransaction() {
-    return Transaction.fromNative(await this._native.beginTransaction())
+    return Transaction.fromNative(await withDb2ErrorEnrichment(this._native.beginTransaction()))
   }
 
   close() {
-    return this._native.close()
+    return withDb2ErrorEnrichment(this._native.close())
   }
 
   serverInfo() {
@@ -919,27 +954,29 @@ class Pool {
   }
 
   connect() {
-    return this._native.connect()
+    return withDb2ErrorEnrichment(this._native.connect())
   }
 
   warmup() {
-    return this._native.warmup()
+    return withDb2ErrorEnrichment(this._native.warmup())
   }
 
   query(sql, params) {
-    return this._native.query(sql, normalizeParams(params) || null)
+    return withDb2ErrorEnrichment(this._native.query(sql, normalizeParams(params) || null))
   }
 
   async acquire() {
-    return Client.fromNative(await this._native.acquire())
+    return Client.fromNative(await withDb2ErrorEnrichment(this._native.acquire()))
   }
 
   release(client) {
-    return this._native.release(client && client._native ? client._native : client)
+    return withDb2ErrorEnrichment(
+      this._native.release(client && client._native ? client._native : client)
+    )
   }
 
   close() {
-    return this._native.close()
+    return withDb2ErrorEnrichment(this._native.close())
   }
 
   idleCount() {
@@ -1014,6 +1051,7 @@ const api = Object.assign(createDatabase, {
   convertRowsToColumns,
   _compat: {
     parseConnectionString,
+    enrichDb2Error,
     ODBCResult,
     ODBCStatement,
     Database,

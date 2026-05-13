@@ -2,6 +2,18 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.11](https://github.com/db2-node/db2-node/releases/tag/v1.0.11) (2026-05-12)
+
+### Bug Fixes
+
+- retry unparameterized read queries after stale Db2 for z/OS cursor or statement section errors such as `SQLCODE=-502`, `SQLCODE=-514`, and `SQLCODE=-518`
+- reset stale z/OS sessions before they can be returned to a pool when stale cursor errors escape retry handling
+- recognize wrapped stale cursor errors from internal z/OS CLOB materialization queries
+
+### Compatibility
+
+- expose `sqlstate`, `sqlcode`, and `retryable` metadata on JavaScript errors when DB2 error details can be inferred
+
 ## [1.0.10](https://github.com/db2-node/db2-node/releases/tag/v1.0.10) (2026-05-12)
 
 ### Bug Fixes

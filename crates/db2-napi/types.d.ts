@@ -34,6 +34,12 @@ export type BinaryParameter = Uint8Array | ArrayBuffer | number[]
 export type QueryParameter = string | number | boolean | null | BinaryParameter
 export type QueryParameters = QueryParameter[]
 
+export interface Db2Error extends Error {
+  sqlstate?: string
+  sqlcode?: number
+  retryable?: boolean
+}
+
 export interface IbmDbPoolOptions {
   maxPoolSize?: number
   maxConnections?: number

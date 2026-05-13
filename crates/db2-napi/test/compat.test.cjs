@@ -93,6 +93,38 @@ test('memory ODBCResult supports async fetch APIs', async () => {
   assert.equal(await result.fetch(), false)
 })
 
+test('db2 errors expose sqlstate sqlcode and retryable metadata', async () => {
+  const err = new Error('SQL Error [SQLSTATE=26501, SQLCODE=-514]: SQL_CURSH200C2')
+
+  assert.equal(ibmdb._compat.enrichDb2Error(err), err)
+  assert.equal(err.sqlstate, '26501')
+  assert.equal(err.sqlcode, -514)
+  assert.equal(err.retryable, true)
+
+  const client = Object.create(ibmdb.Client.prototype)
+  client._native = {
+    query: async () => {
+      throw new Error('z/OS LOB base failed: SQL Error [SQLSTATE=26501, SQLCODE=-514]: SQL_CURSH200C2')
+    },
+  }
+
+  await assert.rejects(client.query('SELECT * FROM T'), (error) => {
+    assert.equal(error.sqlstate, '26501')
+    assert.equal(error.sqlcode, -514)
+    assert.equal(error.retryable, true)
+    return true
+  })
+})
+
+test('db2 error enrichment leaves unrelated errors non-retryable', () => {
+  const err = new Error('query ended with undecoded row data')
+
+  ibmdb._compat.enrichDb2Error(err)
+  assert.equal(err.sqlstate, undefined)
+  assert.equal(err.sqlcode, undefined)
+  assert.equal(err.retryable, false)
+})
+
 test('ibm_db Pool constructor does not require connection config', async () => {
   const pool = new ibmdb.Pool()
   assert.equal(pool.maxConnections(), 10)
