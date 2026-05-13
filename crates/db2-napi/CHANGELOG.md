@@ -2,6 +2,13 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.12](https://github.com/gurungabit/db2-node/releases/tag/v1.0.12) (2026-05-13)
+
+### Bug Fixes
+
+- recover plain Db2 for z/OS CLOB read queries that hit stale cursor or statement section errors by reconnecting and switching to catalog-driven chunked materialization
+- retry internal z/OS CLOB materialization queries after stale session errors such as `SQLCODE=-502`, `SQLCODE=-514`, and `SQLCODE=-518`
+
 ## [1.0.11](https://github.com/db2-node/db2-node/releases/tag/v1.0.11) (2026-05-12)
 
 ### Bug Fixes

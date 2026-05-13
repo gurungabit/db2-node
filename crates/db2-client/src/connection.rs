@@ -1619,12 +1619,89 @@ impl ClientInner {
                         && should_retry_query_after_session_error(sql, params, &err) =>
                 {
                     attempts += 1;
+                    let original_error = err.to_string();
                     self.reset_session_state(false).await;
                     self.establish_session().await?;
+                    if can_retry_zos_lob_query_from_catalog(
+                        sql,
+                        params,
+                        self.zos_lob_internal_depth,
+                        self.config.current_schema.as_deref(),
+                        self.server_info.as_ref(),
+                    ) {
+                        match self
+                            .execute_zos_select_lobs_chunked_from_catalog(
+                                sql,
+                                "session-error-retry",
+                            )
+                            .await
+                        {
+                            Ok(Some(mut result)) => {
+                                if query_diagnostics_enabled() {
+                                    result.diagnostics.push(format!(
+                                        "zos_lob_retry source=session-error reason={}",
+                                        sanitize_diagnostic_value(&original_error)
+                                    ));
+                                }
+                                return Ok(result);
+                            }
+                            Ok(None) => {}
+                            Err(retry_err)
+                                if attempts < 4
+                                    && should_retry_query_after_session_error(
+                                        sql, params, &retry_err,
+                                    ) =>
+                            {
+                                attempts += 1;
+                                self.reset_session_state(false).await;
+                                self.establish_session().await?;
+                                continue;
+                            }
+                            Err(_) => {}
+                        }
+                    }
                 }
                 Err(err) => return Err(err),
             }
         }
+    }
+
+    async fn execute_zos_select_lobs_chunked_from_catalog(
+        &mut self,
+        sql: &str,
+        source: &str,
+    ) -> Result<Option<QueryResult>, Error> {
+        if self.zos_lob_internal_depth > 0
+            || !self.server_info.as_ref().is_some_and(is_db2_zos_server)
+            || use_zos_native_lob_only()
+        {
+            return Ok(None);
+        }
+
+        let current_schema = self.config.current_schema.clone();
+        let Some(metadata_sql) =
+            build_zos_select_star_metadata_query(sql, current_schema.as_deref())
+        else {
+            return Ok(None);
+        };
+
+        let metadata_stage = format!("metadata-{source}");
+        let metadata = self
+            .execute_zos_lob_internal_query(&metadata_stage, &metadata_sql)
+            .await?;
+        let Some(mut result) = self
+            .execute_zos_select_star_lobs_chunked(sql, current_schema.as_deref(), &metadata)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        if query_diagnostics_enabled() {
+            result
+                .diagnostics
+                .push(format!("zos_lob_catalog_route source={source}"));
+        }
+        Ok(Some(result))
     }
 
     async fn execute_zos_select_star_lobs_chunked(
@@ -2068,28 +2145,38 @@ impl ClientInner {
             self.config.query_timeout
         };
 
-        self.zos_lob_internal_depth += 1;
-        let result = timeout(step_timeout, Box::pin(self.execute_query(sql, &[]))).await;
-        self.zos_lob_internal_depth = self.zos_lob_internal_depth.saturating_sub(1);
+        let mut attempts = 0usize;
+        loop {
+            self.zos_lob_internal_depth += 1;
+            let result = timeout(step_timeout, Box::pin(self.execute_query(sql, &[]))).await;
+            self.zos_lob_internal_depth = self.zos_lob_internal_depth.saturating_sub(1);
 
-        match result {
-            Ok(result) => result,
-            Err(_) => {
-                let sql_preview = summarize_sql_for_diagnostics(sql);
-                self.reset_session_state(false).await;
-                Err(Error::Timeout(format!(
-                    "z/OS LOB {stage} timed out after {:?}; connection was closed to avoid protocol desynchronization; sql={sql_preview}",
-                    step_timeout
-                )))
+            match result {
+                Ok(Ok(result)) => return Ok(result),
+                Ok(Err(err))
+                    if attempts < 4 && should_retry_query_after_session_error(sql, &[], &err) =>
+                {
+                    attempts += 1;
+                    self.reset_session_state(false).await;
+                    self.establish_session().await?;
+                }
+                Ok(Err(err)) => {
+                    return Err(wrap_zos_lob_stage_error(stage, sql, err));
+                }
+                Err(_) => {
+                    let sql_preview = summarize_sql_for_diagnostics(sql);
+                    self.reset_session_state(false).await;
+                    return Err(wrap_zos_lob_stage_error(
+                        stage,
+                        sql,
+                        Error::Timeout(format!(
+                            "z/OS LOB {stage} timed out after {:?}; connection was closed to avoid protocol desynchronization; sql={sql_preview}",
+                            step_timeout
+                        )),
+                    ));
+                }
             }
         }
-        .map_err(|err| {
-            Error::Protocol(format!(
-                "z/OS LOB {stage} failed: {}; sql={}",
-                err,
-                summarize_sql_for_diagnostics(sql)
-            ))
-        })
     }
 
     /// Execute a DML statement with parameters.
@@ -5516,7 +5603,11 @@ pub(crate) fn use_native_zos_lob_strategy() -> bool {
             !(value == "sql" || value == "substr" || value == "fallback" || value == "off")
         })
         .unwrap_or(true)
-        || env::var_os("DB2_ZOS_NATIVE_LOB_ONLY").is_some()
+        || use_zos_native_lob_only()
+}
+
+fn use_zos_native_lob_only() -> bool {
+    env::var_os("DB2_ZOS_NATIVE_LOB_ONLY").is_some()
 }
 
 fn use_zos_select_cache() -> bool {
@@ -7440,6 +7531,29 @@ fn sql_is_retryable_read_query(sql: &str) -> bool {
     trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") || trimmed.starts_with("VALUES")
 }
 
+fn can_retry_zos_lob_query_from_catalog(
+    sql: &str,
+    params: &[&dyn ToSql],
+    zos_lob_internal_depth: usize,
+    current_schema: Option<&str>,
+    server_info: Option<&ServerInfo>,
+) -> bool {
+    params.is_empty()
+        && zos_lob_internal_depth == 0
+        && server_info.is_some_and(is_db2_zos_server)
+        && !use_zos_native_lob_only()
+        && sql_is_retryable_read_query(sql)
+        && build_zos_select_star_metadata_query(sql, current_schema).is_some()
+}
+
+fn wrap_zos_lob_stage_error(stage: &str, sql: &str, err: Error) -> Error {
+    Error::Protocol(format!(
+        "z/OS LOB {stage} failed: {}; sql={}",
+        err,
+        summarize_sql_for_diagnostics(sql)
+    ))
+}
+
 fn finish_query_diagnostics(
     sql: &str,
     param_count: usize,
@@ -8474,6 +8588,39 @@ mod tests {
             "SELECT INSP_RPT_ID, INSP_RPT_DETL_DOC FROM FIREINSP.INSP_RPT",
             &params,
             &err,
+        ));
+    }
+
+    #[test]
+    fn retry_after_stale_zos_lob_select_can_use_catalog_route() {
+        let params: [&dyn ToSql; 0] = [];
+        let server_info = ServerInfo {
+            server_release: "DSN12015".to_string(),
+            ..Default::default()
+        };
+        let value = 1i32;
+        let param_refs: [&dyn ToSql; 1] = [&value];
+
+        assert!(can_retry_zos_lob_query_from_catalog(
+            "SELECT INSP_RPT_ID, INSP_RPT_DETL_DOC FROM FIREINSP.INSP_RPT WHERE INSP_RPT_ID IN (1,2)",
+            &params,
+            0,
+            None,
+            Some(&server_info),
+        ));
+        assert!(!can_retry_zos_lob_query_from_catalog(
+            "SELECT INSP_RPT_ID, INSP_RPT_DETL_DOC FROM FIREINSP.INSP_RPT WHERE INSP_RPT_ID = ?",
+            &param_refs,
+            0,
+            None,
+            Some(&server_info),
+        ));
+        assert!(!can_retry_zos_lob_query_from_catalog(
+            "SELECT * FROM A JOIN B ON A.ID = B.ID",
+            &params,
+            0,
+            None,
+            Some(&server_info),
         ));
     }
 

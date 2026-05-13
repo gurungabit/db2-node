@@ -275,7 +275,7 @@ To run a local DB2 instance for development and testing:
 
 ```bash
 # Clone the repository
-git clone https://github.com/db2-node/db2-node.git
+git clone https://github.com/gurungabit/db2-node.git
 cd db2-node
 
 # Start DB2 in Docker (takes 2-5 min on first run)
