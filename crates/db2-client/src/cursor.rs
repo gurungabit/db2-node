@@ -167,7 +167,8 @@ impl Cursor {
                 && inner
                     .server_info
                     .as_ref()
-                    .is_some_and(crate::connection::is_db2_zos_server);
+                    .is_some_and(crate::connection::is_db2_zos_server)
+                && crate::connection::use_zos_lob_internal_extra_blocks();
             let use_zos_non_lob_fetch = !has_lobs
                 && inner.zos_lob_internal_depth == 0
                 && inner

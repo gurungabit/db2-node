@@ -1342,7 +1342,8 @@ impl ClientInner {
         }
 
         let use_extended_materialized_blocks = self.zos_lob_internal_depth > 0
-            && self.server_info.as_ref().is_some_and(is_db2_zos_server);
+            && self.server_info.as_ref().is_some_and(is_db2_zos_server)
+            && use_zos_lob_internal_extra_blocks();
         let use_zos_non_lob_extra_blocks = self.zos_lob_internal_depth == 0
             && self.server_info.as_ref().is_some_and(is_db2_zos_server)
             && !has_zos_lobs
@@ -1855,7 +1856,7 @@ impl ClientInner {
         let mut diagnostics = base_result.diagnostics;
         if query_diagnostics_enabled() {
             diagnostics.push(format!(
-                "zos_lob_chunked source={} strategy=base-plus-combined-chunk-grid rows={} lob_columns={} chunk_queries={} clob_chunk_limit={} dbclob_chunk_limit={} batch_reply_target={} chunk_window_target={} row_window_target={}",
+                "zos_lob_chunked source={} strategy=base-plus-combined-chunk-grid rows={} lob_columns={} chunk_queries={} clob_chunk_limit={} dbclob_chunk_limit={} batch_reply_target={} chunk_window_target={} row_window_target={} row_batch_limit={}",
                 source,
                 output_rows.len(),
                 catalog_columns
@@ -1867,7 +1868,8 @@ impl ClientInner {
                 ZOS_DBCLOB_CHUNK_LIMIT,
                 zos_lob_batch_reply_target(),
                 zos_lob_chunk_window_target(),
-                zos_lob_row_window_target()
+                zos_lob_row_window_target(),
+                zos_lob_row_batch_limit()
             ));
         }
 
@@ -1936,7 +1938,7 @@ impl ClientInner {
         let mut diagnostics = initial_result.diagnostics;
         if query_diagnostics_enabled() {
             diagnostics.push(format!(
-                "zos_lob_chunked source={} strategy=bounded-single-pass-combined-grid rows={} lob_columns={} chunk_queries={} initial_specs={} clob_chunk_limit={} dbclob_chunk_limit={} batch_reply_target={} chunk_window_target={} row_window_target={}",
+                "zos_lob_chunked source={} strategy=bounded-single-pass-combined-grid rows={} lob_columns={} chunk_queries={} initial_specs={} clob_chunk_limit={} dbclob_chunk_limit={} batch_reply_target={} chunk_window_target={} row_window_target={} row_batch_limit={}",
                 source,
                 output_rows.len(),
                 catalog_columns
@@ -1949,7 +1951,8 @@ impl ClientInner {
                 ZOS_DBCLOB_CHUNK_LIMIT,
                 zos_lob_batch_reply_target(),
                 zos_lob_chunk_window_target(),
-                zos_lob_row_window_target()
+                zos_lob_row_window_target(),
+                zos_lob_row_batch_limit()
             ));
         }
 
@@ -3513,6 +3516,7 @@ const ZOS_DBCLOB_CHUNK_LIMIT: usize = ZOS_CLOB_CHUNK_LIMIT / 2;
 const ZOS_LOB_BATCH_REPLY_TARGET: usize = 4_000_000;
 const ZOS_LOB_CHUNK_WINDOW_TARGET: usize = 160_000;
 const ZOS_LOB_ROW_WINDOW_TARGET: usize = ZOS_CLOB_CHUNK_LIMIT;
+const ZOS_LOB_ROW_BATCH_LIMIT: usize = 1;
 const ZOS_LOB_FRAME_DRAIN_TIMEOUT_MS: usize = 250;
 const ZOS_NATIVE_LOB_FRAME_DRAIN_TIMEOUT_MS: usize = 250;
 
@@ -4477,6 +4481,15 @@ fn zos_lob_row_window_target() -> usize {
     )
 }
 
+fn zos_lob_row_batch_limit() -> usize {
+    env_usize(
+        "DB2_ZOS_LOB_ROW_BATCH_SIZE",
+        ZOS_LOB_ROW_BATCH_LIMIT,
+        1,
+        1_000,
+    )
+}
+
 fn zos_lob_chunk_window_can_accept(current_bytes: usize, next_bytes: usize) -> bool {
     let next_total = current_bytes.saturating_add(next_bytes);
     next_total <= zos_lob_chunk_window_target() && next_total <= zos_lob_row_window_target()
@@ -4620,6 +4633,15 @@ pub(crate) fn use_zos_read_only_cursor_attributes() -> bool {
         .unwrap_or(true)
 }
 
+pub(crate) fn use_zos_lob_internal_extra_blocks() -> bool {
+    env::var("DB2_ZOS_LOB_INTERNAL_EXTRA_BLOCKS")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(false)
+}
+
 fn zos_lob_frame_drain_timeout() -> Duration {
     Duration::from_millis(env_usize(
         "DB2_ZOS_LOB_FRAME_DRAIN_MS",
@@ -4663,7 +4685,9 @@ fn zos_lob_combined_rows_per_batch(columns: &[CatalogColumn], specs: &[LobChunkS
         .map(|spec| zos_lob_chunk_spec_estimated_bytes(columns, *spec))
         .sum::<usize>();
 
-    (zos_lob_batch_reply_target() / estimated_bytes_per_row.max(1)).max(1)
+    (zos_lob_batch_reply_target() / estimated_bytes_per_row.max(1))
+        .max(1)
+        .min(zos_lob_row_batch_limit())
 }
 
 #[cfg(test)]
@@ -8304,6 +8328,28 @@ mod tests {
             ZOS_CLOB_CHUNK_LIMIT,
             ZOS_CLOB_CHUNK_LIMIT
         ));
+    }
+
+    #[test]
+    fn zos_lob_combined_rows_per_batch_defaults_to_single_row() {
+        let columns = vec![
+            CatalogColumn {
+                name: "COL_E2K9_ID".to_string(),
+                coltype: "DECIMAL".to_string(),
+            },
+            CatalogColumn {
+                name: "COL_F6N3_DOC".to_string(),
+                coltype: "CLOB".to_string(),
+            },
+        ];
+        let specs = vec![LobChunkSpec {
+            column_index: 1,
+            chunk_number: 1,
+            start: 1,
+            len: ZOS_CLOB_CHUNK_LIMIT,
+        }];
+
+        assert_eq!(zos_lob_combined_rows_per_batch(&columns, &specs), 1);
     }
 
     #[test]

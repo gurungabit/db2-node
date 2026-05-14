@@ -2,6 +2,13 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.16](https://github.com/gurungabit/db2-node/releases/tag/v1.0.16) (2026-05-14)
+
+### Bug Fixes
+
+- fetch z/OS CLOB materialization chunks one source row at a time so large `IN (...)` batches do not request 100 wide CLOB-derived rows in a single cursor fetch
+- keep internal z/OS CLOB materialization on conservative 32 KB cursor blocks by default, avoiding `SYNTAXRM` failures during generated CLOB chunk fetches
+
 ## [1.0.15](https://github.com/gurungabit/db2-node/releases/tag/v1.0.15) (2026-05-13)
 
 ### Bug Fixes
