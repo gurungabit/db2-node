@@ -24,10 +24,10 @@ npm install db2-node
 Install from a GitHub release tarball:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.18/db2-node-1.0.18.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.19/db2-node-1.0.19.tgz
 ```
 
-Replace `v1.0.18` and `1.0.18` with the release version you want.
+Replace `v1.0.19` and `1.0.19` with the release version you want.
 
 ```ts
 import { Client } from "db2-node";
@@ -77,7 +77,7 @@ The z/OS LOB cleanup behavior has two supported production modes:
 - **Default mode:** run normally with no z/OS LOB environment variables. This is the recommended default for general production. The driver uses Db2 for z/OS native LOB fetches first, sends an active `CLSQRY` after LOB materialization when needed, and reuses the connection only after cleanup is verified.
 - **SQL materialization mode:** set `DB2_ZOS_LOB_STRATEGY=sql` only for diagnostics or for servers where native LOB fetches fail. The driver rebuilds CLOB/LOB values through generated `SUBSTR` queries and keeps that generated cursor path conservative.
 
-Native z/OS LOB continuation fetches use conservative `CNTQRY` framing by default. `DB2_ZOS_NATIVE_LOB_CNTQRY_EXTRA_BLOCKS=1` is available only as a diagnostic/performance override if a specific server proves it can tolerate extended native LOB continuation blocks.
+Native z/OS LOB continuation fetches send `QRYROWSET` with `RTNEXTDTA=RTNEXTALL` so full CLOB reads stay on the native cursor path. The default rowset follows the configured fetch size for throughput; set `DB2_ZOS_NATIVE_LOB_CNTQRY_ROWSET` only if a specific server needs a smaller continuation window. Extended continuation blocks are enabled by default and can be disabled with `DB2_ZOS_NATIVE_LOB_CNTQRY_EXTRA_BLOCKS=0` for diagnostics.
 
 Keep `DB2_ZOS_LOB_TRUST_PASSIVE_TAIL_QUIET` off in production. It is fail-closed, but it is not a useful performance path for large z/OS CLOB workloads.
 
@@ -211,7 +211,7 @@ The deployed docs site lives at `https://db2-node.github.io/`.
 
 ## Status
 
-The `1.0.18` release line is production-ready for the validated DB2 LUW and Db2 for z/OS paths:
+The `1.0.19` release line is production-ready for the validated DB2 LUW and Db2 for z/OS paths:
 
 - Rust and Node integration suites are green
 - TLS behavior is covered in both Rust and Node tests

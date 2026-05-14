@@ -4648,7 +4648,15 @@ pub(crate) fn use_zos_native_lob_cntqry_extra_blocks() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
+}
+
+pub(crate) fn zos_native_lob_cntqry_rowset(fetch_size: u32) -> u32 {
+    env::var("DB2_ZOS_NATIVE_LOB_CNTQRY_ROWSET")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_else(|| u64::from(fetch_size.clamp(1, 32_767)))
+        .clamp(1, 32_767) as u32
 }
 
 fn zos_lob_frame_drain_timeout() -> Duration {

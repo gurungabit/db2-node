@@ -2,6 +2,13 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.19](https://github.com/gurungabit/db2-node/releases/tag/v1.0.19) (2026-05-14)
+
+### Bug Fixes
+
+- send `QRYROWSET` with native Db2 for z/OS LOB `RTNEXTALL` continuation fetches, matching the DRDA shape required for full CLOB cursor reads
+- keep native z/OS LOB continuation fetches on the configured fetch-size rowset with extended blocks enabled by default for throughput
+
 ## [1.0.18](https://github.com/gurungabit/db2-node/releases/tag/v1.0.18) (2026-05-14)
 
 ### Bug Fixes

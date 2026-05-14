@@ -123,7 +123,12 @@ mod tests {
         );
         let (obj, _) = DdmObject::parse(&bytes).unwrap();
         let params = obj.parameters();
-        assert!(params.iter().any(|p| p.code_point == QRYROWSET));
+        let qryrowset = params
+            .iter()
+            .find(|p| p.code_point == QRYROWSET)
+            .expect("QRYROWSET should be present with RTNEXTALL native LOB fetches");
+        assert_eq!(qryrowset.data, [0, 0, 0, 1]);
+        assert!(params.iter().any(|p| p.code_point == MAXBLKEXT));
         assert!(params
             .iter()
             .any(|p| p.code_point == RTNEXTDTA && p.data == [RTNEXTALL]));
