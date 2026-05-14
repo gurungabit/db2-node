@@ -2,6 +2,14 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.17](https://github.com/gurungabit/db2-node/releases/tag/v1.0.17) (2026-05-14)
+
+### Bug Fixes
+
+- use the native Db2 for z/OS LOB cursor path before SQL `SUBSTR` materialization so full CLOB reads behave closer to `ibm_db`
+- actively close native z/OS LOB cursors after materialization by default, avoiding reconnect-per-query overhead in repeated CLOB read loops
+- keep SQL chunk materialization available as a fallback and via `DB2_ZOS_LOB_STRATEGY=sql`
+
 ## [1.0.16](https://github.com/gurungabit/db2-node/releases/tag/v1.0.16) (2026-05-14)
 
 ### Bug Fixes

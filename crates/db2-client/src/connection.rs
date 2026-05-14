@@ -1279,7 +1279,7 @@ impl ClientInner {
     ) -> Result<ZosSelectOpenResult, Error> {
         if self.zos_lob_internal_depth == 0
             && self.server_info.as_ref().is_some_and(is_db2_zos_server)
-            && !use_zos_native_lob_only()
+            && use_zos_lob_sql_materialization_first()
         {
             let current_schema = self.config.current_schema.clone();
             let prepare_columns =
@@ -5683,13 +5683,54 @@ fn sanitize_diagnostic_value(value: &str) -> String {
 }
 
 pub(crate) fn use_native_zos_lob_strategy() -> bool {
-    env::var("DB2_ZOS_LOB_STRATEGY")
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            !(value == "sql" || value == "substr" || value == "fallback" || value == "off")
-        })
-        .unwrap_or(true)
-        || use_zos_native_lob_only()
+    parse_zos_lob_strategy(
+        env::var("DB2_ZOS_LOB_STRATEGY").ok().as_deref(),
+        use_zos_native_lob_only(),
+    )
+    .uses_native()
+}
+
+fn use_zos_lob_sql_materialization_first() -> bool {
+    parse_zos_lob_strategy(
+        env::var("DB2_ZOS_LOB_STRATEGY").ok().as_deref(),
+        use_zos_native_lob_only(),
+    )
+    .uses_sql_first()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZosLobStrategy {
+    NativeFirst,
+    NativeOnly,
+    SqlFirst,
+}
+
+impl ZosLobStrategy {
+    fn uses_native(self) -> bool {
+        matches!(self, Self::NativeFirst | Self::NativeOnly)
+    }
+
+    fn uses_sql_first(self) -> bool {
+        matches!(self, Self::SqlFirst)
+    }
+}
+
+fn parse_zos_lob_strategy(value: Option<&str>, native_only: bool) -> ZosLobStrategy {
+    if native_only {
+        return ZosLobStrategy::NativeOnly;
+    }
+
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value)
+            if matches!(
+                value.as_str(),
+                "sql" | "substr" | "fallback" | "materialized" | "off"
+            ) =>
+        {
+            ZosLobStrategy::SqlFirst
+        }
+        _ => ZosLobStrategy::NativeFirst,
+    }
 }
 
 fn use_zos_native_lob_only() -> bool {
@@ -5738,7 +5779,7 @@ fn use_zos_lob_close_after_materialization() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !(value == "0" || value == "false" || value == "off" || value == "no")
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn use_zos_lob_passive_tail_before_close() -> bool {
@@ -8350,6 +8391,30 @@ mod tests {
         }];
 
         assert_eq!(zos_lob_combined_rows_per_batch(&columns, &specs), 1);
+    }
+
+    #[test]
+    fn zos_lob_strategy_defaults_to_native_first() {
+        assert_eq!(
+            parse_zos_lob_strategy(None, false),
+            ZosLobStrategy::NativeFirst
+        );
+        assert_eq!(
+            parse_zos_lob_strategy(Some("sql"), false),
+            ZosLobStrategy::SqlFirst
+        );
+        assert_eq!(
+            parse_zos_lob_strategy(Some("substr"), false),
+            ZosLobStrategy::SqlFirst
+        );
+        assert_eq!(
+            parse_zos_lob_strategy(Some("native"), false),
+            ZosLobStrategy::NativeFirst
+        );
+        assert_eq!(
+            parse_zos_lob_strategy(Some("sql"), true),
+            ZosLobStrategy::NativeOnly
+        );
     }
 
     #[test]

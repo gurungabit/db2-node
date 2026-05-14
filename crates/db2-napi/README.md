@@ -4,7 +4,7 @@ Pure Rust DB2 driver for Node.js using the DRDA wire protocol directly. No IBM C
 
 ## Status
 
-`1.0.16` is the current production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, TLS, `ibm_db` compatibility entry points, and validated z/OS LOB materialization cleanup.
+`1.0.17` is the current production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, TLS, `ibm_db` compatibility entry points, and validated z/OS LOB materialization cleanup.
 
 ## Install
 
@@ -15,10 +15,10 @@ npm install db2-node
 You can also install the npm-packed artifact from a GitHub release:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.16/db2-node-1.0.16.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.17/db2-node-1.0.17.tgz
 ```
 
-Replace `v1.0.16` and `1.0.16` with the release version you want.
+Replace `v1.0.17` and `1.0.17` with the release version you want.
 
 Prebuilt native binaries ship for supported platforms — no Rust toolchain needed:
 
@@ -312,7 +312,9 @@ Run normally:
 node app.js
 ```
 
-Do not set z/OS LOB cleanup environment variables for the default production path. If a z/OS LOB query cannot be proven clean after materialization, the driver disconnects that socket and warm-replaces it in the pool. This is the fastest mode for large CLOB result sets where preserving the exact same server session is not required.
+Do not set z/OS LOB cleanup environment variables for the default production path. The driver uses Db2 for z/OS native LOB fetches first, sends an active `CLSQRY` after LOB materialization when needed, and reuses the connection only after cleanup is verified. If cleanup still cannot be proven, the driver disconnects that socket rather than returning a potentially stale session to the pool.
+
+Set `DB2_ZOS_LOB_STRATEGY=sql` only for diagnostics or for servers where native LOB fetches fail. That mode rebuilds CLOB/LOB values through generated `SUBSTR` queries and keeps the generated cursor path conservative.
 
 For aggregate or scalar results that filter CLOB-like text with `LIKE` or `NOT LIKE`, the driver uses a large statement package `EXCSQLSTT` path by default on Db2 for z/OS. This keeps CLOB predicate scans away from the one-shot cursor package path that can hit package-specific resource limits. Set `DB2_ZOS_LIKE_PREDICATE_EXCSQLSTT=0` only when diagnosing package behavior.
 
@@ -336,18 +338,19 @@ For Db2 for z/OS stale cursor/statement state, `SQLCODE=-502`, `SQLCODE=-514`, a
 Expected default diagnostics, when `DB2_QUERY_DIAGNOSTICS=1` is enabled for troubleshooting:
 
 ```text
-zos_lob_disconnect_after_materialization=true
+cursor_lob_materialized_close ... verified=true ... close_reply_seen=true
+zos_lob_cleanup_verified=true close_after_materialize=true
 ```
 
 ### Active close mode
 
-Enable active close when connection/session preservation is more important than individual large-LOB query latency:
+Active close is enabled by default. To diagnose the older reconnect-after-materialization mode:
 
 ```bash
-DB2_ZOS_LOB_CLOSE_AFTER_MATERIALIZE=1 node app.js
+DB2_ZOS_LOB_CLOSE_AFTER_MATERIALIZE=0 node app.js
 ```
 
-In this mode the driver sends `CLSQRY` with the learned z/OS query instance identifier, drains remaining `EXTDTA`, waits for DB2's close acknowledgement, and only then returns the connection to the pool.
+In active close mode the driver sends `CLSQRY` with the learned z/OS query instance identifier, drains remaining `EXTDTA`, waits for DB2's close acknowledgement, and only then returns the connection to the pool.
 
 Expected active-close diagnostics:
 
@@ -357,7 +360,7 @@ cursor_lob_materialized_close ... verified=true ... close_reply_seen=true
 zos_lob_cleanup_verified=true close_after_materialize=true
 ```
 
-Active close keeps the same connection reusable, but it can add latency to large LOB queries because the driver reads and discards the remaining LOB tail inline.
+Active close keeps the same connection reusable. Disabling it can add latency to repeated LOB workloads because the driver may need to reconnect after materialization to avoid reusing a cursor with unverified tail data.
 
 ### Passive quiet trust
 
