@@ -1,6 +1,6 @@
 {
   "name": "db2-node",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "description": "Zero-dependency DB2 driver for Node.js, built with pure Rust",
   "main": "index.cjs",
   "types": "types.d.ts",

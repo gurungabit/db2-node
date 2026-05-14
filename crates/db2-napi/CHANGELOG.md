@@ -2,6 +2,13 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.18](https://github.com/gurungabit/db2-node/releases/tag/v1.0.18) (2026-05-14)
+
+### Bug Fixes
+
+- keep Db2 for z/OS CLOB continuation fetches on the native LOB path while using conservative `CNTQRY` framing by default, avoiding z/OS `SYNTAXRM` failures during long full-CLOB scans
+- add `DB2_ZOS_NATIVE_LOB_CNTQRY_EXTRA_BLOCKS=1` as an opt-in diagnostic/performance override for native LOB continuation fetches
+
 ## [1.0.17](https://github.com/gurungabit/db2-node/releases/tag/v1.0.17) (2026-05-14)
 
 ### Bug Fixes

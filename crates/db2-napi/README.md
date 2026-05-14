@@ -4,7 +4,7 @@ Pure Rust DB2 driver for Node.js using the DRDA wire protocol directly. No IBM C
 
 ## Status
 
-`1.0.17` is the current production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, TLS, `ibm_db` compatibility entry points, and validated z/OS LOB materialization cleanup.
+`1.0.18` is the current production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, TLS, `ibm_db` compatibility entry points, and validated z/OS LOB materialization cleanup.
 
 ## Install
 
@@ -15,10 +15,10 @@ npm install db2-node
 You can also install the npm-packed artifact from a GitHub release:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.17/db2-node-1.0.17.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.18/db2-node-1.0.18.tgz
 ```
 
-Replace `v1.0.17` and `1.0.17` with the release version you want.
+Replace `v1.0.18` and `1.0.18` with the release version you want.
 
 Prebuilt native binaries ship for supported platforms — no Rust toolchain needed:
 
@@ -313,6 +313,8 @@ node app.js
 ```
 
 Do not set z/OS LOB cleanup environment variables for the default production path. The driver uses Db2 for z/OS native LOB fetches first, sends an active `CLSQRY` after LOB materialization when needed, and reuses the connection only after cleanup is verified. If cleanup still cannot be proven, the driver disconnects that socket rather than returning a potentially stale session to the pool.
+
+Native z/OS LOB continuation fetches use conservative `CNTQRY` framing by default. `DB2_ZOS_NATIVE_LOB_CNTQRY_EXTRA_BLOCKS=1` is available only as a diagnostic/performance override if a specific server proves it can tolerate extended native LOB continuation blocks.
 
 Set `DB2_ZOS_LOB_STRATEGY=sql` only for diagnostics or for servers where native LOB fetches fail. That mode rebuilds CLOB/LOB values through generated `SUBSTR` queries and keeps the generated cursor path conservative.
 

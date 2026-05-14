@@ -148,17 +148,18 @@ impl Cursor {
 
         self.last_fetch_diagnostics.clear();
         let cntqry_data = if has_lobs && crate::connection::use_native_zos_lob_strategy() {
+            let use_extra_blocks = crate::connection::use_zos_native_lob_cntqry_extra_blocks();
             if collect_diagnostics {
-                self.last_fetch_diagnostics.push(
-                    "cntqry_request has_lobs=true native_limited_block=true rdbnam=false maxblkext=-1 qryrowset=none rtnextdta=RTNEXTALL"
-                        .to_string(),
-                );
+                self.last_fetch_diagnostics.push(format!(
+                    "cntqry_request has_lobs=true native_limited_block=true rdbnam=false maxblkext={} qryrowset=none rtnextdta=RTNEXTALL",
+                    if use_extra_blocks { "-1" } else { "none" }
+                ));
             }
             db2_proto::commands::cntqry::build_cntqry_with_rtnextdta(
                 &self.pkgnamcsn,
                 self.query_instance_id.as_deref(),
                 db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
-                Some(-1),
+                use_extra_blocks.then_some(-1),
                 None,
                 Some(codepoints::RTNEXTALL),
             )

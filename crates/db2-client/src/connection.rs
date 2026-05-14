@@ -4642,6 +4642,15 @@ pub(crate) fn use_zos_lob_internal_extra_blocks() -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn use_zos_native_lob_cntqry_extra_blocks() -> bool {
+    env::var("DB2_ZOS_NATIVE_LOB_CNTQRY_EXTRA_BLOCKS")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "no")
+        })
+        .unwrap_or(false)
+}
+
 fn zos_lob_frame_drain_timeout() -> Duration {
     Duration::from_millis(env_usize(
         "DB2_ZOS_LOB_FRAME_DRAIN_MS",

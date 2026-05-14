@@ -130,6 +130,26 @@ mod tests {
     }
 
     #[test]
+    fn test_build_cntqry_with_rtnextdta_can_omit_extra_blocks() {
+        let pkgnamcsn = build_default_pkgnamcsn("TESTDB", 1);
+        let bytes = build_cntqry_with_rtnextdta(
+            &pkgnamcsn,
+            Some(&[0, 0, 0, 1]),
+            32767,
+            None,
+            None,
+            Some(RTNEXTALL),
+        );
+        let (obj, _) = DdmObject::parse(&bytes).unwrap();
+        let params = obj.parameters();
+        assert!(!params.iter().any(|p| p.code_point == MAXBLKEXT));
+        assert!(!params.iter().any(|p| p.code_point == QRYROWSET));
+        assert!(params
+            .iter()
+            .any(|p| p.code_point == RTNEXTDTA && p.data == [RTNEXTALL]));
+    }
+
+    #[test]
     fn test_build_cntqry_with_rdbnam_and_rtnextdta() {
         let pkgnamcsn = build_default_pkgnamcsn("TESTDB", 1);
         let bytes = build_cntqry_with_rdbnam_and_rtnextdta(
