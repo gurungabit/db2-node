@@ -2,6 +2,14 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.22](https://github.com/gurungabit/db2-node/releases/tag/v1.0.22) (2026-06-18)
+
+### Bug Fixes
+
+- parse Db2 for z/OS FD:OCA metadata-definition triplets and environmental local identifiers according to their declared scalar types and CCSIDs
+- resolve compact GDA column references through the descriptor environment instead of inferring character columns from LOB local-identifier byte patterns
+- validate the real MDD/SDA/GDA descriptor shape through the full parameterized query-frame decoder
+
 ## [1.0.21](https://github.com/gurungabit/db2-node/releases/tag/v1.0.21) (2026-06-18)
 
 ### Bug Fixes
