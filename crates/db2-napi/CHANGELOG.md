@@ -2,6 +2,26 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.9](https://github.com/gurungabit/db2-node/compare/v1.0.8...v1.0.9) (2026-06-18)
+
+
+### Bug Fixes
+
+* fetch z/os clob chunks conservatively ([006e49c](https://github.com/gurungabit/db2-node/commit/006e49c57deb7c06b9285f7534fd2658130cb743))
+* harden z/os stale cursor recovery ([35ac61a](https://github.com/gurungabit/db2-node/commit/35ac61a0a8c7f87523689f856c6d23e94dca13a3))
+* keep z/OS native LOB continuations conservative ([398fa17](https://github.com/gurungabit/db2-node/commit/398fa174dc6b1648aee4fa886a76486b3002fbcb))
+* narrow z/os clob chunk rows ([2effe82](https://github.com/gurungabit/db2-node/commit/2effe82258aed26db5eda13e5c7dd8f362f626fb))
+* prefer native z/os clob fetches ([dce3b4c](https://github.com/gurungabit/db2-node/commit/dce3b4c6141dea90baa6f599e1457b6d268271fe))
+* prefer SQLDARD row descriptors ([93bcb25](https://github.com/gurungabit/db2-node/commit/93bcb2511eeeb61aacc0c46bdb5f63ae9002a532))
+* preserve qualified z/os column names ([7210381](https://github.com/gurungabit/db2-node/commit/72103816185a4d3e280ca0b61c43bf70c808b641))
+* preserve z/os expression aliases ([60d275d](https://github.com/gurungabit/db2-node/commit/60d275d9d9bf6362bc4f8f6550e4ba371ba73902))
+* recover z/os clob reads after stale cursors ([664c5fa](https://github.com/gurungabit/db2-node/commit/664c5fae6bd8fcdd56c9db9236de4c5de8b1502e))
+* resolve z/os fdoca descriptor environments ([68264e0](https://github.com/gurungabit/db2-node/commit/68264e0622b0ceba4f93d46abf496622d25ea29a))
+* restore z/os late row descriptors ([c1e0a15](https://github.com/gurungabit/db2-node/commit/c1e0a1591efef5d4f9abbe441d0af7e2a6662b8b))
+* route z/os clob predicate queries ([1ca5b40](https://github.com/gurungabit/db2-node/commit/1ca5b40e109010c0657818656f74a7851a8d9d28))
+* route z/os clob selects before native cursor ([791dd7a](https://github.com/gurungabit/db2-node/commit/791dd7a6a59cb32200d3fb9568c317c35c259033))
+* send z/os lob rowset continuations ([e7d6c9a](https://github.com/gurungabit/db2-node/commit/e7d6c9afd04b676be8134f1e05539b108289ed14))
+
 ## [1.0.22](https://github.com/gurungabit/db2-node/releases/tag/v1.0.22) (2026-06-18)
 
 ### Bug Fixes
