@@ -3,6 +3,7 @@
 /// Parses column descriptors from QRYDSC and decodes row data from QRYDTA.
 use crate::types::{self, Db2Type, Db2Value};
 use crate::{ProtoError, Result};
+use std::collections::HashMap;
 use std::env;
 
 /// Byte order used for fixed-width numeric values in row data.
@@ -46,7 +47,9 @@ const TRIPLET_TYPE_GDA: u8 = 0x76; // Group Data Area
 ///   - For DECIMAL: byte 3 = precision, byte 4 = scale
 ///   - bytes after: CCSID (u16 BE) for character types
 pub fn parse_qrydsc(data: &[u8]) -> Result<Vec<ColumnDescriptor>> {
-    let mut descriptors = Vec::new();
+    let mut direct_descriptors = Vec::new();
+    let mut object_descriptors = Vec::new();
+    let mut late_environment = HashMap::new();
     let mut offset = 0;
     let mut col_index = 0;
 
@@ -66,7 +69,8 @@ pub fn parse_qrydsc(data: &[u8]) -> Result<Vec<ColumnDescriptor>> {
         match triplet_type {
             TRIPLET_TYPE_SDA => {
                 if let Some(desc) = parse_sda_triplet(triplet_data, col_index) {
-                    descriptors.push(desc);
+                    late_environment.insert(desc.drda_type, desc.clone());
+                    direct_descriptors.push(desc);
                     col_index += 1;
                 }
             }
@@ -76,9 +80,12 @@ pub fn parse_qrydsc(data: &[u8]) -> Result<Vec<ColumnDescriptor>> {
             }
             TRIPLET_TYPE_GDA => {
                 if triplet_data.first() == Some(&0xD0) {
-                    let compact_descriptors = parse_compact_gda_triplet(triplet_data, col_index);
-                    col_index += compact_descriptors.len();
-                    descriptors.extend(compact_descriptors);
+                    let compact_descriptors = parse_compact_gda_triplet(
+                        triplet_data,
+                        object_descriptors.len(),
+                        &late_environment,
+                    );
+                    object_descriptors.extend(compact_descriptors);
                 } else {
                     // Group Data Area — defines groups of columns
                     // Parse contained SDAs
@@ -91,9 +98,11 @@ pub fn parse_qrydsc(data: &[u8]) -> Result<Vec<ColumnDescriptor>> {
                         let inner_type = triplet_data[gda_offset + 1];
                         let inner_data = &triplet_data[gda_offset + 2..gda_offset + inner_len];
                         if inner_type == TRIPLET_TYPE_SDA {
-                            if let Some(desc) = parse_sda_triplet(inner_data, col_index) {
-                                descriptors.push(desc);
-                                col_index += 1;
+                            if let Some(mut desc) =
+                                parse_sda_triplet(inner_data, object_descriptors.len())
+                            {
+                                desc.column_index = object_descriptors.len();
+                                object_descriptors.push(desc);
                             }
                         }
                         gda_offset += inner_len;
@@ -108,10 +117,18 @@ pub fn parse_qrydsc(data: &[u8]) -> Result<Vec<ColumnDescriptor>> {
         offset += triplet_len;
     }
 
-    Ok(descriptors)
+    if !object_descriptors.is_empty() && object_descriptors.len() >= direct_descriptors.len() {
+        Ok(object_descriptors)
+    } else {
+        Ok(direct_descriptors)
+    }
 }
 
-fn parse_compact_gda_triplet(data: &[u8], start_index: usize) -> Vec<ColumnDescriptor> {
+fn parse_compact_gda_triplet(
+    data: &[u8],
+    start_index: usize,
+    late_environment: &HashMap<u8, ColumnDescriptor>,
+) -> Vec<ColumnDescriptor> {
     let mut descriptors = Vec::new();
     if data.len() < 4 || data[0] != 0xD0 {
         return descriptors;
@@ -123,21 +140,12 @@ fn parse_compact_gda_triplet(data: &[u8], start_index: usize) -> Vec<ColumnDescr
         let attr1 = data[offset + 1];
         let attr2 = data[offset + 2];
         let (db2_type, nullable, length, precision, scale) =
-            compact_gda_descriptor_type(drda_type, attr1, attr2);
-        let ccsid = match db2_type {
-            Db2Type::Char(_)
-            | Db2Type::VarChar(_)
-            | Db2Type::LongVarChar
-            | Db2Type::Clob
-            | Db2Type::ClobLocator
-            | Db2Type::DbClobLocator
-            | Db2Type::LobChar(_)
-            | Db2Type::Date
-            | Db2Type::Time
-            | Db2Type::Timestamp
-            | Db2Type::Xml => 1208,
-            _ => 0,
-        };
+            compact_gda_descriptor_type(drda_type, attr1, attr2, late_environment);
+        let ccsid = late_environment
+            .get(&drda_type)
+            .map(|descriptor| descriptor.ccsid)
+            .filter(|ccsid| *ccsid != 0)
+            .unwrap_or_else(|| default_ccsid_for_descriptor_type(&db2_type));
 
         descriptors.push(ColumnDescriptor {
             column_index: start_index + descriptors.len(),
@@ -161,9 +169,27 @@ fn compact_gda_descriptor_type(
     drda_type: u8,
     attr1: u8,
     attr2: u8,
+    late_environment: &HashMap<u8, ColumnDescriptor>,
 ) -> (Db2Type, bool, u16, u8, u8) {
     let nullable = (drda_type & 0x01) != 0;
     let base = drda_type & 0xFE;
+
+    if let Some(environment) = late_environment.get(&drda_type) {
+        let override_length = u16::from_be_bytes([attr1, attr2]);
+        let length = if override_length > 0 {
+            override_length
+        } else {
+            environment.length
+        };
+        let db2_type = db2_type_with_length_override(&environment.db2_type, length);
+        return (
+            db2_type,
+            environment.nullable,
+            length,
+            environment.precision,
+            environment.scale,
+        );
+    }
 
     if base == 0x0E {
         let precision = attr1;
@@ -183,6 +209,38 @@ fn compact_gda_descriptor_type(
     (db2_type, nullable, length, 0, 0)
 }
 
+fn default_ccsid_for_descriptor_type(db2_type: &Db2Type) -> u16 {
+    match db2_type {
+        Db2Type::Char(_)
+        | Db2Type::VarChar(_)
+        | Db2Type::LongVarChar
+        | Db2Type::Clob
+        | Db2Type::ClobLocator
+        | Db2Type::DbClobLocator
+        | Db2Type::LobChar(_)
+        | Db2Type::Date
+        | Db2Type::Time
+        | Db2Type::Timestamp
+        | Db2Type::Xml => 1208,
+        _ => 0,
+    }
+}
+
+fn db2_type_with_length_override(db2_type: &Db2Type, length: u16) -> Db2Type {
+    match db2_type {
+        Db2Type::Char(_) => Db2Type::Char(length),
+        Db2Type::VarChar(_) => Db2Type::VarChar(length),
+        Db2Type::Binary(_) => Db2Type::Binary(length),
+        Db2Type::VarBinary(_) => Db2Type::VarBinary(length),
+        Db2Type::Graphic(_) => Db2Type::Graphic(length),
+        Db2Type::VarGraphic(_) => Db2Type::VarGraphic(length),
+        Db2Type::LobBytes(_) => Db2Type::LobBytes(length),
+        Db2Type::LobChar(_) => Db2Type::LobChar(length),
+        Db2Type::RowId(_) => Db2Type::RowId(length),
+        other => other.clone(),
+    }
+}
+
 /// Parse a single SDA (Structured Data Area) triplet's data portion.
 fn parse_sda_triplet(data: &[u8], col_index: usize) -> Option<ColumnDescriptor> {
     if data.is_empty() {
@@ -190,13 +248,26 @@ fn parse_sda_triplet(data: &[u8], col_index: usize) -> Option<ColumnDescriptor> 
     }
 
     let drda_type = data[0];
-    let nullable = (drda_type & 0x01) != 0;
 
-    let length = if data.len() >= 3 {
+    let mut length = if data.len() >= 3 {
         u16::from_be_bytes([data[1], data[2]])
     } else {
         0
     };
+    let mut db2_type_override = None;
+    let mut nullable_override = None;
+    let mut zos_late_character = false;
+
+    if let Some(swapped_len) = probable_zos_late_character_length(drda_type, data, length) {
+        length = swapped_len;
+        db2_type_override = Some(if drda_type == 0x51 {
+            Db2Type::VarChar(swapped_len)
+        } else {
+            Db2Type::Char(swapped_len)
+        });
+        nullable_override = Some(false);
+        zos_late_character = true;
+    }
 
     let mut precision = 0u8;
     let mut scale = 0u8;
@@ -227,8 +298,15 @@ fn parse_sda_triplet(data: &[u8], col_index: usize) -> Option<ColumnDescriptor> 
         }
     }
 
-    let (mut db2_type, _) = Db2Type::from_drda_type(drda_type, length, precision, scale);
-    if ccsid == 0 {
+    if zos_late_character && ccsid == 0 {
+        ccsid = 37;
+    }
+
+    let (mut db2_type, decoded_nullable) = db2_type_override
+        .map(|db2_type| (db2_type, false))
+        .unwrap_or_else(|| Db2Type::from_drda_type(drda_type, length, precision, scale));
+    let nullable = nullable_override.unwrap_or(decoded_nullable);
+    if ccsid == 0 && !zos_late_character {
         db2_type = match base_type {
             0x30 => Db2Type::Binary(length),
             0x32 => Db2Type::VarBinary(length),
@@ -247,6 +325,23 @@ fn parse_sda_triplet(data: &[u8], col_index: usize) -> Option<ColumnDescriptor> 
         db2_type,
         byte_order: ByteOrder::LittleEndian,
     })
+}
+
+fn probable_zos_late_character_length(drda_type: u8, data: &[u8], be_length: u16) -> Option<u16> {
+    if !(0x50..0xC8).contains(&drda_type) || data.len() < 3 {
+        return None;
+    }
+
+    let le_length = u16::from_le_bytes([data[1], data[2]]);
+    if le_length == 0 || le_length > 512 {
+        return None;
+    }
+
+    if be_length >= 256 && be_length.is_multiple_of(256) {
+        Some(le_length)
+    } else {
+        None
+    }
 }
 
 /// Decode a single row of data from QRYDTA bytes using column descriptors.
@@ -1309,6 +1404,88 @@ mod tests {
         assert_eq!(consumed, row_data.len());
         assert_eq!(values[0], Db2Value::Decimal("3".to_string()));
         assert_eq!(values[1], Db2Value::VarChar("112042F8730CA1".to_string()));
+    }
+
+    #[test]
+    fn test_parse_sda_late_fixed_character_length() {
+        let qrydsc = [0x05, 0x70, 0x50, 0x10, 0x00];
+        let descriptors = parse_qrydsc(&qrydsc).unwrap();
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].db2_type, Db2Type::Char(16));
+        assert_eq!(descriptors[0].length, 16);
+        assert_eq!(descriptors[0].ccsid, 37);
+        assert!(!descriptors[0].nullable);
+    }
+
+    #[test]
+    fn test_parse_sda_late_varying_character_length() {
+        let qrydsc = [0x05, 0x70, 0x51, 0x64, 0x00];
+        let descriptors = parse_qrydsc(&qrydsc).unwrap();
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].db2_type, Db2Type::VarChar(100));
+        assert_eq!(descriptors[0].length, 100);
+        assert_eq!(descriptors[0].ccsid, 37);
+        assert!(!descriptors[0].nullable);
+    }
+
+    #[test]
+    fn test_parse_qrydsc_uses_late_environment_gda_columns() {
+        let qrydsc = [
+            // Late environment definitions for fixed and varying EBCDIC text.
+            0x05, 0x70, 0x50, 0x10, 0x00, 0x05, 0x70, 0x51, 0x64, 0x00,
+            // Three result columns with per-column lengths.
+            0x0C, 0x76, 0xD0, 0x50, 0x00, 0x12, 0x51, 0x00, 0x64, 0x50, 0x00, 0x08,
+        ];
+        let descriptors = parse_qrydsc(&qrydsc).unwrap();
+        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors[0].db2_type, Db2Type::Char(18));
+        assert_eq!(descriptors[1].db2_type, Db2Type::VarChar(100));
+        assert_eq!(descriptors[2].db2_type, Db2Type::Char(8));
+        assert!(descriptors.iter().all(|descriptor| descriptor.ccsid == 37));
+    }
+
+    #[test]
+    fn test_parse_qrydsc_keeps_complete_direct_layout_over_partial_gda() {
+        let qrydsc = [
+            0x05, 0x70, 0x50, 0x12, 0x00, 0x05, 0x70, 0x51, 0x64, 0x00, 0x05, 0x70, 0x50, 0x08,
+            0x00, 0x06, 0x76, 0xD0, 0x50, 0x00, 0x12,
+        ];
+        let descriptors = parse_qrydsc(&qrydsc).unwrap();
+
+        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors[0].db2_type, Db2Type::Char(18));
+        assert_eq!(descriptors[1].db2_type, Db2Type::VarChar(100));
+        assert_eq!(descriptors[2].db2_type, Db2Type::Char(8));
+    }
+
+    #[test]
+    fn test_late_qrydsc_decodes_complete_multirow_tail() {
+        let qrydsc = [
+            0x05, 0x70, 0x50, 0x12, 0x00, 0x05, 0x70, 0x51, 0x64, 0x00, 0x05, 0x70, 0x50, 0x08,
+            0x00, 0x06, 0x76, 0xD0, 0x50, 0x00, 0x12,
+        ];
+        let descriptors = parse_qrydsc(&qrydsc).unwrap();
+        let encoded_row = [
+            0xFF, 0x00, 0xC1, 0xF7, 0xD2, 0xF9, 0xD4, 0xF2, 0xD8, 0xF4, 0xE7, 0xF1, 0x40, 0x40,
+            0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x00, 0x08, 0xD8, 0xC1, 0x6D, 0xC5, 0xE5, 0xC5,
+            0xD5, 0xE3, 0xF2, 0xF0, 0xF3, 0xF1, 0xF0, 0xF4, 0xF0, 0xF9,
+        ];
+        let row_data = encoded_row.repeat(39);
+        assert_eq!(row_data.len(), 1482);
+
+        let mut tail = Vec::new();
+        let rows = decode_rows_with_tail(&row_data, &descriptors, &mut tail).unwrap();
+
+        assert!(tail.is_empty());
+        assert_eq!(rows.len(), 39);
+        assert_eq!(
+            rows[0],
+            vec![
+                Db2Value::Char("A7K9M2Q4X1        ".to_string()),
+                Db2Value::VarChar("QA_EVENT".to_string()),
+                Db2Value::Char("20310409".to_string()),
+            ]
+        );
     }
 
     #[test]

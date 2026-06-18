@@ -2,6 +2,14 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.21](https://github.com/gurungabit/db2-node/releases/tag/v1.0.21) (2026-06-18)
+
+### Bug Fixes
+
+- restore Db2 for z/OS late FD:OCA descriptor decoding for fixed and varying EBCDIC text columns
+- apply compact GDA per-column length overrides and prefer the complete row layout, preventing parameterized multi-column queries from being decoded as a single `LOBBYTES(4096)` value
+- cover the reported 1,482-byte multirow tail through the full QRYDSC/QRYDTA query-frame path
+
 ## [1.0.20](https://github.com/gurungabit/db2-node/releases/tag/v1.0.20) (2026-06-18)
 
 ### Bug Fixes

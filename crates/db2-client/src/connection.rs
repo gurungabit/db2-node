@@ -8913,6 +8913,81 @@ mod tests {
     }
 
     #[test]
+    fn parameterized_query_frames_decode_late_qrydsc_rows() {
+        let qrydsc = [
+            0x05, 0x70, 0x50, 0x12, 0x00, 0x05, 0x70, 0x51, 0x64, 0x00, 0x05, 0x70, 0x50, 0x08,
+            0x00, 0x06, 0x76, 0xD0, 0x50, 0x00, 0x12,
+        ];
+        let encoded_row = [
+            0xFF, 0x00, 0xC1, 0xF7, 0xD2, 0xF9, 0xD4, 0xF2, 0xD8, 0xF4, 0xE7, 0xF1, 0x40, 0x40,
+            0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x00, 0x08, 0xD8, 0xC1, 0x6D, 0xC5, 0xE5, 0xC5,
+            0xD5, 0xE3, 0xF2, 0xF0, 0xF3, 0xF1, 0xF0, 0xF4, 0xF0, 0xF9,
+        ];
+        let row_data = encoded_row.repeat(39);
+
+        let mut payload = db2_proto::ddm::DdmBuilder::new(codepoints::QRYDSC)
+            .add_raw(&qrydsc)
+            .build();
+        payload.extend(
+            db2_proto::ddm::DdmBuilder::new(codepoints::QRYDTA)
+                .add_raw(&row_data)
+                .build(),
+        );
+        payload.extend(db2_proto::ddm::DdmBuilder::new(codepoints::ENDQRYRM).build());
+        let frame = DssFrame {
+            header: db2_proto::dss::DssHeader {
+                length: (payload.len() + db2_proto::dss::DSS_HEADER_LEN) as u16,
+                dss_type: db2_proto::dss::DssType::Reply,
+                flags: db2_proto::dss::DssFlags::none(),
+                correlation_id: 1,
+            },
+            payload,
+        };
+        let column_info = vec![
+            ColumnInfo::new("ITEM_KEY".to_string(), "Unknown".to_string(), false),
+            ColumnInfo::new("ITEM_KIND".to_string(), "Unknown".to_string(), false),
+            ColumnInfo::new("ITEM_DATE".to_string(), "Unknown".to_string(), false),
+        ];
+        let mut rows = Vec::new();
+        let mut sqldard_descriptors = None;
+        let mut qrydsc_descriptors = None;
+        let mut query_instance_id = None;
+        let mut pending_row_bytes = Vec::new();
+        let mut extdta_payloads = Vec::new();
+        let mut end_of_query = false;
+        let mut diagnostics = Vec::new();
+
+        process_query_frames(
+            &[frame],
+            &column_info,
+            &mut rows,
+            &mut sqldard_descriptors,
+            &mut qrydsc_descriptors,
+            false,
+            &mut query_instance_id,
+            &mut pending_row_bytes,
+            &mut extdta_payloads,
+            &mut end_of_query,
+            false,
+            &mut diagnostics,
+        )
+        .unwrap();
+
+        assert!(end_of_query);
+        assert!(pending_row_bytes.is_empty());
+        assert_eq!(qrydsc_descriptors.as_ref().map(Vec::len), Some(3));
+        assert_eq!(rows.len(), 39);
+        assert_eq!(
+            rows[0].values(),
+            &[
+                Db2Value::Char("A7K9M2Q4X1        ".to_string()),
+                Db2Value::VarChar("QA_EVENT".to_string()),
+                Db2Value::Char("20310409".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn retry_read_query_after_invalid_zos_cursor_state() {
         let params: [&dyn ToSql; 0] = [];
         let err = Error::Sql {

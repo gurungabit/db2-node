@@ -4,7 +4,7 @@ Pure Rust DB2 driver for Node.js using the DRDA wire protocol directly. No IBM C
 
 ## Status
 
-`1.0.20` is the current production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, TLS, `ibm_db` compatibility entry points, and validated z/OS LOB materialization cleanup.
+`1.0.21` is the current production release for DB2 LUW connectivity and Db2 z/OS encrypted authentication with z/OS-compatible security-check framing, parameterized queries, prepared statements, transactions, connection pooling, TLS, `ibm_db` compatibility entry points, and validated z/OS LOB materialization cleanup.
 
 ## Install
 
@@ -15,10 +15,10 @@ npm install db2-node
 You can also install the npm-packed artifact from a GitHub release:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.20/db2-node-1.0.20.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.21/db2-node-1.0.21.tgz
 ```
 
-Replace `v1.0.20` and `1.0.20` with the release version you want.
+Replace `v1.0.21` and `1.0.21` with the release version you want.
 
 Prebuilt native binaries ship for supported platforms — no Rust toolchain needed:
 
