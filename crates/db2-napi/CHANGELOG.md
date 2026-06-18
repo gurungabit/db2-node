@@ -2,6 +2,13 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.20](https://github.com/gurungabit/db2-node/releases/tag/v1.0.20) (2026-06-18)
+
+### Bug Fixes
+
+- preserve SQLDARD result descriptors for immediate result-set replies instead of decoding ordinary rows through a one-column QRYDSC LOB envelope
+- prefer multi-column SQLDARD row layouts when z/OS exposes a single `LOBBYTES` or `LOBCHAR` QRYDSC envelope, preventing complete row blocks from being reported as undecoded LOB tails
+
 ## [1.0.19](https://github.com/gurungabit/db2-node/releases/tag/v1.0.19) (2026-05-14)
 
 ### Bug Fixes

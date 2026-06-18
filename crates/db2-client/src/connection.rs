@@ -532,7 +532,8 @@ impl ClientInner {
                 sql,
                 self.parse_prepare_reply(&frames).unwrap_or_default(),
             );
-            self.process_query_reply(&frames, sql, &column_info, None)
+            let result_descriptors = self.parse_prepare_result_descriptors(&frames);
+            self.process_query_reply(&frames, sql, &column_info, Some(&result_descriptors))
                 .await
         } else {
             self.process_execute_reply(&frames).await
@@ -7130,11 +7131,30 @@ fn preferred_descriptor_vec<'a>(
     qrydsc_descriptors: Option<&'a Vec<db2_proto::fdoca::ColumnDescriptor>>,
     prefer_sqldard: bool,
 ) -> Option<&'a Vec<db2_proto::fdoca::ColumnDescriptor>> {
+    if let (Some(sqldard), Some(qrydsc)) = (sqldard_descriptors, qrydsc_descriptors) {
+        if !sqldard.is_empty()
+            && sqldard.len() != qrydsc.len()
+            && qrydsc_is_lob_row_envelope(qrydsc)
+        {
+            return Some(sqldard);
+        }
+    }
+
     if prefer_sqldard {
         sqldard_descriptors.or(qrydsc_descriptors)
     } else {
         qrydsc_descriptors.or(sqldard_descriptors)
     }
+}
+
+fn qrydsc_is_lob_row_envelope(descriptors: &[db2_proto::fdoca::ColumnDescriptor]) -> bool {
+    descriptors.len() == 1
+        && matches!(
+            descriptors[0].db2_type,
+            db2_proto::types::Db2Type::LobBytes(len)
+                | db2_proto::types::Db2Type::LobChar(len)
+                if len >= 1024
+        )
 }
 
 fn prepare_frames_have_result_metadata(frames: &[DssFrame]) -> bool {
@@ -8814,6 +8834,82 @@ mod tests {
         assert_eq!(merged[0].type_name, "Decimal { precision: 11, scale: 0 }");
         assert_eq!(merged[1].name, "COL_F6N3_DOC");
         assert_eq!(merged[1].type_name, "VarGraphic(32704)");
+    }
+
+    #[test]
+    fn sqldard_descriptors_override_qrydsc_lob_row_envelope() {
+        let sqldard = vec![
+            db2_proto::fdoca::ColumnDescriptor {
+                column_index: 0,
+                drda_type: 0x30,
+                length: 18,
+                precision: 0,
+                scale: 0,
+                nullable: false,
+                ccsid: 37,
+                db2_type: db2_proto::types::Db2Type::Char(18),
+                byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
+            },
+            db2_proto::fdoca::ColumnDescriptor {
+                column_index: 1,
+                drda_type: 0x32,
+                length: 32,
+                precision: 0,
+                scale: 0,
+                nullable: false,
+                ccsid: 37,
+                db2_type: db2_proto::types::Db2Type::VarChar(32),
+                byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
+            },
+            db2_proto::fdoca::ColumnDescriptor {
+                column_index: 2,
+                drda_type: 0x30,
+                length: 8,
+                precision: 0,
+                scale: 0,
+                nullable: false,
+                ccsid: 37,
+                db2_type: db2_proto::types::Db2Type::Char(8),
+                byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
+            },
+        ];
+        let qrydsc = vec![db2_proto::fdoca::ColumnDescriptor {
+            column_index: 0,
+            drda_type: 0x50,
+            length: 4096,
+            precision: 0,
+            scale: 0,
+            nullable: false,
+            ccsid: 0,
+            db2_type: db2_proto::types::Db2Type::LobBytes(4096),
+            byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
+        }];
+
+        let descriptors = preferred_descriptor_vec(Some(&sqldard), Some(&qrydsc), false).unwrap();
+        assert_eq!(descriptors.len(), 3);
+
+        let encoded_row = [
+            0xFF, 0x00, 0xF2, 0xF2, 0xF2, 0xC4, 0xF7, 0xF9, 0xF5, 0xF4, 0xF3, 0xF0, 0x40, 0x40,
+            0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x00, 0x08, 0xC2, 0xC9, 0x6D, 0xD9, 0xC5, 0xD5,
+            0xC5, 0xE6, 0xF2, 0xF0, 0xF2, 0xF6, 0xF0, 0xF6, 0xF1, 0xF7,
+        ];
+        let row_data = encoded_row.repeat(39);
+        assert_eq!(row_data.len(), 1482);
+
+        let mut tail = Vec::new();
+        let rows =
+            db2_proto::fdoca::decode_rows_with_tail(&row_data, descriptors, &mut tail).unwrap();
+
+        assert!(tail.is_empty());
+        assert_eq!(rows.len(), 39);
+        assert_eq!(
+            rows[0],
+            vec![
+                Db2Value::Char("222D795430        ".to_string()),
+                Db2Value::VarChar("BI_RENEW".to_string()),
+                Db2Value::Char("20260617".to_string()),
+            ]
+        );
     }
 
     #[test]
