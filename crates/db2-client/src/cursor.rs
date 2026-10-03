@@ -147,7 +147,19 @@ impl Cursor {
         let collect_diagnostics = crate::connection::query_diagnostics_enabled();
 
         self.last_fetch_diagnostics.clear();
-        let cntqry_data = if has_lobs && crate::connection::use_native_zos_lob_strategy() {
+        let is_zos = inner
+            .server_info
+            .as_ref()
+            .is_some_and(crate::connection::is_db2_zos_server);
+        let cntqry_data = if has_lobs && !is_zos {
+            db2_proto::commands::cntqry::build_cntqry(
+                &self.pkgnamcsn,
+                self.query_instance_id.as_deref(),
+                db2_proto::commands::opnqry::DEFAULT_QRYBLKSZ,
+                Some(-1),
+                Some(self.fetch_size),
+            )
+        } else if has_lobs && crate::connection::use_native_zos_lob_strategy() {
             let use_extra_blocks = crate::connection::use_zos_native_lob_cntqry_extra_blocks();
             let qryrowset = crate::connection::zos_native_lob_cntqry_rowset(self.fetch_size);
             if collect_diagnostics {
@@ -757,6 +769,8 @@ impl Cursor {
                             &mut self.pending_row_bytes,
                         )
                         .map_err(|e| Error::Protocol(e.to_string()))?;
+                        *end_of_query |=
+                            db2_proto::fdoca::take_query_end(&mut self.pending_row_bytes);
                         if !decoded_rows.is_empty() {
                             for values in decoded_rows {
                                 rows.push(Row::new_shared(self.column_names.clone(), values));

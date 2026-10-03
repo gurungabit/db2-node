@@ -92,7 +92,8 @@ JavaScript result values use these mappings:
 
 | Db2 type family | JavaScript value |
 |-----------------|------------------|
-| `SMALLINT`, `INTEGER`, `BIGINT`, floating point | `number` |
+| `SMALLINT`, `INTEGER`, floating point | `number` |
+| `BIGINT` | `number` within JavaScript’s safe integer range; decimal `string` outside it |
 | `DECIMAL`, `NUMERIC`, `DECFLOAT` | `string` |
 | `CHAR`, `VARCHAR`, `GRAPHIC`, `VARGRAPHIC`, `CLOB`, `DBCLOB`, `DATE`, `TIME`, `TIMESTAMP`, `ROWID`, `XML` | `string` |
 | `BINARY`, `VARBINARY`, `BLOB` | `Buffer` |
@@ -120,18 +121,33 @@ await client.query('INSERT INTO files (payload) VALUES (CAST(? AS BLOB(1M)))', [
 | `securityMechanism` | `string` | `'encrypted'` | DRDA authentication mechanism: `'encrypted'` (SECMEC 9), `'encryptedPassword'` (SECMEC 7), `'userPassword'` (SECMEC 3), or `'userOnly'` (SECMEC 4) |
 | `encryptionAlgorithm` | `string` | `'aes'` | DRDA encrypted credential algorithm: `'aes'` or `'des'` |
 | `credentialEncoding` | `string` | `'auto'` | Credential string encoding for `SECCHK`: `'auto'`, `'utf8'`, or `'ebcdic'` |
-| `encryptedPasswordEncoding` | `string` | `'same'` | SECMEC 7 DES encrypted password plaintext encoding: `'same'`, `'utf8'`, or `'ebcdic'`; AES uses UTF-8/source CCSID |
+| `encryptedPasswordEncoding` | `string` | `'same'` | SECMEC 7 DES encrypted password plaintext encoding: `'same'`, `'utf8'`, or `'ebcdic'`; AES uses the negotiated credential encoding on LUW and UTF-8/source CCSID on z/OS |
 | `encryptedPasswordTokenEncoding` | `string` | `'same'` | SECMEC 7 DES password IV/token encoding, based on the user ID: `'same'`, `'utf8'`, or `'ebcdic'`; AES uses the server security token |
 | `ssl` | `boolean` | `false` | Enable TLS/SSL |
 | `rejectUnauthorized` | `boolean` | `true` | Verify server certificate (requires `ssl: true`) |
 | `sslClientHostnameValidation` | `string` | `'Basic'` | IBM-compatible hostname validation mode: `'Basic'` or `'OFF'` |
 | `caCert` | `string` | — | Path to CA certificate PEM file |
 | `connectTimeout` | `number` | `30000` | Connection timeout in ms (covers TCP + TLS handshake) |
-| `queryTimeout` | `number` | `0` | Query execution timeout in ms (0 = no timeout) |
+| `queryTimeout` | `number` | `0` | Query execution timeout in ms (0 = no timeout); attempts LUW server cancellation before closing the connection |
 | `frameDrainTimeout` | `number` | `25` | Time in ms to wait for follow-up DRDA reply frames |
 | `currentSchema` | `string` | — | Default schema for unqualified table names |
-| `typeDefinitionName` | `string` | `'QTDSQLASC'` | Optional DRDA data representation for ACCRDB: `'QTDSQLASC'`, `'QTDSQL370'`, `'QTDSQLX86'`, `'QTDSQL400'`, or `'none'` to omit |
+| `typeDefinitionName` | `string` | Server-dependent | LUW supports omitted or `'QTDSQLX86'`; other explicit values fail. z/OS supports `'QTDSQLASC'` (default), `'QTDSQL370'`, `'QTDSQLX86'`, `'QTDSQL400'`, or `'none'` |
 | `fetchSize` | `number` | `100` | Rows fetched per network round-trip |
+
+The default encrypted authentication refuses a non-TLS downgrade to plaintext. A stock Docker server with `AUTHENTICATION=SERVER` requires an explicit `securityMechanism: 'userPassword'`, TLS, or server configuration enabling encrypted authentication. AES and DES are supported with `SERVER_ENCRYPT`; `AES_ONLY` rejects DES explicitly.
+
+## Parameters, Procedures and Cancellation
+
+Parameters accept `bigint`, decimal strings for BIGINT, UTC `Date` values, `Buffer`, `Uint8Array`, `ArrayBuffer`, numbers, strings, booleans and null. A `Date` becomes UTC timestamp text; SQL casts select the desired Db2 type. Unsafe BIGINT results are decimal strings, so `9223372036854775807` stays exact.
+
+A `CALL` result exposes `resultSets` and `outputParameters`. `rows`, `columns` and `rowCount` describe the first result set. `outputParameters` contains OUT and INOUT values in parameter order; IN-only parameters are omitted. These fields are also available on compatibility `queryResult()` results, and callback forms receive OUT values as their third argument.
+
+```ts
+const result = await client.query('CALL MY_PROC(?, ?)', [7, null])
+console.log(result.resultSets, result.outputParameters)
+```
+
+`await client.cancel()` cancels active work on a LUW connection through a separate control connection and returns whether it cancelled an activity. The query rejects with the server cancellation error while the connection remains usable. `queryTimeout` uses the same mechanism, then closes the timed-out connection. Cancellation has a five-second control-operation bound and requires permission to monitor activity and execute `SYSPROC.WLM_CANCEL_ACTIVITY`; failures are reported in the timeout error. z/OS server cancellation is not implemented.
 
 ## Pool
 

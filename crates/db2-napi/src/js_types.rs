@@ -243,6 +243,8 @@ pub fn query_result_to_js(result: db2_client::types::QueryResult) -> JsQueryResu
         row_count,
         columns: result_columns,
         diagnostics,
+        result_sets,
+        output_parameters,
     } = result;
 
     let columns: Vec<JsColumnInfo> = result_columns
@@ -267,6 +269,8 @@ pub fn query_result_to_js(result: db2_client::types::QueryResult) -> JsQueryResu
         row_count,
         columns,
         diagnostics,
+        result_sets: result_sets.into_iter().map(query_result_to_js).collect(),
+        output_parameters: JsValues(output_parameters),
     }
 }
 
@@ -403,6 +407,35 @@ impl ToNapiValue for JsRows {
     }
 }
 
+pub struct JsValues(pub Vec<db2_proto::types::Db2Value>);
+impl TypeName for JsValues {
+    fn type_name() -> &'static str {
+        "Array<any>"
+    }
+    fn value_type() -> ValueType {
+        ValueType::Object
+    }
+}
+impl ValidateNapiValue for JsValues {}
+impl FromNapiValue for JsValues {
+    unsafe fn from_napi_value(_: sys::napi_env, _: sys::napi_value) -> napi::Result<Self> {
+        Err(napi::Error::from_reason("JsValues is an output-only type"))
+    }
+}
+impl ToNapiValue for JsValues {
+    unsafe fn to_napi_value(env: sys::napi_env, values: Self) -> napi::Result<sys::napi_value> {
+        let array = Env::from(env).create_array_with_length(values.0.len())?;
+        for (index, value) in values.0.into_iter().enumerate() {
+            let value = db2_value_to_napi_value(env, value)?;
+            napi::check_status!(
+                sys::napi_set_element(env, array.raw(), index as u32, value),
+                "Cannot set output parameter"
+            )?;
+        }
+        Ok(array.raw())
+    }
+}
+
 fn db2_value_to_napi_value(
     env: sys::napi_env,
     value: db2_proto::types::Db2Value,
@@ -414,6 +447,11 @@ fn db2_value_to_napi_value(
             Db2Value::Null => ToNapiValue::to_napi_value(env, Null),
             Db2Value::SmallInt(v) => ToNapiValue::to_napi_value(env, v as i64),
             Db2Value::Integer(v) => ToNapiValue::to_napi_value(env, v as i64),
+            Db2Value::BigInt(v)
+                if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&v) =>
+            {
+                ToNapiValue::to_napi_value(env, v.to_string())
+            }
             Db2Value::BigInt(v) => ToNapiValue::to_napi_value(env, v),
             Db2Value::Real(v) => {
                 ToNapiValue::to_napi_value(env, if v.is_finite() { v as f64 } else { 0.0 })
@@ -487,9 +525,104 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Convert JavaScript parameter values (passed as serde_json::Value) to Vec<Db2Value>.
-pub fn js_params_to_db2(params: &[serde_json::Value]) -> Vec<db2_proto::types::Db2Value> {
-    params.iter().map(json_to_db2_value).collect()
+/// Convert parameters before napi's JSON decoder can panic on JavaScript BigInt.
+pub struct JsParameter(serde_json::Value);
+
+impl TypeName for JsParameter {
+    fn type_name() -> &'static str {
+        "unknown"
+    }
+    fn value_type() -> ValueType {
+        ValueType::Unknown
+    }
+}
+
+impl ValidateNapiValue for JsParameter {}
+
+impl FromNapiValue for JsParameter {
+    unsafe fn from_napi_value(env: sys::napi_env, raw: sys::napi_value) -> napi::Result<Self> {
+        let value = unsafe { napi::JsUnknown::from_napi_value(env, raw)? };
+        let json = match value.get_type()? {
+            ValueType::BigInt => serde_json::Value::String(
+                value.coerce_to_string()?.into_utf8()?.as_str()?.to_owned(),
+            ),
+            ValueType::Undefined | ValueType::Null => serde_json::Value::Null,
+            ValueType::Object if value.is_date()? => {
+                let object = value.coerce_to_object()?;
+                let to_iso: napi::JsFunction = object.get_named_property("toISOString")?;
+                let text = to_iso
+                    .call_without_args(Some(&object))?
+                    .coerce_to_string()?
+                    .into_utf8()?
+                    .as_str()?
+                    .to_owned();
+                serde_json::Value::String(text.replace('T', " ").trim_end_matches('Z').to_owned())
+            }
+            ValueType::Object if value.is_buffer()? => {
+                let buffer = unsafe { napi::bindgen_prelude::Buffer::from_napi_value(env, raw)? };
+                serde_json::Value::Array(
+                    buffer
+                        .iter()
+                        .map(|byte| serde_json::Value::from(*byte))
+                        .collect(),
+                )
+            }
+            ValueType::Object if value.is_typedarray()? => {
+                let bytes = napi::bindgen_prelude::Uint8Array::from_napi_value(env, raw)?;
+                serde_json::Value::Array(
+                    bytes
+                        .iter()
+                        .map(|byte| serde_json::Value::from(*byte))
+                        .collect(),
+                )
+            }
+            ValueType::Object
+                if {
+                    let mut is_array_buffer = false;
+                    napi::check_status!(sys::napi_is_arraybuffer(env, raw, &mut is_array_buffer))?;
+                    is_array_buffer
+                } =>
+            {
+                let mut data = ptr::null_mut();
+                let mut length = 0;
+                napi::check_status!(sys::napi_get_arraybuffer_info(
+                    env,
+                    raw,
+                    &mut data,
+                    &mut length
+                ))?;
+                let bytes = if length == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(data.cast::<u8>(), length)
+                };
+                serde_json::Value::Array(
+                    bytes
+                        .iter()
+                        .map(|byte| serde_json::Value::from(*byte))
+                        .collect(),
+                )
+            }
+            ValueType::Object if value.is_array()? => {
+                let items = unsafe { Vec::<JsParameter>::from_napi_value(env, raw)? };
+                serde_json::Value::Array(items.into_iter().map(|item| item.0).collect())
+            }
+            ValueType::Object => {
+                return Err(napi::Error::from_reason(
+                    "Unsupported object parameter; use Date, Buffer, or a byte array",
+                ));
+            }
+            _ => unsafe { serde_json::Value::from_napi_value(env, raw)? },
+        };
+        Ok(Self(json))
+    }
+}
+
+pub fn js_params_to_db2(params: &[JsParameter]) -> Vec<db2_proto::types::Db2Value> {
+    params
+        .iter()
+        .map(|param| json_to_db2_value(&param.0))
+        .collect()
 }
 
 /// Convert a single JSON value to a Db2Value.

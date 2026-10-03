@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::js_connection::JsQueryResult;
-use crate::js_types::{client_error_to_napi, js_params_to_db2, query_result_to_js};
+use crate::js_types::{client_error_to_napi, js_params_to_db2, query_result_to_js, JsParameter};
 
 #[napi]
 pub struct JsTransaction {
@@ -26,7 +26,10 @@ impl JsTransaction {
     pub async fn query(
         &self,
         sql: String,
-        params: Option<Vec<serde_json::Value>>,
+        #[napi(
+            ts_arg_type = "Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null"
+        )]
+        params: Option<Vec<JsParameter>>,
     ) -> Result<JsQueryResult> {
         let mut guard = self.inner.lock().await;
         let txn = guard.as_mut().ok_or_else(|| {

@@ -346,28 +346,52 @@ pub fn decode_row(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2V
     decode_row_body(data, columns)
 }
 
+/// CALL output data can omit an IN-only parameter using marker 0x80.
+pub fn decode_output_parameters(
+    data: &[u8],
+    columns: &[ColumnDescriptor],
+) -> Result<Vec<Db2Value>> {
+    let (card, mut offset) = crate::replies::sqldard::consume_sqlca_group(data)?;
+    if card.is_error() {
+        return Err(ProtoError::InvalidSqlcard(format!(
+            "CALL failed: SQLCODE={}, SQLSTATE={}",
+            card.sqlcode, card.sqlstate
+        )));
+    }
+    if data.get(offset) == Some(&0xFF) {
+        return Ok(Vec::new());
+    }
+    offset += 1; // SQLDTAGRP indicator
+    let mut values = Vec::new();
+    for column in columns {
+        let marker = *data.get(offset).ok_or(ProtoError::BufferTooShort {
+            expected: offset + 1,
+            actual: data.len(),
+        })?;
+        offset += 1;
+        match marker {
+            0x80 => continue, // IN-only parameter: no output value follows
+            0xFF => values.push(Db2Value::Null),
+            0x00 => {
+                let (value, consumed) = decode_column_value(&data[offset..], column)?;
+                offset += consumed;
+                values.push(value);
+            }
+            other => {
+                return Err(ProtoError::Other(format!(
+                    "Invalid CALL output marker 0x{other:02X}"
+                )))
+            }
+        }
+    }
+    Ok(values)
+}
+
 fn decode_row_body(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2Value>, usize)> {
     let mut values = Vec::with_capacity(columns.len());
     let mut offset = 0;
 
     for col in columns {
-        if columns.len() == 1 && col.nullable && matches!(col.db2_type, Db2Type::Boolean) {
-            if offset >= data.len() {
-                return Err(ProtoError::BufferTooShort {
-                    expected: offset + 1,
-                    actual: data.len(),
-                });
-            }
-            let marker = data[offset];
-            offset += 1;
-            if marker == 0xFF {
-                values.push(Db2Value::Null);
-            } else {
-                values.push(Db2Value::Boolean(marker != 0));
-            }
-            continue;
-        }
-
         // Check null indicator for nullable columns
         if col.nullable {
             if offset >= data.len() {
@@ -419,6 +443,24 @@ pub fn decode_rows_with_tail(
     decode_rows_from_buffer(&buffer, columns, tail)
 }
 
+/// SQLCODE +100 may be embedded in QRYDTA rather than ENDQRYRM (CALL cursors).
+fn is_query_end_sqlca(data: &[u8]) -> bool {
+    data.len() >= 10
+        && data[0] == 0
+        && &data[5..10] == b"02000"
+        && (i32::from_le_bytes(data[1..5].try_into().unwrap()) == 100
+            || i32::from_be_bytes(data[1..5].try_into().unwrap()) == 100)
+}
+
+pub fn take_query_end(tail: &mut Vec<u8>) -> bool {
+    if is_query_end_sqlca(tail) && tail.ends_with(&[0xFF, 0xFF]) {
+        tail.clear();
+        true
+    } else {
+        false
+    }
+}
+
 fn decode_rows_from_buffer(
     buffer: &[u8],
     columns: &[ColumnDescriptor],
@@ -428,6 +470,10 @@ fn decode_rows_from_buffer(
     let mut offset = 0;
 
     while offset < buffer.len() {
+        if is_query_end_sqlca(&buffer[offset..]) {
+            tail.extend_from_slice(&buffer[offset..]);
+            break;
+        }
         match decode_row(&buffer[offset..], columns) {
             Ok((row, consumed)) => {
                 if consumed == 0 {
@@ -1070,6 +1116,12 @@ fn bytes_are_likely_text(bytes: &[u8]) -> bool {
 }
 
 fn decode_character_bytes(data: &[u8], ccsid: u16) -> String {
+    if ccsid == 1208 {
+        return String::from_utf8_lossy(data).into_owned();
+    }
+    if ccsid == 819 {
+        return data.iter().map(|byte| char::from(*byte)).collect();
+    }
     if matches!(ccsid, 37 | 500) {
         return crate::codepage::ebcdic037_to_utf8(data);
     }
@@ -1193,7 +1245,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_nullable_boolean_single_byte_values() {
+    fn test_decode_nullable_boolean_values_with_null_indicator() {
         let cols = vec![ColumnDescriptor {
             column_index: 0,
             drda_type: 0xBF,
@@ -1206,12 +1258,12 @@ mod tests {
             byte_order: ByteOrder::BigEndian,
         }];
 
-        let (values, consumed) = decode_row(&[0x01], &cols).unwrap();
-        assert_eq!(consumed, 1);
+        let (values, consumed) = decode_row(&[0x00, 0x00, 0x01], &cols).unwrap();
+        assert_eq!(consumed, 3);
         assert_eq!(values[0], Db2Value::Boolean(true));
 
-        let (values, consumed) = decode_row(&[0x00], &cols).unwrap();
-        assert_eq!(consumed, 1);
+        let (values, consumed) = decode_row(&[0x00, 0x00, 0x00], &cols).unwrap();
+        assert_eq!(consumed, 3);
         assert_eq!(values[0], Db2Value::Boolean(false));
 
         let (values, consumed) = decode_row(&[0xFF], &cols).unwrap();

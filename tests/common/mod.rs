@@ -27,7 +27,7 @@ pub fn test_config() -> Config {
         database: env::var("DB2_TEST_DATABASE").unwrap_or_else(|_| "testdb".into()),
         user: env::var("DB2_TEST_USER").unwrap_or_else(|_| "db2inst1".into()),
         password: env::var("DB2_TEST_PASSWORD").unwrap_or_else(|_| "db2wire_test_pw".into()),
-        security_mechanism: SecurityMechanism::EncryptedUserPassword,
+        security_mechanism: SecurityMechanism::UserPassword,
         encryption_algorithm: EncryptionAlgorithm::Des,
         credential_encoding: CredentialEncoding::Auto,
         encrypted_password_encoding: EncryptedPasswordEncoding::SameAsCredential,

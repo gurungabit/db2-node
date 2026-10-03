@@ -76,6 +76,30 @@ impl PreparedStatement {
         guard.activate_section(self.package_id, self.section_number);
         let query_timeout = guard.config.query_timeout;
 
+        if self.sql.trim_start().to_uppercase().starts_with("CALL") {
+            let result = if query_timeout.is_zero() {
+                guard
+                    .execute_call(&pkgnamcsn, &self.sql, params, &self.param_descriptors)
+                    .await
+            } else {
+                match timeout(
+                    query_timeout,
+                    guard.execute_call(&pkgnamcsn, &self.sql, params, &self.param_descriptors),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(guard
+                        .disconnect_after_timeout("prepared CALL", query_timeout)
+                        .await),
+                }
+            };
+            return match result {
+                Ok(result) => Ok(result),
+                Err(err) => Err(guard.finalize_operation_error("prepared CALL", err).await),
+            };
+        }
+
         if is_query {
             let execute_future = async {
                 let corr_id = guard.next_correlation_id();
@@ -83,6 +107,14 @@ impl PreparedStatement {
                     let mut ddm = db2_proto::ddm::DdmBuilder::new(db2_proto::codepoints::OPNQRY);
                     ddm.add_code_point(db2_proto::codepoints::PKGNAMCSN, &pkgnamcsn);
                     ddm.add_u32(db2_proto::codepoints::QRYBLKSZ, 0x0000_FFFF);
+                    if !guard
+                        .server_info
+                        .as_ref()
+                        .is_some_and(crate::connection::is_db2_zos_server)
+                    {
+                        ddm.add_u16(db2_proto::codepoints::MAXBLKEXT, u16::MAX);
+                        ddm.add_u32(db2_proto::codepoints::QRYROWSET, guard.config.fetch_size);
+                    }
                     ddm.add_code_point(0x215D, &[0x01]); // QRYCLSIMP = 1
                     ddm.build()
                 };
@@ -296,10 +328,7 @@ impl Drop for PreparedStatement {
 /// Simple heuristic to determine if a SQL string is a query (SELECT).
 fn sql_is_query(sql: &str) -> bool {
     let trimmed = sql.trim().to_uppercase();
-    trimmed.starts_with("SELECT")
-        || trimmed.starts_with("WITH")
-        || trimmed.starts_with("VALUES")
-        || trimmed.starts_with("CALL")
+    trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") || trimmed.starts_with("VALUES")
 }
 
 fn format_hex_preview(data: &[u8], max_bytes: usize) -> String {

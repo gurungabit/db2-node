@@ -17,6 +17,11 @@ const expected = process.env.DB2_NODE_REQUIRED_BINARIES
       .filter(Boolean)
   : allSupported
 
+if (expected.length === 0) {
+  console.error('DB2_NODE_REQUIRED_BINARIES must name at least one binary.')
+  process.exit(1)
+}
+
 const missing = expected.filter((file) => !fs.existsSync(file))
 
 if (missing.length > 0) {

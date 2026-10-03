@@ -52,7 +52,9 @@ console.log(result.rows);
 await client.close();
 ```
 
-Package-level usage and API details live in `crates/db2-napi/README.md`.
+Encrypted authentication is the default and refuses plaintext fallback on non-TLS connections. For a stock Docker Db2 server using `AUTHENTICATION=SERVER`, explicitly configure `securityMechanism: "userPassword"`, enable TLS, or configure encrypted authentication on the server.
+
+Package-level usage and API details live in `crates/db2-napi/README.md`. The behavior changes and Docker verification for issues #11 and #12 are recorded in [tests/ISSUES-11-12.md](tests/ISSUES-11-12.md).
 
 ## Data Type Coverage
 

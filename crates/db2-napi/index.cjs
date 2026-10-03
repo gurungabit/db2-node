@@ -265,6 +265,11 @@ function validateConnectionConfig(config) {
 function normalizeParam(value) {
   if (value === undefined) return null
   if (value === null) return null
+  if (typeof value === 'bigint') return value.toString()
+  if (value instanceof Date) {
+    if (!Number.isFinite(value.getTime())) throw new TypeError('Invalid Date parameter')
+    return value.toISOString().replace('T', ' ').replace(/Z$/, '')
+  }
   if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) {
     return Array.from(value)
   }
@@ -373,6 +378,8 @@ class ODBCResult {
     this.columns = Array.isArray(result && result.columns) ? result.columns : []
     this.rowCount = result && typeof result.rowCount === 'number' ? result.rowCount : this.rows.length
     this.diagnostics = Array.isArray(result && result.diagnostics) ? result.diagnostics : []
+    this.resultSets = Array.isArray(result && result.resultSets) ? result.resultSets : []
+    this.outputParameters = Array.isArray(result && result.outputParameters) ? result.outputParameters : []
     this._offset = 0
     this._closed = false
   }
@@ -436,7 +443,7 @@ class ODBCStatement {
     return callbackOrPromiseMany(
       async () => new ODBCResult(await this._stmt.execute(normalizeParams(params) || null)),
       callback,
-      (result) => [result, undefined]
+      (result) => [result, result.outputParameters]
     )
   }
 
@@ -533,7 +540,7 @@ class Database {
         return new ODBCResult(result)
       },
       args.callback,
-      (result) => [result, undefined]
+      (result) => [result, result.outputParameters]
     )
   }
 
@@ -941,6 +948,10 @@ class Client {
 
   close() {
     return withDb2ErrorEnrichment(this._native.close())
+  }
+
+  cancel() {
+    return withDb2ErrorEnrichment(this._native.cancel())
   }
 
   serverInfo() {

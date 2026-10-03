@@ -3,6 +3,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const test = require('node:test')
+const { spawnSync } = require('node:child_process')
 const { verifyDarwinArm64 } = require('../scripts/verify-darwin-arm64.cjs')
 
 function temporaryFile(t, header) {
@@ -37,4 +38,14 @@ test('rejects a file without a Mach-O header', (t) => {
   const file = temporaryFile(t, Buffer.alloc(12))
 
   assert.throws(() => verifyDarwinArm64(file), /not a little-endian 64-bit Mach-O binary/)
+})
+
+
+test('prepublish rejects an empty comma-separated required binary list', () => {
+  const result = spawnSync(process.execPath, [path.resolve(__dirname, '../scripts/verify-prepublish.cjs')], {
+    env: { ...process.env, DB2_NODE_REQUIRED_BINARIES: ' , , ' },
+    encoding: 'utf8',
+  })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /must name at least one binary/)
 })

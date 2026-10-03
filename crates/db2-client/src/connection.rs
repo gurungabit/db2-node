@@ -1,6 +1,7 @@
 use bytes::BytesMut;
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedSemaphorePermit};
@@ -96,6 +97,7 @@ pub(crate) struct ClientInner {
     pub free_prepared_sections: Vec<u16>,
     pub zos_lob_internal_depth: usize,
     connection_diagnostics: Vec<String>,
+    cancel_handle: CancelHandle,
     zos_select_cache: HashMap<String, CachedZosSelect>,
 }
 
@@ -380,6 +382,9 @@ impl ClientInner {
 
     async fn reset_session_state(&mut self, explicit_close: bool) {
         self.connected = false;
+        self.cancel_handle
+            .application_handle
+            .store(0, Ordering::Release);
         self.auto_commit = true;
         self.closed_explicitly = explicit_close;
         self.server_info = None;
@@ -410,11 +415,17 @@ impl ClientInner {
         operation: &str,
         timeout_duration: Duration,
     ) -> Error {
+        let cancellation = Box::pin(self.cancel_handle.cancel()).await;
         self.reset_session_state(false).await;
+        let cancellation_detail = match cancellation {
+            Ok(true) => "server activity was cancelled".to_string(),
+            Ok(false) => "no running server activity was found".to_string(),
+            Err(err) => format!("server cancellation failed: {err}"),
+        };
 
         Error::Timeout(format!(
-            "{} timed out after {:?}; connection was closed to avoid protocol desynchronization",
-            operation, timeout_duration
+            "{} timed out after {:?}; {}; connection was closed to avoid protocol desynchronization",
+            operation, timeout_duration, cancellation_detail
         ))
     }
 
@@ -701,6 +712,35 @@ impl ClientInner {
             }
         }
 
+        if let Some(schema) = self.config.current_schema.clone() {
+            let sql = format!("SET CURRENT SCHEMA = '{}'", schema.replace('\'', "''"));
+            if let Err(err) = self.execute_immediate(&sql).await {
+                self.reset_session_state(false).await;
+                return Err(err);
+            }
+        }
+
+        if !self.server_info.as_ref().is_some_and(is_db2_zos_server) {
+            let result = match Box::pin(
+                self.execute_query("VALUES MON_GET_APPLICATION_HANDLE()", &[]),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    self.reset_session_state(false).await;
+                    return Err(err);
+                }
+            };
+            if let Some(value) = result.rows.first().and_then(|row| row.values().first()) {
+                if let Some(handle) = value.as_i64() {
+                    self.cancel_handle
+                        .application_handle
+                        .store(handle, Ordering::Release);
+                }
+            }
+        }
+
         if let Some(started) = connect_total_started {
             self.connection_diagnostics.push(format!(
                 "db2_connect_total_ms={:.3} server_class={} server_release={}",
@@ -784,7 +824,10 @@ impl ClientInner {
         params: &[&dyn ToSql],
     ) -> Result<QueryResult, Error> {
         ensure_sqlstt_sql_len(sql)?;
-        if params.is_empty() && !sql_is_query(sql) {
+        if params.is_empty()
+            && !sql_is_query(sql)
+            && !sql.trim_start().to_uppercase().starts_with("CALL")
+        {
             return self.execute_immediate(sql).await;
         }
 
@@ -1203,7 +1246,8 @@ impl ClientInner {
                     let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
                     ddm.add_code_point(codepoints::PKGNAMCSN, &pkgnamcsn);
                     ddm.add_u32(codepoints::QRYBLKSZ, qryblksz);
-                    ddm.add_u16(codepoints::MAXBLKEXT, qryblksz as u16);
+                    ddm.add_u16(codepoints::MAXBLKEXT, u16::MAX);
+                    ddm.add_u32(codepoints::QRYROWSET, self.config.fetch_size);
                     ddm.add_code_point(0x215D, &[0x01]); // QRYCLSIMP = 1 (close on endqry)
                     ddm.build()
                 };
@@ -1226,6 +1270,8 @@ impl ClientInner {
                 let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
                 ddm.add_code_point(codepoints::PKGNAMCSN, &pkgnamcsn);
                 ddm.add_u32(codepoints::QRYBLKSZ, qryblksz);
+                ddm.add_u16(codepoints::MAXBLKEXT, u16::MAX);
+                ddm.add_u32(codepoints::QRYROWSET, self.config.fetch_size);
                 ddm.add_code_point(0x215D, &[0x01]); // QRYCLSIMP = 1 (close on endqry)
                 ddm.build()
             };
@@ -1264,6 +1310,11 @@ impl ClientInner {
                 input_descriptors = self.describe_input(&pkgnamcsn).await?;
             }
 
+            if sql.trim_start().to_uppercase().starts_with("CALL") {
+                return self
+                    .execute_call(&pkgnamcsn, sql, params, &input_descriptors)
+                    .await;
+            }
             self.execute_with_params(&pkgnamcsn, params, &input_descriptors)
                 .await
         }
@@ -2197,6 +2248,131 @@ impl ClientInner {
     }
 
     /// Execute a DML statement with parameters.
+    pub(crate) async fn execute_call(
+        &mut self,
+        pkgnamcsn: &[u8],
+        sql: &str,
+        params: &[&dyn ToSql],
+        descriptors: &[db2_proto::fdoca::ColumnDescriptor],
+    ) -> Result<QueryResult, Error> {
+        let command = db2_proto::commands::excsqlstt::build_excsqlstt_call(
+            pkgnamcsn,
+            !params.is_empty(),
+            self.config.fetch_size,
+        );
+        let corr_id = self.next_correlation_id();
+        let mut writer = DssWriter::new(corr_id);
+        if params.is_empty() {
+            writer.write_request(&command, false);
+        } else {
+            writer.write_request_next_same_corr(&command, true);
+            writer.write_object(&build_sqldta(params, descriptors)?, false);
+        }
+        self.send_bytes(&writer.finish()).await?;
+        let frames = self.read_reply_frames().await?;
+        let objects = frames
+            .iter()
+            .map(|frame| Self::parse_ddm_objects(&frame.payload))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let packages = objects
+            .iter()
+            .find(|obj| obj.code_point == 0x2219)
+            .and_then(|obj| {
+                obj.parameters()
+                    .into_iter()
+                    .find(|p| p.code_point == 0x2139)
+            })
+            .map(|p| Self::parse_ddm_objects(&p.data))
+            .transpose()?
+            .unwrap_or_default();
+        let mut output_parameters = Vec::new();
+        for obj in &objects {
+            if let Some(err) = protocol_reply_error(obj, "CALL") {
+                return Err(err);
+            }
+            if obj.code_point == 0x2413 {
+                let parts = Self::parse_ddm_objects(&obj.data)?;
+                let mut output_descriptors = parts
+                    .iter()
+                    .find(|p| p.code_point == codepoints::FDODSC || p.code_point == 0x0010)
+                    .map(|p| db2_proto::fdoca::parse_qrydsc(&p.data))
+                    .transpose()?
+                    .unwrap_or_default();
+                normalize_luw_descriptors(&mut output_descriptors, self.server_info.as_ref());
+                if let Some(data) = parts.iter().find(|p| p.code_point == codepoints::FDODTA) {
+                    output_parameters = db2_proto::fdoca::decode_output_parameters(
+                        &data.data,
+                        &output_descriptors,
+                    )?;
+                }
+            }
+        }
+        let mut groups: Vec<Vec<DssFrame>> = Vec::new();
+        for obj in &objects {
+            if obj.code_point == codepoints::OPNQRYRM {
+                groups.push(Vec::new());
+            }
+            if let Some(group) = groups.last_mut() {
+                let mut frame = frames[0].clone();
+                let mut ddm = db2_proto::ddm::DdmBuilder::new(obj.code_point);
+                ddm.add_raw(&obj.data);
+                frame.payload = ddm.build();
+                group.push(frame);
+            }
+        }
+        let mut result_sets = Vec::new();
+        for (index, mut group) in groups.into_iter().enumerate() {
+            let package = packages
+                .get(index)
+                .ok_or_else(|| Error::Protocol("CALL result set missing its PKGNAMCSN".into()))?;
+            let mut package_list = db2_proto::ddm::DdmBuilder::new(0x2219);
+            let mut nested = db2_proto::ddm::DdmBuilder::new(0x2139);
+            nested.add_code_point(codepoints::PKGNAMCSN, &package.data);
+            package_list.add_raw(&nested.build());
+            let mut summary = frames[0].clone();
+            summary.payload = package_list.build();
+            group.insert(0, summary);
+            let metadata = group
+                .iter()
+                .flat_map(|frame| Self::parse_ddm_objects(&frame.payload).unwrap_or_default())
+                .find(|obj| obj.code_point == 0x240B)
+                .map(|obj| {
+                    let mut data = vec![0xFF];
+                    data.extend_from_slice(&obj.data);
+                    DdmObject {
+                        code_point: codepoints::SQLDARD,
+                        data,
+                    }
+                });
+            let columns = metadata
+                .as_ref()
+                .map(parse_sqldard_columns)
+                .unwrap_or_default();
+            let descriptors = metadata
+                .as_ref()
+                .map(parse_sqldard_descriptors)
+                .unwrap_or_default();
+            result_sets.push(
+                self.process_query_reply(&group, sql, &columns, Some(&descriptors))
+                    .await?,
+            );
+        }
+        let mut result = if let Some(first) = result_sets.first() {
+            first.clone()
+        } else {
+            self.process_execute_reply(&frames).await?
+        };
+        result.result_sets = result_sets;
+        result.output_parameters = output_parameters;
+        if self.auto_commit {
+            self.commit().await?;
+        }
+        Ok(result)
+    }
+
     async fn execute_with_params(
         &mut self,
         pkgnamcsn: &[u8],
@@ -2248,6 +2424,8 @@ impl ClientInner {
                 columns: Vec::new(),
                 row_count: 0,
                 diagnostics: Vec::new(),
+                result_sets: Vec::new(),
+                output_parameters: Vec::new(),
             });
         }
 
@@ -2324,6 +2502,8 @@ impl ClientInner {
             columns: Vec::new(),
             row_count: total_row_count,
             diagnostics: Vec::new(),
+            result_sets: Vec::new(),
+            output_parameters: Vec::new(),
         })
     }
 
@@ -2427,6 +2607,22 @@ impl ClientInner {
         initial_descriptors: Option<&[db2_proto::fdoca::ColumnDescriptor]>,
         fetch_size_override: Option<u32>,
     ) -> Result<QueryResult, Error> {
+        let cursor_package = frames
+            .iter()
+            .flat_map(|frame| Self::parse_ddm_objects(&frame.payload).unwrap_or_default())
+            .find(|obj| obj.code_point == 0x2219)
+            .and_then(|obj| {
+                obj.parameters()
+                    .into_iter()
+                    .find(|p| p.code_point == 0x2139)
+            })
+            .and_then(|p| Self::parse_ddm_objects(&p.data).ok())
+            .and_then(|objects| {
+                objects
+                    .into_iter()
+                    .find(|obj| obj.code_point == codepoints::PKGNAMCSN)
+            })
+            .map(|obj| obj.data);
         let mut rows = Vec::new();
         let mut sqldard_descriptors = initial_descriptors
             .filter(|descriptors| !descriptors.is_empty())
@@ -2460,6 +2656,7 @@ impl ClientInner {
 
         process_query_frames(
             frames,
+            self.server_info.as_ref().is_some_and(is_db2_zos_server),
             column_info,
             &mut rows,
             &mut sqldard_descriptors,
@@ -2521,6 +2718,7 @@ impl ClientInner {
 
             process_query_frames(
                 &more_frames,
+                self.server_info.as_ref().is_some_and(is_db2_zos_server),
                 column_info,
                 &mut rows,
                 &mut sqldard_descriptors,
@@ -2537,7 +2735,9 @@ impl ClientInner {
 
         if !end_of_query && sqldard_descriptors.is_none() && qrydsc_descriptors.is_none() {
             for _ in 0..3 {
-                let pkgnamcsn = self.build_pkgnamcsn_for(self.package_id, self.section_number);
+                let pkgnamcsn = cursor_package.clone().unwrap_or_else(|| {
+                    self.build_pkgnamcsn_for(self.package_id, self.section_number)
+                });
                 let cntqry_data = db2_proto::commands::cntqry::build_cntqry(
                     &pkgnamcsn,
                     query_instance_id.as_deref(),
@@ -2557,6 +2757,7 @@ impl ClientInner {
                 }
                 process_query_frames(
                     &more_frames,
+                    self.server_info.as_ref().is_some_and(is_db2_zos_server),
                     column_info,
                     &mut rows,
                     &mut sqldard_descriptors,
@@ -2647,7 +2848,9 @@ impl ClientInner {
                     cursor_column_info,
                     descriptors,
                     query_instance_id,
-                    self.build_pkgnamcsn_for(self.package_id, self.section_number),
+                    cursor_package.clone().unwrap_or_else(|| {
+                        self.build_pkgnamcsn_for(self.package_id, self.section_number)
+                    }),
                     fetch_size_override.unwrap_or(self.config.fetch_size),
                     close_after_next_fetch,
                 );
@@ -2689,7 +2892,9 @@ impl ClientInner {
                             &more_extdta_payloads,
                         );
                         extdta_payloads.extend(more_extdta_payloads);
-                        if !rows_need_extdta_payloads(&rows, &cursor.descriptors) {
+                        if self.server_info.as_ref().is_some_and(is_db2_zos_server)
+                            && !rows_need_extdta_payloads(&rows, &cursor.descriptors)
+                        {
                             let close_after_materialize = use_zos_lob_close_after_materialization();
                             if done {
                                 zos_lob_cleanup_verified = true;
@@ -3047,6 +3252,8 @@ impl ClientInner {
             rows: Vec::new(),
             row_count,
             columns,
+            result_sets: Vec::new(),
+            output_parameters: Vec::new(),
             diagnostics: if query_diagnostics_enabled() {
                 frame_diagnostics(frames)
             } else {
@@ -3236,15 +3443,82 @@ impl ClientInner {
     }
 }
 
+/// Cancel activities on one Db2 LUW connection through an independent control session.
+#[derive(Clone)]
+pub struct CancelHandle {
+    config: Config,
+    application_handle: Arc<AtomicI64>,
+}
+
+impl CancelHandle {
+    pub async fn cancel(&self) -> Result<bool, Error> {
+        let handle = self.application_handle.load(Ordering::Acquire);
+        if handle == 0 {
+            return Ok(false);
+        }
+        let operation = async {
+            let mut config = self.config.clone();
+            // Use an outer bound instead of query_timeout to avoid recursively cancelling
+            // a cancellation control session when the server is unresponsive.
+            config.query_timeout = Duration::ZERO;
+            let control = Client::connect_with(config).await?;
+            let result = async {
+                let activities = control
+                    .query(
+                        &format!(
+                            "SELECT UOW_ID, ACTIVITY_ID FROM TABLE(MON_GET_ACTIVITY({handle}, -2))"
+                        ),
+                        &[],
+                    )
+                    .await?;
+                let mut cancelled = false;
+                for row in &activities.rows {
+                    let uow = row.values()[0]
+                        .as_i64()
+                        .ok_or_else(|| Error::Protocol("Invalid cancellation UOW_ID".into()))?;
+                    let activity = row.values()[1].as_i64().ok_or_else(|| {
+                        Error::Protocol("Invalid cancellation ACTIVITY_ID".into())
+                    })?;
+                    match control
+                        .query(
+                            &format!(
+                                "CALL SYSPROC.WLM_CANCEL_ACTIVITY({handle}, {uow}, {activity})"
+                            ),
+                            &[],
+                        )
+                        .await
+                    {
+                        Ok(_) => cancelled = true,
+                        Err(Error::Sql { sqlcode: -4702, .. }) => {} // completed before cancellation
+                        Err(err) => return Err(err),
+                    }
+                }
+                Ok(cancelled)
+            }
+            .await;
+            let _ = control.close().await;
+            result
+        };
+        tokio::time::timeout(Duration::from_secs(5), operation)
+            .await
+            .map_err(|_| Error::Timeout("Server cancellation exceeded 5 seconds".into()))?
+    }
+}
+
 /// The main DB2 client. Wraps shared internal state in an Arc<Mutex<>>.
 pub struct Client {
     pub(crate) inner: Arc<Mutex<ClientInner>>,
     pool_checkout: StdMutex<Option<PoolCheckoutHandle>>,
+    cancel_handle: CancelHandle,
 }
 
 impl Client {
     /// Create a new Client with the given configuration. Does not connect immediately.
     pub fn new(config: Config) -> Self {
+        let cancel_handle = CancelHandle {
+            config: config.clone(),
+            application_handle: Arc::new(AtomicI64::new(0)),
+        };
         Client {
             inner: Arc::new(Mutex::new(ClientInner {
                 transport: None,
@@ -3263,10 +3537,22 @@ impl Client {
                 free_prepared_sections: Vec::new(),
                 zos_lob_internal_depth: 0,
                 connection_diagnostics: Vec::new(),
+                cancel_handle: cancel_handle.clone(),
                 zos_select_cache: HashMap::new(),
             })),
             pool_checkout: StdMutex::new(None),
+            cancel_handle,
         }
+    }
+
+    /// A cancellation handle uses a separate control connection, so it does not wait
+    /// for the in-flight query's connection lock. Requires Db2 WLM monitoring privileges.
+    pub fn cancellation_handle(&self) -> CancelHandle {
+        self.cancel_handle.clone()
+    }
+
+    pub async fn cancel(&self) -> Result<bool, Error> {
+        self.cancel_handle.cancel().await
     }
 
     pub(crate) fn pool_key(&self) -> usize {
@@ -6134,6 +6420,40 @@ fn is_generated_column_name(name: &str) -> bool {
     !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+fn normalize_luw_descriptors(
+    descriptors: &mut [db2_proto::fdoca::ColumnDescriptor],
+    server: Option<&ServerInfo>,
+) {
+    if server.is_some_and(is_db2_zos_server) {
+        return;
+    }
+    use db2_proto::fdoca::ByteOrder;
+    use db2_proto::types::Db2Type;
+    for descriptor in descriptors {
+        match descriptor.drda_type & !1 {
+            0x3C => {
+                descriptor.db2_type = Db2Type::Char(descriptor.length);
+                descriptor.ccsid = 1208;
+            }
+            0x3E => {
+                descriptor.db2_type = Db2Type::VarChar(descriptor.length);
+                descriptor.ccsid = 1208;
+            }
+            _ => {}
+        }
+        if matches!(
+            descriptor.db2_type,
+            Db2Type::SmallInt
+                | Db2Type::Integer
+                | Db2Type::BigInt
+                | Db2Type::Real
+                | Db2Type::Double
+        ) {
+            descriptor.byte_order = ByteOrder::LittleEndian;
+        }
+    }
+}
+
 fn parse_sqldard_descriptors(obj: &DdmObject) -> Vec<db2_proto::fdoca::ColumnDescriptor> {
     let dard = match db2_proto::replies::sqldard::parse_sqldard(obj) {
         Ok(d) => d,
@@ -6220,15 +6540,31 @@ fn parse_zos_input_sqldard(data: &[u8]) -> Vec<db2_proto::fdoca::ColumnDescripto
             let sql_type = u16::from_be_bytes([descriptor[4], descriptor[5]]);
             let ccsid = u16::from_be_bytes([descriptor[6], descriptor[7]]);
             let nullable = (sql_type & 0x0001) != 0;
-            let db2_type = compact_sqlda_db2_type(sql_type, raw_length as u64, 0, 0);
-            let length = input_length_for(&db2_type, raw_length.min(u16::MAX as u32) as u16, 0, 0);
+            let (precision, scale) = if offset >= 8 {
+                let precision = u16::from_be_bytes([data[offset - 8], data[offset - 7]]);
+                let scale = u16::from_be_bytes([data[offset - 6], data[offset - 5]]);
+                if precision <= 63 && scale <= precision {
+                    (precision as u8, scale as u8)
+                } else {
+                    (0, 0)
+                }
+            } else {
+                (0, 0)
+            };
+            let db2_type = compact_sqlda_db2_type(sql_type, raw_length as u64, precision, scale);
+            let length = input_length_for(
+                &db2_type,
+                raw_length.min(u16::MAX as u32) as u16,
+                precision,
+                scale,
+            );
 
             db2_proto::fdoca::ColumnDescriptor {
                 column_index: index,
                 drda_type: input_drda_type_for(&db2_type, ccsid, nullable),
                 length,
-                precision: 0,
-                scale: 0,
+                precision,
+                scale,
                 nullable,
                 ccsid,
                 db2_type,
@@ -6272,6 +6608,7 @@ fn looks_like_zos_input_descriptor_start(data: &[u8]) -> bool {
             | 912
             | 988
             | 996
+            | 2436
     ) && raw_length <= u16::MAX as u32
         && matches!(ccsid, 0 | 37 | 500 | 819 | 1200 | 1208)
 }
@@ -6401,6 +6738,7 @@ fn looks_like_input_descriptor_start(data: &[u8]) -> bool {
             | 496
             | 500
             | 996
+            | 2436
             | 908
             | 912
             | 988
@@ -6446,6 +6784,7 @@ fn compact_sqlda_db2_type(
         492 => Db2Type::BigInt,
         496 => Db2Type::Integer,
         500 => Db2Type::SmallInt,
+        2436 => Db2Type::Boolean,
         904 => Db2Type::RowId(raw_length.min(u16::MAX as u64) as u16),
         908 => Db2Type::VarBinary(raw_length.min(u16::MAX as u64) as u16),
         912 => Db2Type::Binary(raw_length.min(u16::MAX as u64) as u16),
@@ -6580,7 +6919,7 @@ fn encode_parameter_value(
         Db2Type::Date => encode_exact_string(value, 10, descriptor.ccsid)?,
         Db2Type::Time => encode_exact_string(value, 8, descriptor.ccsid)?,
         Db2Type::Timestamp => encode_timestamp(value, descriptor.ccsid)?,
-        Db2Type::Boolean => vec![if expect_bool(value)? { 1 } else { 0 }],
+        Db2Type::Boolean => u16::from(expect_bool(value)?).to_le_bytes().to_vec(),
         Db2Type::BlobLocator | Db2Type::ClobLocator | Db2Type::DbClobLocator | Db2Type::Null => {
             return Err(Error::Other(format!(
                 "unsupported parameter type for SQLDTA encoding: {:?}",
@@ -6593,7 +6932,13 @@ fn encode_parameter_value(
 }
 
 fn expect_i64(value: &db2_proto::types::Db2Value) -> Result<i64, Error> {
-    value.as_i64().ok_or_else(|| {
+    let parsed = match value {
+        db2_proto::types::Db2Value::Char(text) | db2_proto::types::Db2Value::VarChar(text) => {
+            text.parse::<i64>().ok()
+        }
+        _ => value.as_i64(),
+    };
+    parsed.ok_or_else(|| {
         Error::Other(format!(
             "expected integer-compatible parameter, got {:?}",
             value
@@ -6715,7 +7060,9 @@ fn encode_fixed_graphic(
     if bytes.len() > target_len {
         bytes.truncate(target_len);
     } else if bytes.len() < target_len {
-        bytes.resize(target_len, 0x00);
+        for position in bytes.len()..target_len {
+            bytes.push(if position % 2 == 0 { 0x00 } else { 0x20 });
+        }
     }
     Ok(bytes)
 }
@@ -6825,7 +7172,7 @@ fn input_length_for(
         Db2Type::Date => 10,
         Db2Type::Time => 8,
         Db2Type::Timestamp => 26,
-        Db2Type::Boolean => 1,
+        Db2Type::Boolean => 2,
         Db2Type::BlobLocator | Db2Type::ClobLocator | Db2Type::DbClobLocator => 4,
         Db2Type::Blob => {
             if length == 0 {
@@ -6891,6 +7238,7 @@ fn input_drda_type_for(db2_type: &db2_proto::types::Db2Type, _ccsid: u16, nullab
 #[allow(clippy::too_many_arguments)]
 fn process_query_frames(
     frames: &[DssFrame],
+    is_zos: bool,
     column_info: &[ColumnInfo],
     rows: &mut Vec<Row>,
     sqldard_descriptors: &mut Option<Vec<db2_proto::fdoca::ColumnDescriptor>>,
@@ -6945,7 +7293,10 @@ fn process_query_frames(
                 }
                 codepoints::QRYDSC => {
                     trace!("Received QRYDSC");
-                    if let Ok(descriptors) = db2_proto::fdoca::parse_qrydsc(&obj.data) {
+                    if let Ok(mut descriptors) = db2_proto::fdoca::parse_qrydsc(&obj.data) {
+                        if !is_zos {
+                            normalize_luw_descriptors(&mut descriptors, None);
+                        }
                         if !descriptors.is_empty() {
                             if debug_hex_enabled() {
                                 eprintln!(
@@ -7014,6 +7365,7 @@ fn process_query_frames(
                             pending_row_bytes,
                         )
                         .map_err(|e| Error::Protocol(e.to_string()))?;
+                        *end_of_query |= db2_proto::fdoca::take_query_end(pending_row_bytes);
                         let decoded_count = decoded_rows.len();
                         if let Some(row_width) = decoded_rows.first().map(|values| values.len()) {
                             let col_names: Arc<[String]> =
@@ -7084,8 +7436,8 @@ fn process_query_frames(
                     trace!("Received ENDQRYRM");
                     *end_of_query = true;
                 }
-                codepoints::SQLDARD => {
-                    trace!("Received SQLDARD in query reply");
+                codepoints::SQLDARD | 0x240B => {
+                    trace!("Received result column metadata in query reply");
                     if debug_hex_enabled() {
                         eprintln!(
                             "[db2-wire] query SQLDARD preview={}",
@@ -7760,10 +8112,7 @@ fn format_hex_preview(data: &[u8], max_bytes: usize) -> String {
 /// Simple heuristic to determine if a SQL string is a query (SELECT).
 pub(crate) fn sql_is_query(sql: &str) -> bool {
     let trimmed = sql.trim().to_uppercase();
-    trimmed.starts_with("SELECT")
-        || trimmed.starts_with("WITH")
-        || trimmed.starts_with("VALUES")
-        || trimmed.starts_with("CALL")
+    trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") || trimmed.starts_with("VALUES")
 }
 
 fn should_retry_query_after_session_error(sql: &str, params: &[&dyn ToSql], err: &Error) -> bool {
@@ -7940,6 +8289,53 @@ mod tests {
             },
             payload,
         }
+    }
+
+    #[test]
+    fn zos_decimal_input_retains_precision_and_scale() {
+        let mut data = vec![0xFF, 0xFF, 0, 2];
+        for (name, precision, scale, length, sql_type) in [
+            ("PRICE", 31u16, 2u16, 16u64, 485u16),
+            ("ITEM", 0u16, 0u16, 4u64, 497u16),
+        ] {
+            data.extend_from_slice(&precision.to_be_bytes());
+            data.extend_from_slice(&scale.to_be_bytes());
+            data.extend_from_slice(&length.to_be_bytes());
+            data.extend_from_slice(&sql_type.to_be_bytes());
+            data.extend_from_slice(&0u16.to_be_bytes());
+            data.push(0);
+            data.extend_from_slice(&0u16.to_be_bytes());
+            data.extend_from_slice(&(name.len() as u16).to_be_bytes());
+            data.extend_from_slice(name.as_bytes());
+            for _ in 0..5 {
+                data.extend_from_slice(&0u16.to_be_bytes());
+            }
+            data.extend_from_slice(&[0xFF, 0xFF]);
+        }
+        let obj = DdmObject {
+            code_point: codepoints::SQLDARD,
+            data,
+        };
+        let inputs = parse_input_sqldard_descriptors(&obj);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(
+            inputs[0].db2_type,
+            db2_proto::types::Db2Type::Decimal {
+                precision: 31,
+                scale: 2
+            }
+        );
+        assert_eq!((inputs[0].precision, inputs[0].scale), (31, 2));
+        let encoded = encode_parameter_value(
+            &db2_proto::types::Db2Value::VarChar("123.45".into()),
+            &inputs[0],
+        )
+        .unwrap();
+        assert_eq!(encoded.len(), 16);
+        assert_eq!(
+            db2_proto::types::decode_packed_decimal(&encoded, 31, 2).unwrap(),
+            "123.45"
+        );
     }
 
     #[tokio::test]
@@ -9217,6 +9613,7 @@ mod tests {
 
         process_query_frames(
             &[frame],
+            true,
             &column_info,
             &mut rows,
             &mut sqldard_descriptors,

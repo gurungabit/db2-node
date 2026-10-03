@@ -221,8 +221,12 @@ async fn test_decfloat_type() {
         result.columns[1]
     );
 
-    let col1: String = result.rows[0].get("COL1").expect("COL1 should decode");
-    let col2: String = result.rows[0].get("COL2").expect("COL2 should decode");
+    let col1: String = result.rows[0]
+        .get(&result.columns[0].name)
+        .expect("first DECFLOAT should decode");
+    let col2: String = result.rows[0]
+        .get(&result.columns[1].name)
+        .expect("second DECFLOAT should decode");
     assert_eq!(col1, "123.45");
     assert_eq!(col2, "-987654321.00001");
 

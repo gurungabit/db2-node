@@ -13,6 +13,9 @@ pub struct QueryResult {
     pub columns: Vec<ColumnInfo>,
     /// Wire-level diagnostics, populated for troubleshooting.
     pub diagnostics: Vec<String>,
+    /// Result sets and output parameter values returned by CALL.
+    pub result_sets: Vec<QueryResult>,
+    pub output_parameters: Vec<Db2Value>,
 }
 
 impl QueryResult {
@@ -23,6 +26,8 @@ impl QueryResult {
             row_count,
             columns: Vec::new(),
             diagnostics: Vec::new(),
+            result_sets: Vec::new(),
+            output_parameters: Vec::new(),
         }
     }
 
@@ -34,6 +39,8 @@ impl QueryResult {
             row_count,
             columns,
             diagnostics: Vec::new(),
+            result_sets: Vec::new(),
+            output_parameters: Vec::new(),
         }
     }
 
@@ -49,6 +56,8 @@ impl QueryResult {
             row_count,
             columns,
             diagnostics,
+            result_sets: Vec::new(),
+            output_parameters: Vec::new(),
         }
     }
 }

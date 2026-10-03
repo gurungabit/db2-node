@@ -12,6 +12,7 @@ const cfg = () => ({
   database: process.env.DB2_TEST_DATABASE || 'testdb',
   user: process.env.DB2_TEST_USER || 'db2inst1',
   password: process.env.DB2_TEST_PASSWORD || 'db2wire_test_pw',
+  securityMechanism: 'userPassword',
 });
 
 describe('Data types: integers', () => {
@@ -96,8 +97,8 @@ describe('Data types: decimal', () => {
     assert.equal(literal.rows.length, 1);
     assert.ok(literal.columns[0].typeName.includes('DecFloat(16)'));
     assert.ok(literal.columns[1].typeName.includes('DecFloat(34)'));
-    assert.equal(literal.rows[0].COL1, '123.45');
-    assert.equal(literal.rows[0].COL2, '-987654321.00001');
+    assert.equal(literal.rows[0][literal.columns[0].name], '123.45');
+    assert.equal(literal.rows[0][literal.columns[1].name], '-987654321.00001');
 
     const bound = await client.query(
       'VALUES CAST(? AS DECFLOAT(16))',
