@@ -2,6 +2,46 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.1.0](https://github.com/gurungabit/db2-node/compare/v1.0.24...v1.1.0) (2026-10-03)
+
+
+### Features
+
+* improve ibm_db migration compatibility ([3dbe71e](https://github.com/gurungabit/db2-node/commit/3dbe71e4ea46d94b523a00bf6254e02582eb65dd))
+
+
+### Bug Fixes
+
+* address follow-up LUW query and parameter regressions ([cfdfce0](https://github.com/gurungabit/db2-node/commit/cfdfce0c01d2ed0a11004428b9fb54637c66fb8c))
+* default IBM server certificate strings to hostname validation off ([7aef4a2](https://github.com/gurungabit/db2-node/commit/7aef4a29c046d4b6be4524f099f8cc4f4657be66))
+* expose z/OS encrypted password encodings ([ebee6d5](https://github.com/gurungabit/db2-node/commit/ebee6d5ba18c9ab7205d7f6e9004758c5e141635))
+* fetch z/os clob chunks conservatively ([006e49c](https://github.com/gurungabit/db2-node/commit/006e49c57deb7c06b9285f7534fd2658130cb743))
+* harden z/os stale cursor recovery ([35ac61a](https://github.com/gurungabit/db2-node/commit/35ac61a0a8c7f87523689f856c6d23e94dca13a3))
+* improve input descriptor handling and native artifact checks ([1703d77](https://github.com/gurungabit/db2-node/commit/1703d77675639d302af6d39f242b3d6a42e3b954))
+* keep z/OS native LOB continuations conservative ([398fa17](https://github.com/gurungabit/db2-node/commit/398fa174dc6b1648aee4fa886a76486b3002fbcb))
+* narrow z/os clob chunk rows ([2effe82](https://github.com/gurungabit/db2-node/commit/2effe82258aed26db5eda13e5c7dd8f362f626fb))
+* negotiate credential encoding for z/OS auth ([b0ae2eb](https://github.com/gurungabit/db2-node/commit/b0ae2ebcb6b0113ba134ec0dec6d7482642f6e11))
+* omit RDBNAM from SECCHK for zOS ([0ef44bc](https://github.com/gurungabit/db2-node/commit/0ef44bc6eec84b312bd9bec674ebd0b0b354b5dd))
+* prefer native z/os clob fetches ([dce3b4c](https://github.com/gurungabit/db2-node/commit/dce3b4c6141dea90baa6f599e1457b6d268271fe))
+* prefer SQLDARD row descriptors ([93bcb25](https://github.com/gurungabit/db2-node/commit/93bcb2511eeeb61aacc0c46bdb5f63ae9002a532))
+* preserve qualified z/os column names ([7210381](https://github.com/gurungabit/db2-node/commit/72103816185a4d3e280ca0b61c43bf70c808b641))
+* preserve z/os expression aliases ([60d275d](https://github.com/gurungabit/db2-node/commit/60d275d9d9bf6362bc4f8f6550e4ba371ba73902))
+* publish zOS auth fixes through npm package ([025e6c9](https://github.com/gurungabit/db2-node/commit/025e6c99400a6892d1bac72f96c92adfb3fa753c))
+* recover z/os clob reads after stale cursors ([664c5fa](https://github.com/gurungabit/db2-node/commit/664c5fae6bd8fcdd56c9db9236de4c5de8b1502e))
+* release DB2 zOS authentication support ([2df2565](https://github.com/gurungabit/db2-node/commit/2df256539796156f84aeb046d574b7dfaba98011))
+* resolve Db2 LUW query, parameter, and authentication issues ([2686a64](https://github.com/gurungabit/db2-node/commit/2686a64db6850efb1523850b12bdc35d7c6e0579)), closes [#11](https://github.com/gurungabit/db2-node/issues/11) [#12](https://github.com/gurungabit/db2-node/issues/12)
+* resolve LUW decoding, procedures and encrypted authentication ([499d4a6](https://github.com/gurungabit/db2-node/commit/499d4a6059c5f8d191f738b0dfb67fbe0e58f643)), closes [#11](https://github.com/gurungabit/db2-node/issues/11) [#12](https://github.com/gurungabit/db2-node/issues/12)
+* resolve z/os fdoca descriptor environments ([68264e0](https://github.com/gurungabit/db2-node/commit/68264e0622b0ceba4f93d46abf496622d25ea29a))
+* restore z/os late row descriptors ([c1e0a15](https://github.com/gurungabit/db2-node/commit/c1e0a1591efef5d4f9abbe441d0af7e2a6662b8b))
+* return numeric DB2 values as JSON numbers, not strings ([8a495d7](https://github.com/gurungabit/db2-node/commit/8a495d78d8bc1116fc09cc026e24406900ce1b05))
+* route z/os clob predicate queries ([1ca5b40](https://github.com/gurungabit/db2-node/commit/1ca5b40e109010c0657818656f74a7851a8d9d28))
+* route z/os clob selects before native cursor ([791dd7a](https://github.com/gurungabit/db2-node/commit/791dd7a6a59cb32200d3fb9568c317c35c259033))
+* send z/os lob rowset continuations ([e7d6c9a](https://github.com/gurungabit/db2-node/commit/e7d6c9afd04b676be8134f1e05539b108289ed14))
+* support AES encrypted zOS auth ([d16e94c](https://github.com/gurungabit/db2-node/commit/d16e94c0de18c68c8f96383a4eaee7bb1635e470))
+* support configurable db2 security mechanism ([cc11e61](https://github.com/gurungabit/db2-node/commit/cc11e61d7316a8ddc0fc04e38fb725c3051af97a))
+* support Db2 CLI hostname validation off ([4fac63d](https://github.com/gurungabit/db2-node/commit/4fac63d4233d6c9d683a33f62d6bd58c762cb267))
+* support DB2 encrypted password security ([15c2080](https://github.com/gurungabit/db2-node/commit/15c20800e9af8c6ad08709dc1d6a2c491284d914))
+
 ## [1.0.24](https://github.com/gurungabit/db2-node/compare/v1.0.22...v1.0.24) (2026-10-03)
 
 ### Release Fix
