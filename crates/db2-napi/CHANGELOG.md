@@ -2,6 +2,16 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.23](https://github.com/gurungabit/db2-node/compare/v1.0.22...v1.0.23) (2026-10-03)
+
+
+### Bug Fixes
+
+* address follow-up LUW query and parameter regressions ([cfdfce0](https://github.com/gurungabit/db2-node/commit/cfdfce0c01d2ed0a11004428b9fb54637c66fb8c))
+* improve input descriptor handling and native artifact checks ([1703d77](https://github.com/gurungabit/db2-node/commit/1703d77675639d302af6d39f242b3d6a42e3b954))
+* resolve Db2 LUW query, parameter, and authentication issues ([2686a64](https://github.com/gurungabit/db2-node/commit/2686a64db6850efb1523850b12bdc35d7c6e0579)), closes [#11](https://github.com/gurungabit/db2-node/issues/11) [#12](https://github.com/gurungabit/db2-node/issues/12)
+* resolve LUW decoding, procedures and encrypted authentication ([499d4a6](https://github.com/gurungabit/db2-node/commit/499d4a6059c5f8d191f738b0dfb67fbe0e58f643)), closes [#11](https://github.com/gurungabit/db2-node/issues/11) [#12](https://github.com/gurungabit/db2-node/issues/12)
+
 ## [1.0.22](https://github.com/gurungabit/db2-node/releases/tag/v1.0.22) (2026-06-18)
 
 ### Bug Fixes
