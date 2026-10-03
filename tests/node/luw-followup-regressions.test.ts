@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import net from 'node:net';
 import { Client, getConfig, tempTable } from './helpers';
 import db2 from '../../crates/db2-napi/index.cjs';
 
@@ -78,6 +79,43 @@ test('LUW issue #12 follow-up regressions (16–21)', { timeout: 180_000 }, asyn
       const wide = await c.prepare(`SELECT * FROM ${table} ORDER BY ID`);
       try { checkRows(await wide.execute()); } finally { await wide.close(); }
     } finally { await c.query(`DROP TABLE ${table}`); }
+    // Coalesce metadata and wide-row replies as Linux TCP reads can do.
+    // Forward server responses only; no payloads or credentials are recorded.
+    const sockets = new Set<net.Socket>();
+    const proxy = net.createServer((socket) => {
+      const upstream = net.connect(config.port!, config.host);
+      sockets.add(socket); sockets.add(upstream);
+      socket.pipe(upstream);
+      let pending: Buffer[] = [];
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      upstream.on('data', (data) => {
+        pending.push(data);
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          socket.write(Buffer.concat(pending));
+          pending = [];
+        }, 10);
+      });
+      socket.on('close', () => { clearTimeout(timer); upstream.destroy(); });
+      socket.on('error', () => upstream.destroy());
+      upstream.on('error', () => socket.destroy());
+    });
+    await new Promise<void>((resolve, reject) => {
+      proxy.once('error', reject);
+      proxy.listen(0, '127.0.0.1', resolve);
+    });
+    const coalesced = new Client({ ...config, host: '127.0.0.1', port: (proxy.address() as net.AddressInfo).port });
+    try {
+      await coalesced.connect();
+      verify(await coalesced.query(sql));
+      const wide = await coalesced.prepare(sql);
+      try { verify(await wide.execute()); } finally { await wide.close(); }
+      assert.equal((await coalesced.query('VALUES 1')).rows[0]['1'], 1);
+    } finally {
+      await coalesced.close().catch(() => {});
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    }
     assert.equal((await c.query('VALUES 1')).rows[0]['1'], 1);
   });
   await check('20: invalid/overflowing DECIMAL parameters fail without changing stored data', async (c) => {

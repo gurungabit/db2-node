@@ -30,11 +30,11 @@ Review also found that the new z/OS descriptor parser could discard DECIMAL prec
 | 16. Leading comments cause SQLCODE -84 | Direct and prepared statement classification skips leading line/block comments, including multiple and nested block comments, while sending the original SQL to Db2. Comment-prefixed SELECT, VALUES and CALL execute correctly. |
 | 17. Zero-row UPDATE reports a negative count | SQLCAXGRP decodes all six SQLERRD integers. SQLERRD3 supplies the affected count; SQLERRD1/2 diagnostics cannot replace a zero count. Direct/prepared unmatched UPDATE returns zero; a matching UPDATE returns one. |
 | 18. Truncation warning breaks fetch | QRYDTA consumes the full warning SQLCA, null diagnostic group and SQLDTAGRP envelope before decoding the value. Direct/prepared truncation returns ten `x` characters and keeps the connection usable. A protocol test splits the warning row at every byte boundary. |
-| 19. Two VARCHAR(32672) columns break DSS framing | The earlier continuation fixes already cover this case. Direct/prepared queries preserve both 32,672-character values, including two wide table rows followed by a NULL row. |
+| 19. Two VARCHAR(32672) columns break DSS framing | A continued DSS beginning with `0xFFFF` remains a separate logical frame when it arrives with earlier metadata frames in one TCP read. Direct/prepared queries preserve both 32,672-character values, including two wide table rows followed by a NULL row. Protocol tests cover a full combined reply and a partial 64 KiB read; a live proxy combines replies to reproduce the CI failure deterministically. |
 | 20. Overflowing/malformed bound DECIMAL silently changes | Packed-decimal encoding validates decimal digits and the integer capacity `precision - scale`. `12345.67`, `99999` and malformed text fail before execution for DECIMAL(5,2); existing stored values remain unchanged. Excess fractional places retain Db2 assignment truncation. |
 | 21. Nested bigint aborts / Date and Map become `{}` | Native and wrapper APIs reject nested bigint/objects/Map with catchable errors; Date produces UTC timestamp text. Binary arrays are additionally restricted to integer bytes 0–255, preventing nested arrays or invalid values from silently becoming empty/corrupted binary data. |
 
-The [follow-up comment](https://github.com/gurungabit/db2-node/issues/12#issuecomment-5965620029) added cases 16–21 after the initial PR. Cases 16, 17, 18 and 20 reproduced on the initial PR revision and are fixed by the follow-up change. Cases 19 and the originally reported inputs in 21 already passed; the additional byte-array validation closes related silent-conversion cases.
+The [follow-up comment](https://github.com/gurungabit/db2-node/issues/12#issuecomment-5965620029) added cases 16–21 after the initial PR. Cases 16, 17, 18 and 20 reproduced on the initial PR revision and are fixed by the follow-up change. Case 19 initially passed the local Docker runs, but Linux CI exposed a failure when TCP combined metadata and a continued row frame. That boundary is now corrected and covered by protocol and live coalescing-proxy tests. The originally reported inputs in 21 already passed; additional byte-array validation closes related silent-conversion cases.
 
 ## API changes and limits
 
@@ -51,7 +51,7 @@ All required runs passed with the release native binding built from this branch:
 
 | Run | Result |
 | --- | --- |
-| Rust workspace, including live 12.1 integration and TLS tests | 280 passed, 0 failed |
+| Rust workspace, including live 12.1 integration and TLS tests | 281 passed, 0 failed |
 | Full Node suite on 12.1 with TLS enabled | 83 passed, 0 failed; 2 authentication-mode tests skipped here and exercised separately |
 | Node issue/authentication regressions on stock 11.5 | 29 passed, 0 failed; 2 authentication-mode tests exercised separately |
 | Native package compatibility/artifact tests | 15 passed, 0 failed |
