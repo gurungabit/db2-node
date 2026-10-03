@@ -2,6 +2,29 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.23](https://github.com/gurungabit/db2-node/compare/v1.0.22...v1.0.23) (2026-10-03)
+
+### Bug Fixes
+
+- Resolve [#11](https://github.com/gurungabit/db2-node/issues/11) and all 21 cases in [#12](https://github.com/gurungabit/db2-node/issues/12), including the follow-up report.
+- Correct LUW UTF-8 text, mixed numeric and Boolean decoding, timestamp widths, NULL/LOB row handling, and continued wide-row DSS boundaries when TCP combines replies.
+- Preserve BIGINT values outside JavaScript's safe integer range and accept bigint, Date, Buffer, Uint8Array and ArrayBuffer parameters. Reject invalid nested objects, byte arrays and malformed or overflowing DECIMAL input with catchable errors.
+- Execute CALL with multiple result sets and OUT/INOUT parameters across direct, prepared, transaction and compatibility APIs. Handle leading SQL comments, zero-row updates and truncation warnings correctly.
+- Repair AES/DES encrypted authentication, refuse implicit plaintext downgrade, retain encryption settings on retries, and use OS randomness for DH private keys.
+- Apply currentSchema, return the actual server product name, and support bounded LUW cancellation and queryTimeout.
+- Preserve z/OS DECIMAL input precision/scale and strengthen native artifact and publication checks.
+
+### Compatibility
+
+- Unsafe BIGINT results now return exact decimal strings. LUW accepts only an omitted typeDefinitionName or QTDSQLX86.
+- Stock AUTHENTICATION=SERVER requires an explicit userPassword mechanism, TLS, or encrypted server authentication. Date parameters use UTC.
+- LUW cancellation requires activity-monitoring privileges and permission to execute SYSPROC.WLM_CANCEL_ACTIVITY.
+
+### Validation
+
+- Verified against Docker Db2 12.1.0.0 and 11.5.9.0, including all issue regressions, TLS, wide-row reply coalescing, and repeated encrypted-authentication sessions.
+- Rust, Node and Bun checks passed. No live z/OS server was tested for this release. See the [behavior matrix and reproduction commands](https://github.com/gurungabit/db2-node/blob/main/tests/ISSUES-11-12.md).
+
 ## [1.0.22](https://github.com/gurungabit/db2-node/releases/tag/v1.0.22) (2026-06-18)
 
 ### Bug Fixes

@@ -88,8 +88,7 @@ jobs:
           bash setup-db2-ssl.sh
 
       - name: Wait for DB2 after SSL restart
-        run: |
-          timeout 120 bash -c 'until docker exec db2-wire-test bash -c "su - db2inst1 -c \"db2 connect to testdb\"" > /dev/null 2>&1; do sleep 5; done'
+        run: timeout 150 bash tools/db2-network-ready.sh
 
       - name: Run integration tests
         env:
@@ -154,8 +153,7 @@ jobs:
           bash setup-db2-ssl.sh
 
       - name: Wait for DB2 after SSL restart
-        run: |
-          timeout 120 bash -c 'until docker exec db2-wire-test bash -c "su - db2inst1 -c \"db2 connect to testdb\"" > /dev/null 2>&1; do sleep 5; done'
+        run: timeout 150 bash tools/db2-network-ready.sh
 
       - name: Run Node.js tests
         working-directory: tests/node
