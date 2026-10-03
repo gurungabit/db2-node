@@ -5,24 +5,57 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing tag to retry publishing
+        required: false
+        type: string
 
 permissions:
   contents: write
   id-token: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   APP_NAME: db2-node
   RELEASE_RUST_VERSION: "1.99.0"
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  validate-release:
+    name: Validate release source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag, versions and source
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+        run: |
+          node - "$RELEASE_TAG" <<'NODE'
+          const fs = require('node:fs');
+          const read = path => JSON.parse(fs.readFileSync(path, 'utf8'));
+          const pkg = read('crates/db2-napi/package.json');
+          const lock = read('crates/db2-napi/package-lock.json');
+          const manifest = read('.github/.release-please-manifest.json');
+          if (process.argv[2] !== `v${pkg.version}` ||
+              lock.version !== pkg.version || lock.packages[''].version !== pkg.version ||
+              manifest['crates/db2-napi'] !== pkg.version) {
+            throw new Error('Release tag, package, lockfile and manifest must agree');
+          }
+          NODE
+          git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}"
+          git diff --exit-code "refs/tags/${RELEASE_TAG}" HEAD -- . ':!.github/workflows/release.yml'
+
   build:
     name: Build ${{ matrix.settings.target }}
+    needs: validate-release
     runs-on: ${{ matrix.settings.host }}
     strategy:
       fail-fast: false
@@ -105,6 +138,7 @@ jobs:
             set -eux
             rustup toolchain install ${{ env.RELEASE_RUST_VERSION }} --profile minimal
             rustup default ${{ env.RELEASE_RUST_VERSION }}
+            rustup target add ${{ matrix.settings.target }}
             rustc --version
             cargo --version
             cd crates/db2-napi
@@ -224,7 +258,7 @@ jobs:
       - smoke-test-linux-musl
       - smoke-test-linux-arm64
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
 
     steps:
       - uses: actions/checkout@v6.0.2
@@ -286,7 +320,7 @@ jobs:
     name: Create GitHub release
     needs: publish
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
 
     steps:
       - name: Download npm tarball
@@ -299,7 +333,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          TAG_NAME: ${{ github.ref_name }}
+          TAG_NAME: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
           TITLE="db2-node ${TAG_NAME}"
@@ -313,5 +347,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          TAG_NAME: ${{ github.ref_name }}
+          TAG_NAME: ${{ env.RELEASE_TAG }}
         run: gh release upload "${TAG_NAME}" dist/*.tgz --clobber
