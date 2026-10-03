@@ -101,6 +101,7 @@ jobs:
             -w /build
           run: |
             set -eux
+            export RUSTUP_PERMIT_COPY_RENAME=1
             rustup update stable
             rustup default stable
             rustc --version
