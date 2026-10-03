@@ -824,10 +824,7 @@ impl ClientInner {
         params: &[&dyn ToSql],
     ) -> Result<QueryResult, Error> {
         ensure_sqlstt_sql_len(sql)?;
-        if params.is_empty()
-            && !sql_is_query(sql)
-            && !sql.trim_start().to_uppercase().starts_with("CALL")
-        {
+        if params.is_empty() && !sql_is_query(sql) && !sql_is_call(sql) {
             return self.execute_immediate(sql).await;
         }
 
@@ -1310,7 +1307,7 @@ impl ClientInner {
                 input_descriptors = self.describe_input(&pkgnamcsn).await?;
             }
 
-            if sql.trim_start().to_uppercase().starts_with("CALL") {
+            if sql_is_call(sql) {
                 return self
                     .execute_call(&pkgnamcsn, sql, params, &input_descriptors)
                     .await;
@@ -8111,10 +8108,54 @@ fn format_hex_preview(data: &[u8], max_bytes: usize) -> String {
     out
 }
 
-/// Simple heuristic to determine if a SQL string is a query (SELECT).
+/// Read the first keyword without changing the SQL sent to Db2.
+fn sql_first_keyword(mut sql: &str) -> &str {
+    loop {
+        sql = sql.trim_start();
+        if let Some(comment) = sql.strip_prefix("--") {
+            sql = comment
+                .find(['\n', '\r'])
+                .map(|end| &comment[end..])
+                .unwrap_or("");
+        } else if let Some(comment) = sql.strip_prefix("/*") {
+            let mut depth = 1usize;
+            let mut end = 0usize;
+            let bytes = comment.as_bytes();
+            while end + 1 < bytes.len() && depth > 0 {
+                match &bytes[end..end + 2] {
+                    b"/*" => {
+                        depth += 1;
+                        end += 2;
+                    }
+                    b"*/" => {
+                        depth -= 1;
+                        end += 2;
+                    }
+                    _ => end += 1,
+                }
+            }
+            if depth != 0 {
+                return "";
+            } // Db2 reports the original syntax error.
+            sql = &comment[end..];
+        } else {
+            let end = sql
+                .find(|ch: char| !ch.is_ascii_alphabetic())
+                .unwrap_or(sql.len());
+            return &sql[..end];
+        }
+    }
+}
+
+pub(crate) fn sql_is_call(sql: &str) -> bool {
+    sql_first_keyword(sql).eq_ignore_ascii_case("CALL")
+}
+
 pub(crate) fn sql_is_query(sql: &str) -> bool {
-    let trimmed = sql.trim().to_uppercase();
-    trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") || trimmed.starts_with("VALUES")
+    let keyword = sql_first_keyword(sql);
+    ["SELECT", "WITH", "VALUES"]
+        .iter()
+        .any(|name| keyword.eq_ignore_ascii_case(name))
 }
 
 fn should_retry_query_after_session_error(sql: &str, params: &[&dyn ToSql], err: &Error) -> bool {
@@ -8152,8 +8193,7 @@ fn message_indicates_retryable_session_state(message: &str) -> bool {
 }
 
 fn sql_is_retryable_read_query(sql: &str) -> bool {
-    let trimmed = sql.trim().to_uppercase();
-    trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") || trimmed.starts_with("VALUES")
+    sql_is_query(sql)
 }
 
 fn can_retry_zos_lob_query_from_catalog(
@@ -8290,6 +8330,26 @@ mod tests {
                 correlation_id,
             },
             payload,
+        }
+    }
+
+    #[test]
+    fn sql_classification_skips_leading_comments() {
+        for sql in [
+            "/* note */ SELECT 1",
+            "-- note\r\nVALUES(1)",
+            " /* outer /* nested */ */ with T as (values 1) select * from T",
+        ] {
+            assert!(sql_is_query(sql), "{sql}");
+        }
+        assert!(sql_is_call("-- note\n/* note */ CALL P()"));
+        for sql in [
+            "/* unterminated SELECT 1",
+            "-- SELECT 1",
+            "SELECTED",
+            "/* note */ UPDATE T SET A=1",
+        ] {
+            assert!(!sql_is_query(sql), "{sql}");
         }
     }
 

@@ -43,9 +43,11 @@ Parameterized queries use server-provided input descriptors when Db2 supplies th
 | `string` | `VARCHAR` |
 | `boolean` | `BOOLEAN` |
 | `null` | SQL `NULL` when Db2 provides input metadata |
-| `Buffer`, `Uint8Array`, `ArrayBuffer`, or number array | binary value suitable for `BINARY`, `VARBINARY`, or `BLOB` parameters |
+| `Buffer`, `Uint8Array`, `ArrayBuffer`, or integer byte array | binary value suitable for `BINARY`, `VARBINARY`, or `BLOB` parameters |
 
-Decimal strings and `bigint` values can be bound to BIGINT parameters. Invalid `Date` values and unsupported object parameters raise catchable errors. GRAPHIC padding uses U+0020 spaces.
+Decimal strings and `bigint` values can be bound to BIGINT parameters. DECIMAL parameters reject malformed decimal text and integer digits that exceed the declared precision/scale before sending the value to Db2. Excess fractional places follow Db2 assignment truncation.
+
+Number arrays must contain only integer bytes from 0 through 255; nested arrays, objects, `bigint` elements, fractions and out-of-range values raise catchable errors. Invalid `Date` values and unsupported object parameters also raise catchable errors. GRAPHIC padding uses U+0020 spaces.
 
 For exact `DECIMAL`, `DECFLOAT`, `DATE`, `TIME`, `TIMESTAMP`, XML, and LOB parameter typing, cast the parameter in SQL:
 

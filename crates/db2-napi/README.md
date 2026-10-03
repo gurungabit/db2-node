@@ -138,7 +138,7 @@ The default encrypted authentication refuses a non-TLS downgrade to plaintext. A
 
 ## Parameters, Procedures and Cancellation
 
-Parameters accept `bigint`, decimal strings for BIGINT, UTC `Date` values, `Buffer`, `Uint8Array`, `ArrayBuffer`, numbers, strings, booleans and null. A `Date` becomes UTC timestamp text; SQL casts select the desired Db2 type. Unsafe BIGINT results are decimal strings, so `9223372036854775807` stays exact.
+Parameters accept `bigint`, decimal strings for BIGINT, UTC `Date` values, `Buffer`, `Uint8Array`, `ArrayBuffer`, numbers, strings, booleans and null. A `Date` becomes UTC timestamp text; SQL casts select the desired Db2 type. Unsafe BIGINT results are decimal strings, so `9223372036854775807` stays exact. Byte arrays must contain only integer values from 0 through 255; nested arrays and objects raise catchable errors. DECIMAL parameters reject malformed text and integer overflow before sending data to Db2.
 
 A `CALL` result exposes `resultSets` and `outputParameters`. `rows`, `columns` and `rowCount` describe the first result set. `outputParameters` contains OUT and INOUT values in parameter order; IN-only parameters are omitted. These fields are also available on compatibility `queryResult()` results, and callback forms receive OUT values as their third argument.
 

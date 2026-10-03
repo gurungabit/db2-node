@@ -604,8 +604,24 @@ impl FromNapiValue for JsParameter {
                 )
             }
             ValueType::Object if value.is_array()? => {
-                let items = unsafe { Vec::<JsParameter>::from_napi_value(env, raw)? };
-                serde_json::Value::Array(items.into_iter().map(|item| item.0).collect())
+                let object = value.coerce_to_object()?;
+                let mut bytes = Vec::with_capacity(object.get_array_length()? as usize);
+                for index in 0..object.get_array_length()? {
+                    let item: napi::JsUnknown = object.get_element(index)?;
+                    if item.get_type()? != ValueType::Number {
+                        return Err(napi::Error::from_reason(
+                            "Array parameters must contain only integer bytes (0..255)",
+                        ));
+                    }
+                    let byte = item.coerce_to_number()?.get_double()?;
+                    if !byte.is_finite() || byte.fract() != 0.0 || !(0.0..=255.0).contains(&byte) {
+                        return Err(napi::Error::from_reason(
+                            "Array parameters must contain only integer bytes (0..255)",
+                        ));
+                    }
+                    bytes.push(serde_json::Value::from(byte as u8));
+                }
+                serde_json::Value::Array(bytes)
             }
             ValueType::Object => {
                 return Err(napi::Error::from_reason(

@@ -27,6 +27,14 @@ Review also found that the new z/OS descriptor parser could discard DECIMAL prec
 | 13. currentSchema ignored | Connect executes SET CURRENT SCHEMA with a quoted, escaped schema value. |
 | 14. serverInfo instance name | productName comes from the server class, such as DB2/LINUXX8664. |
 | 15. Timed-out work continues | queryTimeout opens a separate control session and invokes WLM_CANCEL_ACTIVITY before resetting the timed-out connection. Client.cancel() can interrupt active work without taking its query lock; the connection remains usable. Tests verify that MON_GET_ACTIVITY no longer contains the cancelled work. |
+| 16. Leading comments cause SQLCODE -84 | Direct and prepared statement classification skips leading line/block comments, including multiple and nested block comments, while sending the original SQL to Db2. Comment-prefixed SELECT, VALUES and CALL execute correctly. |
+| 17. Zero-row UPDATE reports a negative count | SQLCAXGRP decodes all six SQLERRD integers. SQLERRD3 supplies the affected count; SQLERRD1/2 diagnostics cannot replace a zero count. Direct/prepared unmatched UPDATE returns zero; a matching UPDATE returns one. |
+| 18. Truncation warning breaks fetch | QRYDTA consumes the full warning SQLCA, null diagnostic group and SQLDTAGRP envelope before decoding the value. Direct/prepared truncation returns ten `x` characters and keeps the connection usable. A protocol test splits the warning row at every byte boundary. |
+| 19. Two VARCHAR(32672) columns break DSS framing | The earlier continuation fixes already cover this case. Direct/prepared queries preserve both 32,672-character values, including two wide table rows followed by a NULL row. |
+| 20. Overflowing/malformed bound DECIMAL silently changes | Packed-decimal encoding validates decimal digits and the integer capacity `precision - scale`. `12345.67`, `99999` and malformed text fail before execution for DECIMAL(5,2); existing stored values remain unchanged. Excess fractional places retain Db2 assignment truncation. |
+| 21. Nested bigint aborts / Date and Map become `{}` | Native and wrapper APIs reject nested bigint/objects/Map with catchable errors; Date produces UTC timestamp text. Binary arrays are additionally restricted to integer bytes 0–255, preventing nested arrays or invalid values from silently becoming empty/corrupted binary data. |
+
+The [follow-up comment](https://github.com/gurungabit/db2-node/issues/12#issuecomment-5965620029) added cases 16–21 after the initial PR. Cases 16, 17, 18 and 20 reproduced on the initial PR revision and are fixed by the follow-up change. Cases 19 and the originally reported inputs in 21 already passed; the additional byte-array validation closes related silent-conversion cases.
 
 ## API changes and limits
 
@@ -43,16 +51,16 @@ All required runs passed with the release native binding built from this branch:
 
 | Run | Result |
 | --- | --- |
-| Rust workspace, including live 12.1 integration and TLS tests | 276 passed, 0 failed |
-| Full Node suite on 12.1 with TLS enabled | 76 passed, 0 failed; 2 authentication-mode tests skipped here and exercised separately |
-| Node issue/authentication regressions on stock 11.5 | 22 passed, 0 failed; 2 authentication-mode tests exercised separately |
+| Rust workspace, including live 12.1 integration and TLS tests | 280 passed, 0 failed |
+| Full Node suite on 12.1 with TLS enabled | 83 passed, 0 failed; 2 authentication-mode tests skipped here and exercised separately |
+| Node issue/authentication regressions on stock 11.5 | 29 passed, 0 failed; 2 authentication-mode tests exercised separately |
 | Native package compatibility/artifact tests | 15 passed, 0 failed |
-| Bun 1.3.11, same LUW issue assertions on 11.5 | 20 checks passed |
+| Bun 1.3.11, original and follow-up LUW assertions on 11.5 | 26 checks passed |
 | SERVER_ENCRYPT on each server version | 40 fresh sessions per version: ten each for SECMEC 9/7 × AES/DES |
 | AES_ONLY on each server version | 20 fresh AES sessions per version; both DES mechanisms rejected with an authentication error |
 | Release build, ARM64 native-header verification, strict workspace Clippy, docs build | Passed |
 
-The installed Bun version cannot execute nested `node:test` subtests. Its 20 issue checks were run with the same SQL/assertion bodies in a standalone sequential harness. Encrypted-authentication repetition and the full suite were run under Node.
+The installed Bun version cannot execute nested `node:test` subtests. Its 20 original and six follow-up issue checks were run with the same SQL/assertion bodies in standalone sequential harnesses. Encrypted-authentication repetition and the full suite were run under Node. Authentication-mode runs were completed on the initial issue-fix revision; the follow-up change does not alter authentication.
 
 Both test containers were restored to `AUTHENTICATION=SERVER`, `ALTERNATE_AUTH_ENC=NOT_SPECIFIED` after authentication checks. The 12.1 TLS listener remains enabled.
 
@@ -88,7 +96,7 @@ For the 11.5 regression run, start the second image with the same environment, a
 
 ```sh
 cd tests/node
-DB2_TEST_PORT=50002 node --import tsx --test ./luw-regressions.test.ts ./auth-regressions.test.ts
+DB2_TEST_PORT=50002 node --import tsx --test ./luw-regressions.test.ts ./luw-followup-regressions.test.ts ./auth-regressions.test.ts
 ```
 
 For encrypted-authentication checks, update and restart the chosen test instance:

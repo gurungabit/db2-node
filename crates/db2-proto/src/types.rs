@@ -467,53 +467,48 @@ pub fn decode_packed_decimal(data: &[u8], precision: u8, scale: u8) -> Result<St
 ///
 /// The string should be like "123.45" or "-67.890".
 pub fn encode_packed_decimal(value: &str, precision: u8, scale: u8) -> Result<Vec<u8>> {
-    let byte_len = ((precision as usize) + 2) / 2;
+    if !(1..=31).contains(&precision) || scale > precision {
+        return Err(ProtoError::Other("Invalid DECIMAL precision/scale".into()));
+    }
+    let value = value.trim();
     let is_negative = value.starts_with('-');
-    let abs_value = value.trim_start_matches('-').trim_start_matches('+');
-
-    // Split into integer and fractional parts
-    let (int_part, frac_part) = if let Some(dot_pos) = abs_value.find('.') {
-        (&abs_value[..dot_pos], &abs_value[dot_pos + 1..])
-    } else {
-        (abs_value, "")
-    };
-
-    // Build digit string: integer digits + fractional digits padded/truncated to scale
-    let mut digit_str = String::new();
-    digit_str.push_str(int_part);
-
-    let mut frac = frac_part.to_string();
-    while frac.len() < scale as usize {
-        frac.push('0');
+    let unsigned = value.strip_prefix(['-', '+']).unwrap_or(value);
+    let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    if integer.len() + fraction.len() == 0
+        || !integer
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|byte| byte.is_ascii_digit())
+    {
+        return Err(ProtoError::Other(
+            "Invalid DECIMAL parameter: expected decimal digits".into(),
+        ));
     }
-    frac.truncate(scale as usize);
-    digit_str.push_str(&frac);
-
-    // Total nibbles needed = precision + 1 (for sign)
-    let total_nibbles = byte_len * 2;
-    // Pad digit string with leading zeros
-    while digit_str.len() < total_nibbles - 1 {
-        digit_str.insert(0, '0');
+    let integer = integer.trim_start_matches('0');
+    if integer.len() > usize::from(precision - scale) {
+        return Err(ProtoError::Other(format!(
+            "DECIMAL parameter out of range for DECIMAL({precision},{scale})"
+        )));
     }
-    // Truncate if too long
-    if digit_str.len() > total_nibbles - 1 {
-        digit_str = digit_str[digit_str.len() - (total_nibbles - 1)..].to_string();
-    }
-
-    let sign_nibble: u8 = if is_negative { 0x0D } else { 0x0C };
-
-    let mut nibbles: Vec<u8> = digit_str.bytes().map(|b| b - b'0').collect();
-    nibbles.push(sign_nibble);
-
-    // Pack nibbles into bytes
-    let mut result = Vec::with_capacity(byte_len);
-    for chunk in nibbles.chunks(2) {
-        let high = chunk[0];
-        let low = if chunk.len() > 1 { chunk[1] } else { 0 };
-        result.push((high << 4) | low);
-    }
-
-    Ok(result)
+    // Db2 assignment truncates excess fractional places; integer digits must
+    // never be discarded to make an overflowing parameter fit.
+    let mut digits = integer.to_owned();
+    digits.push_str(&fraction[..fraction.len().min(usize::from(scale))]);
+    digits.extend(std::iter::repeat_n(
+        '0',
+        usize::from(scale).saturating_sub(fraction.len()),
+    ));
+    let byte_len = (usize::from(precision) + 2) / 2;
+    let padding = byte_len * 2 - 1 - digits.len();
+    let mut nibbles = vec![0u8; padding];
+    nibbles.extend(digits.bytes().map(|byte| byte - b'0'));
+    nibbles.push(if is_negative { 0x0D } else { 0x0C });
+    Ok(nibbles
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| (pair[0] << 4) | pair[1])
+        .collect())
 }
 
 /// Decode a variable-length string from a buffer (2-byte length prefix + data).
@@ -618,6 +613,28 @@ mod tests {
         let encoded = encode_packed_decimal("123.45", 5, 2).unwrap();
         let decoded = decode_packed_decimal(&encoded, 5, 2).unwrap();
         assert_eq!(decoded, "123.45");
+    }
+
+    #[test]
+    fn test_packed_decimal_rejects_overflow_and_invalid_digits() {
+        for value in [
+            "12345.67", "99999", "-1000", "abc", "1.2.3", "--1", "", ".", "1e2",
+        ] {
+            assert!(encode_packed_decimal(value, 5, 2).is_err(), "{value}");
+        }
+        assert!(encode_packed_decimal("123", 2, 0).is_err());
+        for (value, precision, scale, expected) in [
+            ("+000999.99", 5, 2, "999.99"),
+            (".25", 2, 2, "0.25"),
+            ("-12.349", 5, 2, "-12.34"),
+            ("0", 2, 2, "0.00"),
+        ] {
+            let bytes = encode_packed_decimal(value, precision, scale).unwrap();
+            assert_eq!(
+                decode_packed_decimal(&bytes, precision, scale).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]

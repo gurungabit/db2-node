@@ -346,6 +346,52 @@ pub fn decode_row(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2V
     decode_row_body(data, columns)
 }
 
+/// Decode a protocol row, including its SQLCA and SQLDTAGRP envelope.
+/// A warning carries a full SQLCA instead of the usual null SQLCA byte.
+fn decode_qrydta_row(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2Value>, usize)> {
+    let mut offset = if data.first() == Some(&0x00) {
+        let (card, mut offset) = crate::replies::sqldard::consume_sqlca_group(data)?;
+        if card.is_error() {
+            return Err(ProtoError::InvalidSqlcard(format!(
+                "Fetch failed: SQLCODE={}, SQLSTATE={}",
+                card.sqlcode, card.sqlstate
+            )));
+        }
+        // SQLAM 7 adds SQLDIAGGRP after a non-null SQLCA. The LUW warning
+        // reply has a null diagnostic group, followed by SQLDTAGRP.
+        let diagnostic = data.get(offset).ok_or(ProtoError::BufferTooShort {
+            expected: offset + 1,
+            actual: data.len(),
+        })?;
+        if *diagnostic != 0xFF {
+            return Err(ProtoError::Other(
+                "Non-null fetch SQLDIAGGRP is not supported".into(),
+            ));
+        }
+        offset += 1;
+        offset
+    } else if data.first() == Some(&0xFF) {
+        1
+    } else {
+        return decode_row_body(data, columns);
+    };
+    let indicator = data.get(offset).ok_or(ProtoError::BufferTooShort {
+        expected: offset + 1,
+        actual: data.len(),
+    })?;
+    offset += 1;
+    if *indicator == 0xFF {
+        return Ok((Vec::new(), offset));
+    }
+    if *indicator != 0x00 {
+        return Err(ProtoError::Other(format!(
+            "Invalid SQLDTAGRP indicator 0x{indicator:02X}"
+        )));
+    }
+    let (values, consumed) = decode_row_body(&data[offset..], columns)?;
+    Ok((values, offset + consumed))
+}
+
 /// CALL output data can omit an IN-only parameter using marker 0x80.
 pub fn decode_output_parameters(
     data: &[u8],
@@ -474,12 +520,14 @@ fn decode_rows_from_buffer(
             tail.extend_from_slice(&buffer[offset..]);
             break;
         }
-        match decode_row(&buffer[offset..], columns) {
+        match decode_qrydta_row(&buffer[offset..], columns) {
             Ok((row, consumed)) => {
                 if consumed == 0 {
                     break;
                 }
-                rows.push(row);
+                if !row.is_empty() {
+                    rows.push(row);
+                }
                 offset += consumed;
             }
             Err(ProtoError::BufferTooShort { .. }) => {
@@ -642,12 +690,7 @@ fn find_partial_row_start(
 }
 
 fn decode_row_strict(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2Value>, usize)> {
-    if data.len() >= 2 && data[0] == 0xFF {
-        let (values, consumed) = decode_row_body(&data[2..], columns)?;
-        return Ok((values, consumed + 2));
-    }
-
-    decode_row_body(data, columns)
+    decode_qrydta_row(data, columns)
 }
 
 /// Decode a single column value from bytes based on its descriptor.
@@ -1186,6 +1229,47 @@ pub fn parse_qrydta(data: &[u8], num_columns: usize) -> Result<Vec<Vec<Db2Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warning_sqlca_rows_survive_every_block_boundary() {
+        let cols = [ColumnDescriptor {
+            column_index: 0,
+            drda_type: 0x32,
+            length: 10,
+            precision: 0,
+            scale: 0,
+            nullable: false,
+            ccsid: 1208,
+            db2_type: Db2Type::VarChar(10),
+            byte_order: ByteOrder::LittleEndian,
+        }];
+        let mut data = vec![0];
+        data.extend_from_slice(&445i32.to_le_bytes());
+        data.extend_from_slice(b"01004SQLRI7F7");
+        data.push(0); // SQLCAXGRP
+        for value in [i32::from_le_bytes([0x6D, 0, 0x1A, 0x80]), 0, 0, 0, 0, 0] {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        data.extend_from_slice(&[b' '; 11]);
+        data.extend_from_slice(&0u16.to_be_bytes()); // database name
+        data.extend_from_slice(&60u16.to_be_bytes());
+        data.extend_from_slice(&[b'x'; 60]); // warning message
+        data.extend_from_slice(&0u16.to_be_bytes());
+        data.extend_from_slice(&[0xFF, 0x00]); // SQLDIAGGRP null, SQLDTAGRP present
+        data.extend_from_slice(&10u16.to_be_bytes());
+        data.extend_from_slice(b"xxxxxxxxxx");
+        for split in 0..=data.len() {
+            let mut tail = Vec::new();
+            let mut rows = decode_rows_with_tail(&data[..split], &cols, &mut tail).unwrap();
+            rows.extend(decode_rows_with_tail(&data[split..], &cols, &mut tail).unwrap());
+            assert_eq!(
+                rows,
+                vec![vec![Db2Value::VarChar("xxxxxxxxxx".into())]],
+                "split {split}"
+            );
+            assert!(tail.is_empty(), "split {split}");
+        }
+    }
 
     #[test]
     fn test_decode_simple_row() {

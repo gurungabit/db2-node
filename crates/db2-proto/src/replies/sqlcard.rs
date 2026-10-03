@@ -29,9 +29,9 @@ pub struct SqlCard {
     /// SQLERRD array (6 values).
     /// sqlerrd[2] typically contains the row count for INSERT/UPDATE/DELETE.
     pub sqlerrd: [i32; 6],
-    /// Rows fetched, when present in the compact SQLCAXGRP.
+    /// Reserved fetch count; SQLCAXGRP carries six SQLERRD integers, not a fetch count.
     pub rows_fetched: u64,
-    /// Rows updated, when present in the compact SQLCAXGRP.
+    /// Nonnegative view of SQLERRD3 (the affected row count).
     pub rows_updated: u32,
     /// SQL warning flags (11 bytes).
     pub sqlwarn: [u8; 11],
@@ -72,13 +72,7 @@ impl SqlCard {
 
     /// Get the row count from sqlerrd[2] (the third element).
     pub fn row_count(&self) -> i32 {
-        if self.rows_updated != 0 {
-            self.rows_updated as i32
-        } else if self.rows_fetched != 0 {
-            self.rows_fetched as i32
-        } else {
-            self.sqlerrd[2]
-        }
+        self.sqlerrd[2]
     }
 }
 
@@ -147,7 +141,7 @@ pub fn parse_sqlcard_data(data: &[u8]) -> Result<SqlCard> {
 
     // SQLCAXGRP - may or may not be present
     let mut sqlerrd = [0i32; 6];
-    let mut rows_fetched = 0u64;
+    let rows_fetched = 0u64;
     let mut rows_updated = 0u32;
     let mut sqlwarn = [0u8; 11];
     let mut sqlerrmc = String::new();
@@ -158,37 +152,25 @@ pub fn parse_sqlcard_data(data: &[u8]) -> Result<SqlCard> {
         offset += 1;
 
         if caxgrp_null != 0xFF && offset + 24 <= data.len() {
-            // Compact LUW SQLCAXGRP:
-            // rows_fetched (u64 LE), rows_updated (u32 LE), sqlerrd[0..3] raw bytes.
-            rows_fetched = u64::from_le_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-                data[offset + 4],
-                data[offset + 5],
-                data[offset + 6],
-                data[offset + 7],
-            ]);
-            offset += 8;
-
-            rows_updated = u32::from_le_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]);
-            offset += 4;
-
-            for item in sqlerrd.iter_mut().take(3) {
-                *item = i32::from_le_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ]);
+            // SQLCAXGRP contains six SQLERRD integers. SQLERRD1/2 are
+            // diagnostics, even when SQLERRD3 (the affected count) is zero.
+            let code_bytes: [u8; 4] = data[1..5].try_into().unwrap();
+            let little_endian = if i32::from_le_bytes(code_bytes) != i32::from_be_bytes(code_bytes)
+            {
+                i32::from_le_bytes(code_bytes) == sqlcode
+            } else {
+                sqlstate_bytes.iter().all(u8::is_ascii)
+            };
+            for item in &mut sqlerrd {
+                let bytes: [u8; 4] = data[offset..offset + 4].try_into().unwrap();
+                *item = if little_endian {
+                    i32::from_le_bytes(bytes)
+                } else {
+                    i32::from_be_bytes(bytes)
+                };
                 offset += 4;
             }
+            rows_updated = sqlerrd[2].max(0) as u32;
 
             // SQLWARN: 11 bytes
             if offset + 11 <= data.len() {
@@ -203,12 +185,6 @@ pub fn parse_sqlcard_data(data: &[u8]) -> Result<SqlCard> {
             offset = next;
             let (errs, _) = decode_len_prefixed_string(data, offset)?;
             sqlerrmc = if !errm.is_empty() { errm } else { errs };
-
-            if rows_updated != 0 {
-                sqlerrd[2] = rows_updated as i32;
-            } else if rows_fetched != 0 {
-                sqlerrd[2] = rows_fetched as i32;
-            }
         }
     }
 
@@ -331,6 +307,27 @@ mod tests {
         assert!(card.is_null);
         assert!(card.is_success());
         assert_eq!(card.sqlcode, 0);
+    }
+
+    #[test]
+    fn sqlerrd_diagnostics_do_not_replace_zero_affected_count() {
+        for count in [0i32, 1, 23] {
+            let mut data = vec![0];
+            data.extend_from_slice(&0i32.to_le_bytes());
+            data.extend_from_slice(b"00000SQLRI021");
+            data.push(0); // SQLCAXGRP present
+            let diagnostics = [i32::from_le_bytes([1, 0, 4, 128]), 1, count, 7, 8, 9];
+            for value in diagnostics {
+                data.extend_from_slice(&value.to_le_bytes());
+            }
+            data.extend_from_slice(&[b' '; 11]);
+            data.extend_from_slice(&[0; 6]); // database/message lengths
+            let card = parse_sqlcard_data(&data).unwrap();
+            assert_eq!(card.sqlerrd, diagnostics);
+            assert_eq!(card.row_count(), count);
+            assert_eq!(card.rows_updated, count as u32);
+            assert_eq!(card.rows_fetched, 0);
+        }
     }
 
     #[test]

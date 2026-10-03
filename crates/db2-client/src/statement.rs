@@ -5,7 +5,7 @@ use tokio::time::timeout;
 use tracing::debug;
 
 use crate::column::ColumnInfo;
-use crate::connection::{build_sqldta, ClientInner};
+use crate::connection::{build_sqldta, sql_is_call, sql_is_query, ClientInner};
 use crate::error::Error;
 use crate::types::{QueryResult, ToSql};
 use db2_proto::dss::DssWriter;
@@ -76,7 +76,7 @@ impl PreparedStatement {
         guard.activate_section(self.package_id, self.section_number);
         let query_timeout = guard.config.query_timeout;
 
-        if self.sql.trim_start().to_uppercase().starts_with("CALL") {
+        if sql_is_call(&self.sql) {
             let result = if query_timeout.is_zero() {
                 guard
                     .execute_call(&pkgnamcsn, &self.sql, params, &self.param_descriptors)
@@ -323,12 +323,6 @@ impl Drop for PreparedStatement {
             });
         }
     }
-}
-
-/// Simple heuristic to determine if a SQL string is a query (SELECT).
-fn sql_is_query(sql: &str) -> bool {
-    let trimmed = sql.trim().to_uppercase();
-    trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") || trimmed.starts_with("VALUES")
 }
 
 fn format_hex_preview(data: &[u8], max_bytes: usize) -> String {

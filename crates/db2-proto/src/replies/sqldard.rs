@@ -676,9 +676,7 @@ pub fn consume_sqlca_group(data: &[u8]) -> Result<(SqlCard, usize)> {
     //   sqlerrproc (8)
     //   sqlcaxgrp_flag (1)
     //   if present:
-    //     rowsfetched (8, LE)
-    //     rowsupdated (4, LE)
-    //     sqlerrd (12)
+    //     sqlerrd (6 x 4, LE)
     //     sqlwarn (11)
     //     rdbname (2-byte BE len + bytes)
     //     errmsgm (2-byte BE len + bytes)
@@ -697,7 +695,7 @@ pub fn consume_sqlca_group(data: &[u8]) -> Result<(SqlCard, usize)> {
     let cax_flag = data[offset];
     offset += 1;
     if cax_flag != 0xFF {
-        offset += 8 + 4 + 12 + 11;
+        offset += 24 + 11;
         offset = skip_len_prefixed_string(data, offset)?;
         offset = skip_len_prefixed_string(data, offset)?;
         offset = skip_len_prefixed_string(data, offset)?;
