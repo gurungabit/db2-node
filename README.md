@@ -24,10 +24,10 @@ npm install db2-node
 Install from a GitHub release tarball:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.22/db2-node-1.0.22.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.23/db2-node-1.0.23.tgz
 ```
 
-Replace `v1.0.22` and `1.0.22` with the release version you want.
+Replace `v1.0.23` and `1.0.23` with the release version you want.
 
 ```ts
 import { Client } from "db2-node";
@@ -213,12 +213,12 @@ The deployed docs site lives at `https://db2-node.github.io/`.
 
 ## Status
 
-The `1.0.22` release line is production-ready for the validated DB2 LUW and Db2 for z/OS paths:
+The `1.0.23` release fixes the LUW issues reported in #11 and #12, validated with Docker Db2 12.1 and 11.5:
 
 - Rust and Node integration suites are green
 - TLS behavior is covered in both Rust and Node tests
 - Prepared statements, pooling, reconnect behavior, and timeout handling have all been hardened
-- Db2 for z/OS LOB materialization has passed default-mode and active-close soak testing with no stale `EXTDTA` corruption
+- Existing Db2 for z/OS behavior retains regression coverage; no live z/OS server was tested for this release
 
 ## License
 

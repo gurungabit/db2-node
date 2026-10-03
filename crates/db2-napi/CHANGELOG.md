@@ -4,13 +4,26 @@ All notable changes to this package will be documented in this file.
 
 ## [1.0.23](https://github.com/gurungabit/db2-node/compare/v1.0.22...v1.0.23) (2026-10-03)
 
-
 ### Bug Fixes
 
-* address follow-up LUW query and parameter regressions ([cfdfce0](https://github.com/gurungabit/db2-node/commit/cfdfce0c01d2ed0a11004428b9fb54637c66fb8c))
-* improve input descriptor handling and native artifact checks ([1703d77](https://github.com/gurungabit/db2-node/commit/1703d77675639d302af6d39f242b3d6a42e3b954))
-* resolve Db2 LUW query, parameter, and authentication issues ([2686a64](https://github.com/gurungabit/db2-node/commit/2686a64db6850efb1523850b12bdc35d7c6e0579)), closes [#11](https://github.com/gurungabit/db2-node/issues/11) [#12](https://github.com/gurungabit/db2-node/issues/12)
-* resolve LUW decoding, procedures and encrypted authentication ([499d4a6](https://github.com/gurungabit/db2-node/commit/499d4a6059c5f8d191f738b0dfb67fbe0e58f643)), closes [#11](https://github.com/gurungabit/db2-node/issues/11) [#12](https://github.com/gurungabit/db2-node/issues/12)
+- Resolve [#11](https://github.com/gurungabit/db2-node/issues/11) and all 21 cases in [#12](https://github.com/gurungabit/db2-node/issues/12), including the follow-up report.
+- Correct LUW UTF-8 text, mixed numeric and Boolean decoding, timestamp widths, NULL/LOB row handling, and continued wide-row DSS boundaries when TCP combines replies.
+- Preserve BIGINT values outside JavaScript's safe integer range and accept bigint, Date, Buffer, Uint8Array and ArrayBuffer parameters. Reject invalid nested objects, byte arrays and malformed or overflowing DECIMAL input with catchable errors.
+- Execute CALL with multiple result sets and OUT/INOUT parameters across direct, prepared, transaction and compatibility APIs. Handle leading SQL comments, zero-row updates and truncation warnings correctly.
+- Repair AES/DES encrypted authentication, refuse implicit plaintext downgrade, retain encryption settings on retries, and use OS randomness for DH private keys.
+- Apply currentSchema, return the actual server product name, and support bounded LUW cancellation and queryTimeout.
+- Preserve z/OS DECIMAL input precision/scale and strengthen native artifact and publication checks.
+
+### Compatibility
+
+- Unsafe BIGINT results now return exact decimal strings. LUW accepts only an omitted typeDefinitionName or QTDSQLX86.
+- Stock AUTHENTICATION=SERVER requires an explicit userPassword mechanism, TLS, or encrypted server authentication. Date parameters use UTC.
+- LUW cancellation requires activity-monitoring privileges and permission to execute SYSPROC.WLM_CANCEL_ACTIVITY.
+
+### Validation
+
+- Verified against Docker Db2 12.1.0.0 and 11.5.9.0, including all issue regressions, TLS, wide-row reply coalescing, and repeated encrypted-authentication sessions.
+- Rust, Node and Bun checks passed. No live z/OS server was tested for this release. See the [behavior matrix and reproduction commands](https://github.com/gurungabit/db2-node/blob/main/tests/ISSUES-11-12.md).
 
 ## [1.0.22](https://github.com/gurungabit/db2-node/releases/tag/v1.0.22) (2026-06-18)
 
