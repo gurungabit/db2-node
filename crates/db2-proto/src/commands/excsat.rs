@@ -116,7 +116,9 @@ mod tests {
             .expect("EXCSAT should include manager levels");
         let secmgr_level = mgrlvlls
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .find_map(|chunk| {
                 let code_point = u16::from_be_bytes([chunk[0], chunk[1]]);
                 let level = u16::from_be_bytes([chunk[2], chunk[3]]);
@@ -138,7 +140,9 @@ mod tests {
             .data
             .clone();
         let secmgr_level = mgrlvlls
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .find_map(|chunk| {
                 let code_point = u16::from_be_bytes([chunk[0], chunk[1]]);
                 let level = u16::from_be_bytes([chunk[2], chunk[3]]);

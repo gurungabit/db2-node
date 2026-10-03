@@ -7832,8 +7832,10 @@ fn decode_extdta_text(payload: &[u8], descriptor: &db2_proto::fdoca::ColumnDescr
 
 fn decode_utf16be_lossy(payload: &[u8]) -> String {
     let units = payload
-        .chunks_exact(2)
-        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_be_bytes(*chunk))
         .collect::<Vec<_>>();
     String::from_utf16_lossy(&units)
 }

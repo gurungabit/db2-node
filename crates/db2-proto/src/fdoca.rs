@@ -1147,8 +1147,10 @@ fn ascii_bytes_to_string(data: &[u8]) -> String {
 fn decode_graphic_bytes(data: &[u8], ccsid: u16) -> String {
     if matches!(ccsid, 1200 | 13488) && data.len().is_multiple_of(2) {
         let units: Vec<u16> = data
-            .chunks_exact(2)
-            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| u16::from_be_bytes(*chunk))
             .collect();
         return String::from_utf16_lossy(&units);
     }
