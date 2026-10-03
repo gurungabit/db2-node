@@ -3150,7 +3150,7 @@ impl ClientInner {
                                 format_hex_preview(&obj.data, 160)
                             );
                         }
-                        descriptors = parse_input_sqldard_descriptors(&obj);
+                        descriptors.extend(parse_input_sqldard_descriptors(&obj));
                     }
                     codepoints::SQLCARD => {
                         let card = db2_proto::replies::sqlcard::parse_sqlcard(&obj)
@@ -5967,6 +5967,39 @@ pub(crate) fn build_sqldta(
         )));
     }
 
+    let descriptors = params
+        .iter()
+        .zip(descriptors)
+        .map(|(param, mut descriptor)| {
+            let value = param.to_db2_value();
+            if matches!(
+                value,
+                db2_proto::types::Db2Value::Char(_)
+                    | db2_proto::types::Db2Value::VarChar(_)
+                    | db2_proto::types::Db2Value::Clob(_)
+            ) && matches!(
+                descriptor.db2_type,
+                db2_proto::types::Db2Type::Char(_)
+                    | db2_proto::types::Db2Type::VarChar(_)
+                    | db2_proto::types::Db2Type::LongVarChar
+                    | db2_proto::types::Db2Type::Clob
+                    | db2_proto::types::Db2Type::Xml
+                    | db2_proto::types::Db2Type::Date
+                    | db2_proto::types::Db2Type::Time
+                    | db2_proto::types::Db2Type::Timestamp
+            ) {
+                descriptor.db2_type = db2_proto::types::Db2Type::VarChar(descriptor.length);
+                descriptor.ccsid = 1208;
+                descriptor.drda_type = input_drda_type_for(
+                    &descriptor.db2_type,
+                    descriptor.ccsid,
+                    descriptor.nullable,
+                );
+            }
+            descriptor
+        })
+        .collect::<Vec<_>>();
+
     let mut builder = db2_proto::ddm::DdmBuilder::new(codepoints::SQLDTA);
     builder.add_raw(&build_sqldta_fdoca_prefix(&descriptors)?);
     let data = build_sqldta_row_data(params, &descriptors)?;
@@ -6124,6 +6157,11 @@ fn parse_sqldard_descriptors(obj: &DdmObject) -> Vec<db2_proto::fdoca::ColumnDes
 }
 
 fn parse_input_sqldard_descriptors(obj: &DdmObject) -> Vec<db2_proto::fdoca::ColumnDescriptor> {
+    let zos_descriptors = parse_zos_input_sqldard(&obj.data);
+    if !zos_descriptors.is_empty() {
+        return zos_descriptors;
+    }
+
     let dard = db2_proto::replies::sqldard::parse_sqldard(obj).ok();
     if let Some(dard) = dard {
         if !dard.columns.is_empty() {
@@ -6146,6 +6184,96 @@ fn parse_input_sqldard_descriptors(obj: &DdmObject) -> Vec<db2_proto::fdoca::Col
     }
 
     parse_input_sqldard_compact(&obj.data)
+}
+
+fn parse_zos_input_sqldard(data: &[u8]) -> Vec<db2_proto::fdoca::ColumnDescriptor> {
+    if data.len() < 20 || data[..2] != [0xFF, 0xFF] {
+        return Vec::new();
+    }
+
+    let count = u16::from_be_bytes([data[2], data[3]]) as usize;
+    if count == 0 || count > 512 {
+        return Vec::new();
+    }
+
+    let mut offsets = Vec::with_capacity(count);
+    for offset in 4..=data.len().saturating_sub(8) {
+        if looks_like_zos_input_descriptor_start(&data[offset..]) {
+            offsets.push(offset);
+            if offsets.len() == count {
+                break;
+            }
+        }
+    }
+
+    if offsets.len() != count {
+        return Vec::new();
+    }
+
+    offsets
+        .into_iter()
+        .enumerate()
+        .map(|(index, offset)| {
+            let descriptor = &data[offset..];
+            let raw_length =
+                u32::from_be_bytes([descriptor[0], descriptor[1], descriptor[2], descriptor[3]]);
+            let sql_type = u16::from_be_bytes([descriptor[4], descriptor[5]]);
+            let ccsid = u16::from_be_bytes([descriptor[6], descriptor[7]]);
+            let nullable = (sql_type & 0x0001) != 0;
+            let db2_type = compact_sqlda_db2_type(sql_type, raw_length as u64, 0, 0);
+            let length = input_length_for(&db2_type, raw_length.min(u16::MAX as u32) as u16, 0, 0);
+
+            db2_proto::fdoca::ColumnDescriptor {
+                column_index: index,
+                drda_type: input_drda_type_for(&db2_type, ccsid, nullable),
+                length,
+                precision: 0,
+                scale: 0,
+                nullable,
+                ccsid,
+                db2_type,
+                byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
+            }
+        })
+        .collect()
+}
+
+fn looks_like_zos_input_descriptor_start(data: &[u8]) -> bool {
+    if data.len() < 8 {
+        return false;
+    }
+
+    let raw_length = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    let sql_type = u16::from_be_bytes([data[4], data[5]]);
+    let ccsid = u16::from_be_bytes([data[6], data[7]]);
+    let base_sql_type = sql_type & !1;
+
+    matches!(
+        base_sql_type,
+        384 | 388
+            | 392
+            | 404
+            | 408
+            | 412
+            | 448
+            | 452
+            | 456
+            | 464
+            | 468
+            | 472
+            | 480
+            | 484
+            | 488
+            | 492
+            | 496
+            | 500
+            | 904
+            | 908
+            | 912
+            | 988
+            | 996
+    ) && raw_length <= u16::MAX as u32
+        && matches!(ccsid, 0 | 37 | 500 | 819 | 1200 | 1208)
 }
 
 const NULL_LID: u8 = 0x00;
@@ -6725,7 +6853,7 @@ fn input_length_for(
     }
 }
 
-fn input_drda_type_for(db2_type: &db2_proto::types::Db2Type, ccsid: u16, nullable: bool) -> u8 {
+fn input_drda_type_for(db2_type: &db2_proto::types::Db2Type, _ccsid: u16, nullable: bool) -> u8 {
     use db2_proto::types::Db2Type;
 
     let base = match db2_type {
@@ -6736,20 +6864,8 @@ fn input_drda_type_for(db2_type: &db2_proto::types::Db2Type, ccsid: u16, nullabl
         Db2Type::Double => 0x0A,
         Db2Type::Decimal { .. } => 0x0E,
         Db2Type::DecFloat(_) => db2_proto::types::DRDA_TYPE_DECFLOAT,
-        Db2Type::Char(_) => {
-            if matches!(ccsid, 37 | 500) {
-                0x30
-            } else {
-                0x3C
-            }
-        }
-        Db2Type::VarChar(_) | Db2Type::LongVarChar | Db2Type::Clob | Db2Type::Xml => {
-            if matches!(ccsid, 37 | 500) {
-                0x32
-            } else {
-                0x3E
-            }
-        }
+        Db2Type::Char(_) => 0x30,
+        Db2Type::VarChar(_) | Db2Type::LongVarChar | Db2Type::Clob | Db2Type::Xml => 0x32,
         Db2Type::Binary(_) => 0x26,
         Db2Type::VarBinary(_) | Db2Type::Blob | Db2Type::LobBytes(_) => 0x28,
         Db2Type::BlobLocator => 0x18,
@@ -6762,13 +6878,7 @@ fn input_drda_type_for(db2_type: &db2_proto::types::Db2Type, ccsid: u16, nullabl
         Db2Type::Graphic(_) => 0x36,
         Db2Type::VarGraphic(_) | Db2Type::DbClob | Db2Type::LobChar(_) => 0x38,
         Db2Type::Boolean => 0xBE,
-        Db2Type::Null => {
-            if matches!(ccsid, 37 | 500) {
-                0x32
-            } else {
-                0x3E
-            }
-        }
+        Db2Type::Null => 0x32,
     };
 
     if nullable {
@@ -7775,6 +7885,149 @@ fn query_diagnostics_stderr_enabled() -> bool {
 mod tests {
     use super::*;
     use db2_proto::types::Db2Value;
+
+    fn input_sqldard(sql_types: &[(u16, u64, u16)]) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.push(0x00);
+        data.extend_from_slice(&0i32.to_be_bytes());
+        data.extend_from_slice(b"00000");
+        data.extend_from_slice(b"SQLPROC1");
+        data.push(0xFF);
+        data.push(0xFF);
+        data.extend_from_slice(&(sql_types.len() as u16).to_be_bytes());
+
+        for (sql_type, length, ccsid) in sql_types {
+            data.extend_from_slice(&0u16.to_be_bytes());
+            data.extend_from_slice(&0u16.to_be_bytes());
+            data.extend_from_slice(&length.to_be_bytes());
+            data.extend_from_slice(&sql_type.to_be_bytes());
+            data.extend_from_slice(&ccsid.to_be_bytes());
+            data.push(0xFF);
+        }
+
+        db2_proto::ddm::DdmBuilder::new(codepoints::SQLDARD)
+            .add_raw(&data)
+            .build()
+    }
+
+    fn zos_input_sqldard(sql_types: &[(u16, u32, u16)]) -> Vec<u8> {
+        let mut data = vec![0xFF, 0xFF];
+        data.extend_from_slice(&(sql_types.len() as u16).to_be_bytes());
+        data.extend_from_slice(&[0; 8]);
+
+        for (sql_type, length, ccsid) in sql_types {
+            data.extend_from_slice(&length.to_be_bytes());
+            data.extend_from_slice(&sql_type.to_be_bytes());
+            data.extend_from_slice(&ccsid.to_be_bytes());
+            data.extend_from_slice(&[0; 25]);
+            data.extend_from_slice(&[0xFF, 0xFF, 0xFF]);
+            data.extend_from_slice(&[0; 4]);
+        }
+        data.extend_from_slice(&[0; 8]);
+
+        db2_proto::ddm::DdmBuilder::new(codepoints::SQLDARD)
+            .add_raw(&data)
+            .build()
+    }
+
+    fn reply_frame(payload: Vec<u8>, correlation_id: u16) -> DssFrame {
+        DssFrame {
+            header: db2_proto::dss::DssHeader {
+                length: (payload.len() + db2_proto::dss::DSS_HEADER_LEN) as u16,
+                dss_type: db2_proto::dss::DssType::Reply,
+                flags: db2_proto::dss::DssFlags::none(),
+                correlation_id,
+            },
+            payload,
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_input_descriptors_accumulates_sqldards_in_one_frame() {
+        let mut payload = input_sqldard(&[(496, 4, 0), (448, 32, 1208)]);
+        payload.extend(input_sqldard(&[(500, 2, 0), (492, 8, 0)]));
+        let frames = vec![reply_frame(payload, 1)];
+        let client = Client::new(Config::default());
+        let inner = client.inner.lock().await;
+
+        let descriptors = inner.parse_input_descriptors(&frames).unwrap();
+
+        assert_eq!(descriptors.len(), 4);
+        assert_eq!(descriptors[0].db2_type, db2_proto::types::Db2Type::Integer);
+        assert_eq!(
+            descriptors[1].db2_type,
+            db2_proto::types::Db2Type::VarChar(32)
+        );
+        assert_eq!(descriptors[2].db2_type, db2_proto::types::Db2Type::SmallInt);
+        assert_eq!(descriptors[3].db2_type, db2_proto::types::Db2Type::BigInt);
+
+        let integer = 7i32;
+        let text = "north";
+        let smallint = 8i16;
+        let bigint = 9i64;
+        let params: [&dyn ToSql; 4] = [&integer, &text, &smallint, &bigint];
+        assert!(build_sqldta(&params, &descriptors).is_ok());
+    }
+
+    #[tokio::test]
+    async fn parse_input_descriptors_accumulates_sqldards_across_frames() {
+        let frames = vec![
+            reply_frame(input_sqldard(&[(496, 4, 0), (448, 32, 1208)]), 1),
+            reply_frame(input_sqldard(&[(500, 2, 0), (492, 8, 0)]), 1),
+        ];
+        let client = Client::new(Config::default());
+        let inner = client.inner.lock().await;
+
+        let descriptors = inner.parse_input_descriptors(&frames).unwrap();
+
+        assert_eq!(descriptors.len(), 4);
+        assert_eq!(descriptors[0].db2_type, db2_proto::types::Db2Type::Integer);
+        assert_eq!(
+            descriptors[1].db2_type,
+            db2_proto::types::Db2Type::VarChar(32)
+        );
+        assert_eq!(descriptors[2].db2_type, db2_proto::types::Db2Type::SmallInt);
+        assert_eq!(descriptors[3].db2_type, db2_proto::types::Db2Type::BigInt);
+    }
+
+    #[tokio::test]
+    async fn parse_input_descriptors_reads_zos_descriptor_table() {
+        let frames = vec![reply_frame(
+            zos_input_sqldard(&[(453, 1, 37), (385, 10, 37), (453, 2, 37), (449, 100, 37)]),
+            1,
+        )];
+        let client = Client::new(Config::default());
+        let inner = client.inner.lock().await;
+
+        let descriptors = inner.parse_input_descriptors(&frames).unwrap();
+
+        assert_eq!(descriptors.len(), 4);
+        assert_eq!(descriptors[0].db2_type, db2_proto::types::Db2Type::Char(1));
+        assert_eq!(descriptors[1].db2_type, db2_proto::types::Db2Type::Date);
+        assert_eq!(descriptors[2].db2_type, db2_proto::types::Db2Type::Char(2));
+        assert_eq!(
+            descriptors[3].db2_type,
+            db2_proto::types::Db2Type::VarChar(100)
+        );
+        assert!(descriptors.iter().all(|descriptor| descriptor.ccsid == 37));
+
+        let partition = "0";
+        let processed_date = "08/17/2026";
+        let state = "43";
+        let reason = "2 REQ SEPARATED";
+        let params: [&dyn ToSql; 4] = [&partition, &processed_date, &state, &reason];
+        let sqldta = build_sqldta(&params, &descriptors).unwrap();
+
+        assert_eq!(sqldta[11], db2_proto::types::DRDA_TYPE_NVARCHAR);
+        assert_eq!(sqldta[14], db2_proto::types::DRDA_TYPE_NVARCHAR);
+        assert_eq!(sqldta[17], db2_proto::types::DRDA_TYPE_NVARCHAR);
+        assert_eq!(sqldta[20], db2_proto::types::DRDA_TYPE_NVARCHAR);
+        assert!(sqldta.windows(1).any(|bytes| bytes == b"0"));
+        assert!(sqldta.windows(10).any(|bytes| bytes == b"08/17/2026"));
+        assert!(sqldta.windows(2).any(|bytes| bytes == b"43"));
+        assert!(sqldta.windows(15).any(|bytes| bytes == b"2 REQ SEPARATED"));
+        assert!(!sqldta.windows(1).any(|bytes| bytes == [0xF0]));
+    }
 
     #[test]
     fn build_zos_select_star_metadata_query_uses_zos_catalog() {

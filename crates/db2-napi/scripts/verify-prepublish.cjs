@@ -1,6 +1,6 @@
 const fs = require('node:fs')
 
-const expected = [
+const allSupported = [
   'db2-node.darwin-arm64.node',
   'db2-node.darwin-x64.node',
   'db2-node.linux-arm64-gnu.node',
@@ -11,10 +11,16 @@ const expected = [
   'db2-node.win32-x64-msvc.node',
 ]
 
+const expected = process.env.DB2_NODE_REQUIRED_BINARIES
+  ? process.env.DB2_NODE_REQUIRED_BINARIES.split(',')
+      .map((file) => file.trim())
+      .filter(Boolean)
+  : allSupported
+
 const missing = expected.filter((file) => !fs.existsSync(file))
 
 if (missing.length > 0) {
-  console.error('Refusing to publish without the full prebuilt binary set.')
+  console.error('Refusing to publish without the required prebuilt binary set.')
   console.error('Missing files:')
   for (const file of missing) {
     console.error(`- ${file}`)
