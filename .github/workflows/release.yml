@@ -17,6 +17,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   APP_NAME: db2-node
+  RELEASE_RUST_VERSION: "1.99.0"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
@@ -39,11 +40,10 @@ jobs:
             target: aarch64-unknown-linux-gnu
             docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian-aarch64
             container_setup: ":"
-          - host: ubuntu-latest
+          - host: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
-            setup: rustup target add aarch64-unknown-linux-musl
-            container_setup: apk add --no-cache zig && rustup target add aarch64-unknown-linux-musl
+            container_setup: ":"
           - host: macos-15-intel
             target: x86_64-apple-darwin
           - host: macos-latest
@@ -68,6 +68,7 @@ jobs:
         if: ${{ !matrix.settings.docker }}
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RELEASE_RUST_VERSION }}
           targets: ${{ matrix.settings.target }}
 
       - name: Cache cargo
@@ -102,8 +103,8 @@ jobs:
             -w /build
           run: |
             set -eux
-            rustup update stable
-            rustup default stable
+            rustup toolchain install ${{ env.RELEASE_RUST_VERSION }} --profile minimal
+            rustup default ${{ env.RELEASE_RUST_VERSION }}
             rustc --version
             cargo --version
             cd crates/db2-napi

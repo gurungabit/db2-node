@@ -2,6 +2,24 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.24](https://github.com/gurungabit/db2-node/compare/v1.0.22...v1.0.24) (2026-10-03)
+
+### Release Fix
+
+- Build Linux ARM64 musl on a native ARM64 runner using the existing multi-platform Alpine image. This avoids the Zig cross-linker incompatibility with Rust 1.99 while retaining all eight native binaries and the publication checks.
+- This is the first npm publication of the fixes documented under 1.0.23 below. The v1.0.23 tag was created, but its native-build failure prevented npm publication.
+
+### Included Bug Fixes
+
+- Resolve [#11](https://github.com/gurungabit/db2-node/issues/11) and all 21 cases in [#12](https://github.com/gurungabit/db2-node/issues/12), including UTF-8 and row decoding, LOBs, lossless BIGINT values, CALL results, parameter validation and encrypted authentication.
+- Preserve wide-row DSS boundaries when TCP combines replies; apply currentSchema and support bounded LUW cancellation.
+- Verify TCP SQL execution after the CI Db2 TLS restart before starting database tests.
+
+### Compatibility and Validation
+
+- Unsafe BIGINT results return decimal strings; LUW accepts only an omitted typeDefinitionName or QTDSQLX86. Stock AUTHENTICATION=SERVER requires explicit userPassword, TLS or encrypted server authentication. Cancellation requires monitoring and WLM_CANCEL_ACTIVITY privileges.
+- Validated against Docker Db2 12.1 and 11.5 with Rust, Node and Bun. No live z/OS server was tested. See the [behavior matrix](https://github.com/gurungabit/db2-node/blob/main/tests/ISSUES-11-12.md) and the detailed 1.0.23 notes below.
+
 ## [1.0.23](https://github.com/gurungabit/db2-node/compare/v1.0.22...v1.0.23) (2026-10-03)
 
 ### Bug Fixes
