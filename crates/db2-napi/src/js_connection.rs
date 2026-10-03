@@ -3,7 +3,9 @@ use napi_derive::napi;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::js_types::{client_error_to_napi, config_from_js, js_params_to_db2, query_result_to_js};
+use crate::js_types::{
+    client_error_to_napi, config_from_js, js_params_to_db2, query_result_to_js, JsParameter,
+};
 
 #[napi(object)]
 pub struct JsConnectionConfig {
@@ -36,6 +38,9 @@ pub struct JsQueryResult {
     pub row_count: i64,
     pub columns: Vec<JsColumnInfo>,
     pub diagnostics: Vec<String>,
+    pub result_sets: Vec<JsQueryResult>,
+    #[napi(ts_type = "Array<any>")]
+    pub output_parameters: crate::js_types::JsValues,
 }
 
 #[napi(object)]
@@ -59,6 +64,7 @@ pub struct JsServerInfo {
 pub struct JsClient {
     pub(crate) inner: Arc<Mutex<Option<db2_client::Client>>>,
     config: db2_client::Config,
+    cancel_handle: std::sync::Mutex<Option<db2_client::CancelHandle>>,
 }
 
 #[napi]
@@ -90,12 +96,15 @@ impl JsClient {
         Ok(JsClient {
             inner: Arc::new(Mutex::new(None)),
             config: client_config,
+            cancel_handle: std::sync::Mutex::new(None),
         })
     }
 
     /// Create a JsClient wrapping an already-connected db2_client::Client.
     pub(crate) fn from_inner(client: db2_client::Client, config: db2_client::Config) -> Self {
+        let cancel_handle = client.cancellation_handle();
         JsClient {
+            cancel_handle: std::sync::Mutex::new(Some(cancel_handle)),
             inner: Arc::new(Mutex::new(Some(client))),
             config,
         }
@@ -106,6 +115,11 @@ impl JsClient {
         let mut client = db2_client::Client::new(self.config.clone());
         client.connect().await.map_err(client_error_to_napi)?;
         let mut guard = self.inner.lock().await;
+        *self
+            .cancel_handle
+            .lock()
+            .map_err(|_| napi::Error::from_reason("Cancellation lock poisoned"))? =
+            Some(client.cancellation_handle());
         *guard = Some(client);
         Ok(())
     }
@@ -114,7 +128,10 @@ impl JsClient {
     pub async fn query(
         &self,
         sql: String,
-        params: Option<Vec<serde_json::Value>>,
+        #[napi(
+            ts_arg_type = "Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null"
+        )]
+        params: Option<Vec<JsParameter>>,
     ) -> Result<JsQueryResult> {
         let mut guard = self.inner.lock().await;
         let client = guard
@@ -137,6 +154,20 @@ impl JsClient {
             .map_err(client_error_to_napi)?;
 
         Ok(query_result_to_js(result))
+    }
+
+    /// Cancel a running LUW activity without waiting for query() to finish.
+    #[napi]
+    pub async fn cancel(&self) -> Result<bool> {
+        let handle = self
+            .cancel_handle
+            .lock()
+            .map_err(|_| napi::Error::from_reason("Cancellation lock poisoned"))?
+            .clone();
+        match handle {
+            Some(handle) => handle.cancel().await.map_err(client_error_to_napi),
+            None => Ok(false),
+        }
     }
 
     #[napi]

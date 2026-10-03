@@ -32,6 +32,7 @@ export function getConfig(): ConnectionConfig {
     database: process.env.DB2_TEST_DATABASE || 'testdb',
     user: process.env.DB2_TEST_USER || 'db2inst1',
     password: process.env.DB2_TEST_PASSWORD || 'db2wire_test_pw',
+    securityMechanism: 'userPassword', // Stock Docker AUTHENTICATION=SERVER; choose plaintext explicitly.
   };
 }
 

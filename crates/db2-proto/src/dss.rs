@@ -433,6 +433,12 @@ impl DssReader {
                 break;
             }
             let peek = DssHeader::parse(&self.buffer[self.position..])?;
+            // A 0xFFFF DSS starts its own logical frame with two-byte LLCP
+            // continuations. Never absorb its first physical segment into a
+            // preceding reply merely because they share a correlation ID.
+            if self.buffer[self.position..self.position + 2] == [0xFF, 0xFF] {
+                break;
+            }
             if !peek.flags.same_correlation {
                 break;
             }
@@ -648,6 +654,67 @@ mod tests {
         assert_eq!(frame.header.dss_type, DssType::Object);
         assert_eq!(frame.payload, payload);
         assert!(reader.next_frame().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_reader_keeps_continued_dss_separate_when_replies_are_coalesced() {
+        let mut open = vec![0, 34, 0x22, 0x05];
+        open.resize(34, 0);
+        let mut metadata = vec![0, 28, 0x24, 0x1A];
+        metadata.resize(28, 0);
+        // Db2's extended QRYDTA header followed by two maximum VARCHARs.
+        let mut row = vec![0x80, 4, 0x24, 0x1B, 0xFF, 0];
+        for &value in b"ab" {
+            row.extend_from_slice(&32672u16.to_be_bytes());
+            row.extend(std::iter::repeat_n(value, 32672));
+        }
+        let mut end = vec![0, 32, 0x22, 0x0B];
+        end.resize(32, 0);
+        let mut sqlcard = vec![0, 83, 0x24, 0x08];
+        sqlcard.resize(83, 0);
+        let expected = vec![
+            open.clone(),
+            metadata.clone(),
+            row.clone(),
+            end.clone(),
+            sqlcard.clone(),
+        ];
+        let mut writer = DssWriter::new(7);
+        writer.write_dss_full(DssType::Reply, true, true, &open);
+        writer.write_dss_full(DssType::Object, true, true, &metadata);
+        writer.write_dss_full(DssType::Object, true, true, &row);
+        writer.write_dss_full(DssType::Reply, true, true, &end);
+        writer.write_dss_full(DssType::Object, false, true, &sqlcard);
+        let bytes = writer.finish();
+        // A single read can contain metadata plus a full or partial continued
+        // DSS. A split at 64 KiB reproduces the Linux CI transport read.
+        for split in [
+            0,
+            1,
+            5,
+            6,
+            14,
+            28,
+            32767,
+            32795,
+            65536,
+            bytes.len() - 1,
+            bytes.len(),
+        ] {
+            let mut reader = DssReader::new(bytes[..split].to_vec());
+            let mut frames = reader.read_all_frames().unwrap();
+            reader.extend(&bytes[split..]);
+            frames.extend(reader.read_all_frames().unwrap());
+            assert_eq!(
+                frames
+                    .into_iter()
+                    .map(|frame| frame.payload)
+                    .collect::<Vec<_>>(),
+                expected,
+                "split {split}"
+            );
+            assert_eq!(reader.remaining(), 0, "split {split}");
+        }
     }
 
     #[test]

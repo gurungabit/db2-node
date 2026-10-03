@@ -31,6 +31,10 @@ interface ConnectionConfig {
 }
 ```
 
+LUW uses `QTDSQLX86`; supplying another explicit `typeDefinitionName` raises an error during connect. Omit the option or use `QTDSQLX86`. z/OS keeps its existing configurable type definitions.
+
+The default encrypted mechanism refuses plaintext fallback without TLS. For a stock Docker server configured with `AUTHENTICATION=SERVER`, explicitly choose `securityMechanism: 'userPassword'`, enable TLS, or configure encrypted authentication on the server.
+
 ### PoolConfig
 
 Extends all `ConnectionConfig` options, plus:
@@ -53,6 +57,8 @@ interface QueryResult {
   rowCount: number;
   columns: ColumnInfo[];
   diagnostics: string[];
+  resultSets: QueryResult[];       // CALL result sets; rows/columns describe the first
+  outputParameters: any[];        // OUT/INOUT only, in parameter order
 }
 ```
 
@@ -105,6 +111,16 @@ Establishes a TCP connection (with optional TLS upgrade) and performs the DRDA a
 The `connectTimeout` covers the entire process: TCP connect + TLS handshake.
 
 **Throws**: `Error` if connection fails (timeout, network error, authentication failure, database not found, TLS handshake failure).
+
+### client.cancel()
+
+```typescript
+cancel(): Promise<boolean>
+```
+
+Cancels running LUW activity using an independent control session, so it can run while `query()` is awaiting a result. Returns `true` when an activity was cancelled and `false` when no activity was found. The interrupted query rejects with the server cancellation error; the connection remains usable.
+
+The account needs activity-monitoring privileges and permission to execute `SYSPROC.WLM_CANCEL_ACTIVITY`. Control work is bounded to five seconds. z/OS cancellation is not implemented. `queryTimeout` attempts this cancellation, then closes the timed-out connection; its error states whether cancellation succeeded or failed.
 
 ### TLS Hostname Validation
 
@@ -394,7 +410,7 @@ Rolls back all changes made within the transaction.
 |----------|----------------|-------|
 | `SMALLINT` | `number` | 16-bit integer |
 | `INTEGER` | `number` | 32-bit integer |
-| `BIGINT` | `string` | Returned as string to avoid precision loss |
+| `BIGINT` | `number` or `string` | Safe integers remain numbers; larger magnitudes are exact decimal strings |
 | `REAL` | `number` | 32-bit float |
 | `DOUBLE` | `number` | 64-bit float |
 | `DECIMAL` | `string` | Preserves exact precision |
@@ -415,6 +431,8 @@ When passing parameters, JavaScript types are automatically mapped:
 | JavaScript Type | DB2 Type |
 |----------------|----------|
 | `number` (fits in 32 bits) | `INTEGER` |
+| `bigint` | Exact decimal text; BIGINT when described by the server |
+| `Date` | UTC timestamp text |
 | `number` (large or float) | `DOUBLE` |
 | `string` | `VARCHAR` |
 | `boolean` | `BOOLEAN` |

@@ -9,5 +9,6 @@ license = "MIT"
 aes = "0.8.4"
 cbc = { version = "0.1.2", features = ["alloc"] }
 dec = "0.4.11"
+getrandom = "0.2.17"
 num-bigint = "0.4.6"
 sha1 = "0.10.6"

@@ -3,8 +3,7 @@
 //! Implements the Diffie-Hellman key exchange and DES-CBC password/userid
 //! encryption required by DB2's DRDA wire protocol for security mechanism 9.
 //!
-//! All arithmetic is done on 256-bit big-endian integers with no external
-//! crate dependencies.
+//! Uses OS randomness for private keys and big-endian Diffie-Hellman arithmetic.
 
 use crate::codepage::utf8_to_ebcdic037;
 use aes::Aes256;
@@ -328,63 +327,25 @@ pub fn generate_private_key() -> Vec<u8> {
 
 /// Generate a private key for the selected DRDA encrypted credential algorithm.
 pub fn generate_private_key_with_algorithm(algorithm: EncryptionAlgorithm) -> Vec<u8> {
-    let (prime, len) = dh_parameters(algorithm);
-    let mut k =
-        BigUint::from_bytes_be(&generate_private_bytes(len)) % BigUint::from_bytes_be(prime);
-    if k == BigUint::from(0u8) {
-        k = BigUint::from(1u8);
-    }
-    fixed_len_bytes(&k, len)
+    try_generate_private_key_with_algorithm(algorithm).expect("OS random source unavailable")
 }
 
-fn generate_private_bytes(len: usize) -> Vec<u8> {
-    // Gather entropy from various sources available without external crates.
-    let mut seed: u64 = 0;
-
-    // Stack address entropy
-    let stack_var: u8 = 0;
-    seed ^= (&stack_var as *const u8 as u64).wrapping_mul(0x517cc1b727220a95);
-
-    // Heap address entropy
-    let heap_var = Box::new(0u8);
-    seed ^= (&*heap_var as *const u8 as u64).wrapping_mul(0x6c62272e07bb0142);
-
-    // Use std::time for additional entropy if available
-    if let Ok(dur) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        seed ^= dur.as_nanos() as u64;
+/// Fallible key generation used by authentication, so OS failures become connection errors.
+pub fn try_generate_private_key_with_algorithm(
+    algorithm: EncryptionAlgorithm,
+) -> crate::Result<Vec<u8>> {
+    let (prime_bytes, len) = dh_parameters(algorithm);
+    let prime = BigUint::from_bytes_be(prime_bytes);
+    loop {
+        let mut bytes = vec![0u8; len];
+        getrandom::getrandom(&mut bytes).map_err(|error| {
+            crate::ProtoError::Other(format!("Cannot generate DRDA private key: {error}"))
+        })?;
+        let private = BigUint::from_bytes_be(&bytes);
+        if private != BigUint::from(0u8) && private < prime {
+            return Ok(bytes);
+        }
     }
-
-    // Thread ID adds some differentiation
-    seed ^= format!("{:?}", std::thread::current().id())
-        .bytes()
-        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-
-    // Generate bytes using xoshiro256-like mixing.
-    let mut state = [
-        seed,
-        seed.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(1),
-        seed.wrapping_mul(0x6a09e667f3bcc908).wrapping_add(2),
-        seed.wrapping_mul(0xbb67ae8584caa73b).wrapping_add(3),
-    ];
-
-    let mut key = vec![0u8; len];
-    for chunk in key.chunks_mut(8) {
-        // xoshiro256** step
-        let result = state[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);
-        let t = state[1] << 17;
-        state[2] ^= state[0];
-        state[3] ^= state[1];
-        state[1] ^= state[2];
-        state[0] ^= state[3];
-        state[2] ^= t;
-        state[3] = state[3].rotate_left(45);
-
-        let bytes = result.to_be_bytes();
-        let chunk_len = chunk.len();
-        chunk.copy_from_slice(&bytes[..chunk_len]);
-    }
-
-    key
 }
 
 /// Calculate the DH public key: base^private mod prime.
@@ -592,7 +553,7 @@ const SBOXES: [[[u8; 16]; 4]; 8] = [
     // S8
     [
         [13,2,8,4,6,15,11,1,10,9,3,14,5,0,12,7],
-        [1,15,13,8,10,3,7,4,12,5,6,2,0,14,9,11],
+        [1,15,13,8,10,3,7,4,12,5,6,11,0,14,9,2],
         [7,11,4,1,9,12,14,2,0,6,10,13,15,3,5,8],
         [2,1,14,7,4,10,8,13,15,12,9,0,3,5,6,11],
     ],
@@ -1138,6 +1099,19 @@ mod tests {
 
     #[test]
     fn test_des_cbc_pkcs5() {
+        // CBC vectors covering S8 inputs missed by the original block vectors.
+        assert_eq!(
+            des_cbc_encrypt(&[0; 8], &[0; 8], &hex_to_bytes("00000000000000b1")),
+            hex_to_bytes("0ad0f2fba4ac0a2316adc4e166fc710f")
+        );
+        assert_eq!(
+            des_cbc_encrypt(
+                &hex_to_bytes("5851f42d4c957f2d").try_into().unwrap(),
+                &hex_to_bytes("14057b7ef767814f").try_into().unwrap(),
+                &hex_to_bytes("00000000000000b2")
+            ),
+            hex_to_bytes("97ef587910fc729d5bf9e98f62ff1bc6")
+        );
         // Verify PKCS5 padding is applied correctly.
         let key = [0u8; 8];
         let iv = [0u8; 8];

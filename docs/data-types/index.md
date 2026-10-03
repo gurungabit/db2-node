@@ -4,11 +4,11 @@
 
 ## JavaScript Mappings
 
-| Db2 for z/OS type | JavaScript value | Notes |
+| Db2 type | JavaScript value | Notes |
 |-------------------|------------------|-------|
 | `SMALLINT` | `number` | 16-bit signed integer |
 | `INTEGER` | `number` | 32-bit signed integer |
-| `BIGINT` | `number` | Returned through Node's numeric path; use casts to character/decimal if exact JS-safe integer handling is required above `Number.MAX_SAFE_INTEGER`. |
+| `BIGINT` | `number` or decimal `string` | Safe integers remain numbers; values outside ±`Number.MAX_SAFE_INTEGER` become strings without rounding. |
 | `FLOAT(n)`, `REAL`, `DOUBLE` | `number` | Non-finite wire values are normalized to `0` at the JS boundary. |
 | `DECIMAL`, `NUMERIC` | `string` | Preserves precision and scale. |
 | `DECFLOAT(16)`, `DECFLOAT(34)` | `string` | Preserves decimal floating-point text. |
@@ -36,12 +36,18 @@ Parameterized queries use server-provided input descriptors when Db2 supplies th
 | JavaScript input | Inferred Db2 value |
 |------------------|--------------------|
 | `number` integer in 32-bit range | `INTEGER` |
-| larger integer `number` | `BIGINT` |
+| larger integer `number` | `BIGINT` (the input number must already be exact) |
+| `bigint` | Exact decimal text, bound as BIGINT when the input descriptor specifies BIGINT |
+| `Date` | UTC timestamp text |
 | fractional `number` | `DOUBLE` |
 | `string` | `VARCHAR` |
 | `boolean` | `BOOLEAN` |
 | `null` | SQL `NULL` when Db2 provides input metadata |
-| `Buffer`, `Uint8Array`, or number array | binary value suitable for `BINARY`, `VARBINARY`, or `BLOB` parameters |
+| `Buffer`, `Uint8Array`, `ArrayBuffer`, or integer byte array | binary value suitable for `BINARY`, `VARBINARY`, or `BLOB` parameters |
+
+Decimal strings and `bigint` values can be bound to BIGINT parameters. DECIMAL parameters reject malformed decimal text and integer digits that exceed the declared precision/scale before sending the value to Db2. Excess fractional places follow Db2 assignment truncation.
+
+Number arrays must contain only integer bytes from 0 through 255; nested arrays, objects, `bigint` elements, fractions and out-of-range values raise catchable errors. Invalid `Date` values and unsupported object parameters also raise catchable errors. GRAPHIC padding uses U+0020 spaces.
 
 For exact `DECIMAL`, `DECFLOAT`, `DATE`, `TIME`, `TIMESTAMP`, XML, and LOB parameter typing, cast the parameter in SQL:
 

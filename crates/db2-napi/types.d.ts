@@ -31,7 +31,7 @@ import type {
 
 export type ConnectionString = string | Record<string, any>
 export type BinaryParameter = Uint8Array | ArrayBuffer | number[]
-export type QueryParameter = string | number | boolean | null | BinaryParameter
+export type QueryParameter = string | number | bigint | boolean | Date | null | BinaryParameter
 export type QueryParameters = QueryParameter[]
 
 export interface Db2Error extends Error {
@@ -63,6 +63,7 @@ export class Client {
   beginTransaction(): Promise<Transaction>
   close(): Promise<void>
   serverInfo(): Promise<JsServerInfo>
+  cancel(): Promise<boolean>
 }
 
 export class Pool {
@@ -124,6 +125,8 @@ export interface Sqlca {
 export type IbmDbCallback<T> = (err: Error | null, value: T, sqlca?: Sqlca) => void
 
 export class ODBCResult {
+  resultSets: JsQueryResult[]
+  outputParameters: any[]
   rows: any[]
   columns: JsColumnInfo[]
   rowCount: number

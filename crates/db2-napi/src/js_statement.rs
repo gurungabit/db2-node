@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::js_connection::JsQueryResult;
-use crate::js_types::{client_error_to_napi, js_params_to_db2, query_result_to_js};
+use crate::js_types::{client_error_to_napi, js_params_to_db2, query_result_to_js, JsParameter};
 
 #[napi]
 pub struct JsPreparedStatement {
@@ -23,7 +23,13 @@ impl JsPreparedStatement {
 #[napi]
 impl JsPreparedStatement {
     #[napi]
-    pub async fn execute(&self, params: Option<Vec<serde_json::Value>>) -> Result<JsQueryResult> {
+    pub async fn execute(
+        &self,
+        #[napi(
+            ts_arg_type = "Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null"
+        )]
+        params: Option<Vec<JsParameter>>,
+    ) -> Result<JsQueryResult> {
         let mut guard = self.inner.lock().await;
         let stmt = guard
             .as_mut()
@@ -52,7 +58,10 @@ impl JsPreparedStatement {
     #[napi(js_name = "executeBatch")]
     pub async fn execute_batch(
         &self,
-        param_rows: Vec<Vec<serde_json::Value>>,
+        #[napi(
+            ts_arg_type = "Array<Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]>>"
+        )]
+        param_rows: Vec<Vec<JsParameter>>,
     ) -> Result<JsQueryResult> {
         let guard = self.inner.lock().await;
         let stmt = guard

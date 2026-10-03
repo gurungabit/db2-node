@@ -30,6 +30,8 @@ export interface JsQueryResult {
   rowCount: number
   columns: Array<JsColumnInfo>
   diagnostics: Array<string>
+  resultSets: Array<JsQueryResult>
+  outputParameters: Array<any>
 }
 export interface JsColumnInfo {
   name: string
@@ -73,7 +75,9 @@ export interface JsPoolConfig {
 export declare class JsClient {
   constructor(config: JsConnectionConfig)
   connect(): Promise<void>
-  query(sql: string, params?: Array<any> | undefined | null): Promise<JsQueryResult>
+  query(sql: string, params?: Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null): Promise<JsQueryResult>
+  /** Cancel a running LUW activity without waiting for query() to finish. */
+  cancel(): Promise<boolean>
   prepare(sql: string): Promise<JsPreparedStatement>
   beginTransaction(): Promise<JsTransaction>
   close(): Promise<void>
@@ -83,7 +87,7 @@ export declare class JsPool {
   constructor(config: JsPoolConfig)
   connect(): Promise<void>
   warmup(): Promise<number>
-  query(sql: string, params?: Array<any> | undefined | null): Promise<JsQueryResult>
+  query(sql: string, params?: Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null): Promise<JsQueryResult>
   acquire(): Promise<JsClient>
   release(client: JsClient): Promise<void>
   close(): Promise<void>
@@ -93,16 +97,16 @@ export declare class JsPool {
   maxConnections(): number
 }
 export declare class JsPreparedStatement {
-  execute(params?: Array<any> | undefined | null): Promise<JsQueryResult>
+  execute(params?: Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null): Promise<JsQueryResult>
   /**
    * Execute the prepared statement as a batch with multiple rows of parameters.
    * Each element of `param_rows` is an array of parameter values for one row.
    */
-  executeBatch(paramRows: Array<Array<any>>): Promise<JsQueryResult>
+  executeBatch(paramRows: Array<Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]>>): Promise<JsQueryResult>
   close(): Promise<void>
 }
 export declare class JsTransaction {
-  query(sql: string, params?: Array<any> | undefined | null): Promise<JsQueryResult>
+  query(sql: string, params?: Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null): Promise<JsQueryResult>
   /** Prepare a SQL statement within this transaction. */
   prepare(sql: string): Promise<JsPreparedStatement>
   commit(): Promise<void>

@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::js_connection::{JsClient, JsQueryResult};
 use crate::js_types::{
     client_error_to_napi, config_from_js, emit_napi_diagnostics, js_params_to_db2,
-    push_elapsed_diagnostic, query_diagnostics_enabled, query_result_to_js,
+    push_elapsed_diagnostic, query_diagnostics_enabled, query_result_to_js, JsParameter,
 };
 
 #[napi(object)]
@@ -129,7 +129,10 @@ impl JsPool {
     pub async fn query(
         &self,
         sql: String,
-        params: Option<Vec<serde_json::Value>>,
+        #[napi(
+            ts_arg_type = "Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null"
+        )]
+        params: Option<Vec<JsParameter>>,
     ) -> Result<JsQueryResult> {
         let collect_diagnostics = query_diagnostics_enabled();
         let total_started = collect_diagnostics.then(Instant::now);

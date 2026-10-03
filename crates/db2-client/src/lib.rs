@@ -16,7 +16,7 @@ pub use config::{
     Config, CredentialEncoding, EncryptedPasswordEncoding, EncryptionAlgorithm, SecurityMechanism,
     SslConfig,
 };
-pub use connection::Client;
+pub use connection::{CancelHandle, Client};
 pub use error::Error;
 pub use pool::{Pool, PoolConfig};
 pub use row::Row;

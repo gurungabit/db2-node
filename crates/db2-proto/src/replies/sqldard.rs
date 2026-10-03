@@ -668,7 +668,7 @@ fn find_compact_descriptor_table(data: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-fn consume_sqlca_group(data: &[u8]) -> Result<(SqlCard, usize)> {
+pub fn consume_sqlca_group(data: &[u8]) -> Result<(SqlCard, usize)> {
     // SQLDARD embeds the SQLCARD/SQLCA group directly. The compact LUW layout is:
     //   sqlca_flag (1)
     //   sqlcode (4, LE)
@@ -676,13 +676,14 @@ fn consume_sqlca_group(data: &[u8]) -> Result<(SqlCard, usize)> {
     //   sqlerrproc (8)
     //   sqlcaxgrp_flag (1)
     //   if present:
-    //     rowsfetched (8, LE)
-    //     rowsupdated (4, LE)
-    //     sqlerrd (12)
+    //     sqlerrd (6 x 4, LE)
     //     sqlwarn (11)
     //     rdbname (2-byte BE len + bytes)
     //     errmsgm (2-byte BE len + bytes)
     //     errmsgs (2-byte BE len + bytes)
+    if data.first() == Some(&0xFF) {
+        return Ok((SqlCard::success(), 1));
+    }
     let mut offset = 1 + 4 + 5 + 8;
     if data.len() < offset + 1 {
         return Err(ProtoError::BufferTooShort {
@@ -694,7 +695,7 @@ fn consume_sqlca_group(data: &[u8]) -> Result<(SqlCard, usize)> {
     let cax_flag = data[offset];
     offset += 1;
     if cax_flag != 0xFF {
-        offset += 8 + 4 + 12 + 11;
+        offset += 24 + 11;
         offset = skip_len_prefixed_string(data, offset)?;
         offset = skip_len_prefixed_string(data, offset)?;
         offset = skip_len_prefixed_string(data, offset)?;
@@ -803,6 +804,8 @@ fn looks_like_compact_descriptor_start(data: &[u8]) -> bool {
             | 908
             | 912
             | 988
+            | 996
+            | 2436
     ) {
         return false;
     }
@@ -1118,6 +1121,7 @@ fn is_known_sql_type(sql_type: u16) -> bool {
             | 912
             | 988
             | 996
+            | 2436
     )
 }
 
@@ -1217,6 +1221,7 @@ fn db2_type_from_sqlda(
         492 => Db2Type::BigInt,
         496 => Db2Type::Integer,
         500 => Db2Type::SmallInt,
+        2436 => Db2Type::Boolean,
         904 => Db2Type::RowId(raw_length.min(u16::MAX as u64) as u16),
         908 => Db2Type::VarBinary(raw_length.min(u16::MAX as u64) as u16),
         912 => Db2Type::Binary(raw_length.min(u16::MAX as u64) as u16),
@@ -1229,7 +1234,13 @@ fn normalized_length(sql_type: u16, raw_length: u64, precision: u8, db2_type: &D
     match sql_type & !1 {
         384 => 10,
         388 => 8,
-        392 => 26,
+        392 => {
+            if raw_length == 0 {
+                26
+            } else {
+                raw_length.min(u16::MAX as u64) as u16
+            }
+        }
         404 | 408 | 412 | 448 | 452 | 456 | 464 | 468 | 472 | 908 | 912 | 988 => {
             raw_length.min(u16::MAX as u64) as u16
         }
@@ -1242,6 +1253,7 @@ fn normalized_length(sql_type: u16, raw_length: u64, precision: u8, db2_type: &D
         492 => 8,
         496 => 4,
         500 => 2,
+        2436 => 2,
         904 => raw_length.min(u16::MAX as u64) as u16,
         _ => raw_length.min(u16::MAX as u64) as u16,
     }
