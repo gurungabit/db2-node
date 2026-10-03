@@ -39,11 +39,10 @@ jobs:
             target: aarch64-unknown-linux-gnu
             docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian-aarch64
             container_setup: ":"
-          - host: ubuntu-latest
+          - host: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
-            setup: rustup target add aarch64-unknown-linux-musl
-            container_setup: apk add --no-cache zig && rustup target add aarch64-unknown-linux-musl
+            container_setup: ":"
           - host: macos-15-intel
             target: x86_64-apple-darwin
           - host: macos-latest
