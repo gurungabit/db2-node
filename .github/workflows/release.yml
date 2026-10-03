@@ -17,6 +17,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   APP_NAME: db2-node
+  RELEASE_RUST_VERSION: "1.99.0"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
@@ -67,6 +68,7 @@ jobs:
         if: ${{ !matrix.settings.docker }}
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RELEASE_RUST_VERSION }}
           targets: ${{ matrix.settings.target }}
 
       - name: Cache cargo
@@ -101,9 +103,8 @@ jobs:
             -w /build
           run: |
             set -eux
-            export RUSTUP_PERMIT_COPY_RENAME=1
-            rustup update stable
-            rustup default stable
+            rustup toolchain install ${{ env.RELEASE_RUST_VERSION }} --profile minimal
+            rustup default ${{ env.RELEASE_RUST_VERSION }}
             rustc --version
             cargo --version
             cd crates/db2-napi
