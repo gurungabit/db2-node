@@ -54,6 +54,10 @@ await client.close();
 
 Encrypted authentication is the default and refuses plaintext fallback on non-TLS connections. For a stock Docker Db2 server using `AUTHENTICATION=SERVER`, explicitly configure `securityMechanism: "userPassword"`, enable TLS, or configure encrypted authentication on the server.
 
+Credential encoding defaults to `auto`: UTF-8 when the server negotiates `UNICODEMGR=1208`, otherwise DRDA's default CCSID 500. A UTF-8 database can still require CCSID 500 for authentication. Diagnostic overrides are `credentialEncoding: 'ebcdic500'`, `'ebcdic037'` (also `'ebcdic'`), or `'utf8'`; overrides do not change the server's negotiation.
+
+For identified Db2 LUW servers, CCSID 500 follows IBM CLI's ASCII-compatible credential conversion, including `|` at `0x6A`. z/OS and unknown peers retain standard IBM-500. See [credential protocol regressions](tests/ISSUE-25.md) for wire evidence and the disposable-user test runner.
+
 Package-level usage and API details live in `crates/db2-napi/README.md`. The behavior changes and Docker verification for issues #11 and #12 are recorded in [tests/ISSUES-11-12.md](tests/ISSUES-11-12.md).
 
 ## Data Type Coverage

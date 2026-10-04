@@ -1,4 +1,4 @@
-//! EBCDIC Code Page 037 (US/Canada/Netherlands) to Unicode/ASCII conversion.
+//! EBCDIC code pages 037 and 500 to Unicode/ASCII conversion.
 
 /// EBCDIC 037 -> Unicode mapping table (256 entries).
 /// Each index is an EBCDIC byte value; the value is the corresponding Unicode code point.
@@ -54,8 +54,41 @@ pub static EBCDIC_037_TO_UNICODE: [u16; 256] = [
     0x0038, 0x0039, 0x00B3, 0x00DB, 0x00DC, 0x00D9, 0x00DA, 0x009F,
 ];
 
+/// EBCDIC 500 (DRDA's default character parameter CCSID) -> Unicode.
+///
+/// These are the seven byte positions where IBM-500 differs from IBM-037,
+/// including the Latin-1 characters displaced by ASCII punctuation. This is a
+/// complete code-page mapping, not a password-specific character substitution.
+/// See Apache Derby's DRDA EbcdicCcsidManager conversionArrayToUCS2:
+/// https://github.com/apache/derby/blob/trunk/java/org.apache.derby.client/org/apache/derby/client/net/EbcdicCcsidManager.java
+pub static EBCDIC_500_TO_UNICODE: [u16; 256] = {
+    let mut table = EBCDIC_037_TO_UNICODE;
+    table[0x4A] = 0x005B; // [
+    table[0x4F] = 0x0021; // !
+    table[0x5A] = 0x005D; // ]
+    table[0x5F] = 0x005E; // ^
+    table[0xB0] = 0x00A2; // cent sign
+    table[0xBA] = 0x00AC; // not sign
+    table[0xBB] = 0x007C; // |
+    table
+};
+
+/// Db2 LUW's ASCII-compatible CCSID 500 conversion for authentication.
+///
+/// IBM CLI SECCHK captures on Db2 11.5/12.1 use 0x6A for ASCII '|', rather
+/// than standard IBM-500's 0xBB. Keep this conversion separate from the
+/// standard table used for other DRDA peers and from SQL data conversion.
+pub static EBCDIC_500_LUW_TO_UNICODE: [u16; 256] = {
+    let mut table = EBCDIC_500_TO_UNICODE;
+    table[0x6A] = 0x007C; // ASCII vertical bar
+    table[0xBB] = 0x00A6; // broken bar
+    table
+};
+
 // We avoid external crates. Use std::sync::OnceLock for safe one-time initialization.
 static UNICODE_TO_EBCDIC_037_TABLE: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
+static UNICODE_TO_EBCDIC_500_TABLE: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
+static UNICODE_TO_EBCDIC_500_LUW_TABLE: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
 
 fn get_unicode_to_ebcdic_table() -> &'static [u8; 256] {
     UNICODE_TO_EBCDIC_037_TABLE.get_or_init(|| {
@@ -98,6 +131,39 @@ pub fn utf8_to_ebcdic037(input: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Convert a UTF-8 string to EBCDIC Code Page 500 for DRDA character parameters.
+/// Characters outside Latin-1 use the same replacement policy as code page 037.
+pub fn utf8_to_ebcdic500(input: &str) -> Vec<u8> {
+    encode_ebcdic500(input, &EBCDIC_500_TO_UNICODE, &UNICODE_TO_EBCDIC_500_TABLE)
+}
+
+/// Encode credentials using the Db2 LUW CCSID 500 conversion profile.
+pub fn utf8_to_ebcdic500_luw(input: &str) -> Vec<u8> {
+    encode_ebcdic500(
+        input,
+        &EBCDIC_500_LUW_TO_UNICODE,
+        &UNICODE_TO_EBCDIC_500_LUW_TABLE,
+    )
+}
+
+fn encode_ebcdic500(
+    input: &str,
+    mapping: &[u16; 256],
+    inverse: &std::sync::OnceLock<[u8; 256]>,
+) -> Vec<u8> {
+    let table = inverse.get_or_init(|| {
+        let mut table = [0x3Fu8; 256];
+        for (byte, &unicode) in mapping.iter().enumerate() {
+            table[unicode as usize] = byte as u8;
+        }
+        table
+    });
+    input
+        .chars()
+        .map(|c| table.get(c as usize).copied().unwrap_or(0x3F))
+        .collect()
 }
 
 /// Convert a string to EBCDIC 037 and right-pad with EBCDIC spaces (0x40)

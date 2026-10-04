@@ -177,11 +177,14 @@ fn parse_credential_encoding(
         "utf8" | "unicode" | "unicode1208" | "ccsid1208" => {
             Ok(db2_client::CredentialEncoding::Utf8)
         }
+        "ebcdic500" | "cp500" | "ibm500" | "ccsid500" => {
+            Ok(db2_client::CredentialEncoding::Ebcdic500)
+        }
         "ebcdic" | "ebcdic037" | "cp037" | "ibm037" | "ccsid37" | "ccsid037" => {
             Ok(db2_client::CredentialEncoding::Ebcdic037)
         }
         _ => Err(napi::Error::from_reason(format!(
-            "Unsupported credentialEncoding '{}'. Use 'auto', 'utf8', or 'ebcdic'.",
+            "Unsupported credentialEncoding '{}'. Use 'auto', 'utf8', 'ebcdic500', or 'ebcdic037' ('ebcdic').",
             value
         ))),
     }
@@ -209,11 +212,14 @@ fn parse_encrypted_password_encoding(
         "utf8" | "unicode" | "unicode1208" | "ccsid1208" => {
             Ok(db2_client::EncryptedPasswordEncoding::Utf8)
         }
+        "ebcdic500" | "cp500" | "ibm500" | "ccsid500" => {
+            Ok(db2_client::EncryptedPasswordEncoding::Ebcdic500)
+        }
         "ebcdic" | "ebcdic037" | "cp037" | "ibm037" | "ccsid37" | "ccsid037" => {
             Ok(db2_client::EncryptedPasswordEncoding::Ebcdic037)
         }
         _ => Err(napi::Error::from_reason(format!(
-            "Unsupported encrypted password encoding '{}'. Use 'same', 'utf8', or 'ebcdic'.",
+            "Unsupported encrypted password encoding '{}'. Use 'same', 'utf8', 'ebcdic500', or 'ebcdic037' ('ebcdic').",
             value
         ))),
     }
@@ -769,6 +775,16 @@ mod tests {
             parse_credential_encoding(Some("CP037".into())).unwrap(),
             db2_client::CredentialEncoding::Ebcdic037
         );
+        assert_eq!(
+            parse_credential_encoding(Some("ebcdic".into())).unwrap(),
+            db2_client::CredentialEncoding::Ebcdic037
+        );
+        for alias in ["ebcdic500", "CP500", "IBM-500", "CCSID 500"] {
+            assert_eq!(
+                parse_credential_encoding(Some(alias.into())).unwrap(),
+                db2_client::CredentialEncoding::Ebcdic500
+            );
+        }
         assert!(parse_credential_encoding(Some("unsupported".into())).is_err());
     }
 
@@ -807,6 +823,12 @@ mod tests {
             parse_encrypted_password_encoding(Some("CP037".into())).unwrap(),
             db2_client::EncryptedPasswordEncoding::Ebcdic037
         );
+        for alias in ["ebcdic500", "CP500", "IBM-500", "CCSID 500"] {
+            assert_eq!(
+                parse_encrypted_password_encoding(Some(alias.into())).unwrap(),
+                db2_client::EncryptedPasswordEncoding::Ebcdic500
+            );
+        }
         assert!(parse_encrypted_password_encoding(Some("unsupported".into())).is_err());
     }
 
