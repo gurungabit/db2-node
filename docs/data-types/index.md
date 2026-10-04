@@ -57,6 +57,28 @@ await client.query('INSERT INTO docs (body) VALUES (CAST(? AS CLOB(1M)))', [xmlT
 await client.query('INSERT INTO files (payload) VALUES (CAST(? AS BLOB(1M)))', [buffer])
 ```
 
+## BOOLEAN Parameters
+
+For a BOOLEAN target, string parameters accept these explicit, case-insensitive
+Db2 aliases, with leading and trailing ASCII spaces ignored:
+
+| Value | Accepted strings |
+|-------|------------------|
+| `true` | `'t'`, `'true'`, `'y'`, `'yes'`, `'on'`, `'1'` |
+| `false` | `'f'`, `'false'`, `'n'`, `'no'`, `'off'`, `'0'` |
+
+```js
+await client.query('VALUES CAST(? AS BOOLEAN)', [' false '])
+// rows: [{ '1': false }]
+```
+
+Booleans, integers (zero is false, nonzero is true), and NULL keep their existing
+behavior. Strings sent to VARCHAR targets remain strings. Other strings,
+including tabs/newlines around a token and numeric text such as `'2'`, are
+rejected with `driverCode: 'DB2_PARAMETER_TYPE'`. Db2 also accepts broader numeric
+text conversions; use `CAST(CAST(? AS VARCHAR(128)) AS BOOLEAN)` to delegate those
+to the server. See IBM's [BOOLEAN reference](https://www.ibm.com/docs/en/db2/12.1.x?topic=functions-boolean).
+
 ## z/OS LOB Safety
 
 For Db2 for z/OS, LOB queries can leave external data frames queued after the requested rows are materialized. The default production mode disconnects and warm-replaces a connection when cleanup cannot be verified. Active close mode (`DB2_ZOS_LOB_CLOSE_AFTER_MATERIALIZE=1`) sends `CLSQRY`, drains remaining `EXTDTA`, and only reuses the socket after Db2 acknowledges the close.

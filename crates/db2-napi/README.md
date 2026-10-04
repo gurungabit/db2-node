@@ -56,6 +56,48 @@ CommonJS also works:
 const { Client } = require('db2-node')
 ```
 
+### Array rows
+
+Use `{ rowMode: 'array' }` per call to retain duplicate column names:
+
+```js
+const result = await client.query(
+  'SELECT 1 AS A, 2 AS A FROM SYSIBM.SYSDUMMY1',
+  [],
+  { rowMode: 'array' }
+)
+// result.rows: [[1, 2]]
+// result.columns.map(column => column.name): ['A', 'A']
+```
+
+`rows[i][j]` corresponds to `columns[j]` in SELECT order. This also applies to every
+CALL `resultSets` entry. Value conversions and column metadata are the same as for
+object rows; OUT/INOUT values remain in `outputParameters` in parameter order.
+
+The optional final argument is supported by `Client.query`, `Pool.query`,
+`Db2Pool.query`, `Transaction.query`, `PreparedStatement.execute(params, options)`,
+and `PreparedStatement.executeBatch(paramRows, options)`, including the `Js*` and
+`Native*` classes and clients acquired from a pool. Pass `[]`, `undefined`, or
+`null` for omitted parameters when supplying options. TypeScript infers
+`QueryResult<'array'>`; `QueryOptions`, `RowMode`, and generic `QueryResult` are
+exported. Omitted options and `{ rowMode: 'object' }` return the existing object
+rows, where the last value wins for duplicate names. `QueryOptions<'array'>`
+requires `rowMode: 'array'`; an empty options object cannot select array rows. A
+dynamic or optional `rowMode` returns `QueryResult<RowMode>`, a union of object
+and array results, so callers must handle both shapes.
+
+`Pool`/`CompatPool` callbacks also accept `query(sql, params, options, callback)`.
+For the `ibm_db`-style `Database.query`, `queryResult`, and `queryStream`, use the SQL
+object form `{ sql, params, rowMode: 'array' }`.
+
+`queryStream` returns an object-mode Node.js Readable. Its self-contained
+`RowStream` type covers row-aware async iteration, `read()` and `'data'` events,
+error/lifecycle listeners, piping, and pause/resume/destroy controls without
+requiring `@types/node`. Default rows are objects; an explicit array mode yields
+arrays, and dynamic modes expose both shapes. Consumers with Node typings can
+pipe to an object-mode `Writable`, use `stream/promises.pipeline`, or use
+`Readable.from(rows)` when an API requires the full Node `Readable` declaration.
+
 ## `ibm_db` Compatibility
 
 The CommonJS entry point also supports the common `ibm_db` shapes:
@@ -216,6 +258,29 @@ await stmt.executeBatch([['row 1'], ['row 2'], ['row 3']])
 await stmt.close()  // always close when done
 ```
 
+
+### BOOLEAN parameters
+
+For a BOOLEAN target, string parameters accept these explicit, case-insensitive
+Db2 aliases, with leading and trailing ASCII spaces ignored:
+
+| Value | Accepted strings |
+|-------|------------------|
+| `true` | `'t'`, `'true'`, `'y'`, `'yes'`, `'on'`, `'1'` |
+| `false` | `'f'`, `'false'`, `'n'`, `'no'`, `'off'`, `'0'` |
+
+```js
+await client.query('VALUES CAST(? AS BOOLEAN)', [' false '])
+// rows: [{ '1': false }]
+```
+
+Booleans, integers (zero is false, nonzero is true), and NULL keep their existing
+behavior. Strings sent to VARCHAR targets remain strings. Other strings,
+including tabs/newlines around a token and numeric text such as `'2'`, are
+rejected with `driverCode: 'DB2_PARAMETER_TYPE'`. Db2 also accepts broader numeric
+text conversions; use `CAST(CAST(? AS VARCHAR(128)) AS BOOLEAN)` to delegate those
+to the server. See IBM's [BOOLEAN reference](https://www.ibm.com/docs/en/db2/12.1.x?topic=functions-boolean).
+
 ## Transactions
 
 ```ts
@@ -352,6 +417,41 @@ try {
   console.error(err.sqlstate, err.sqlcode)
 }
 ```
+
+
+Client-side binding and protocol errors expose a stable `driverCode` on the Error
+object, including through `Js*`/`Native*` APIs and callbacks:
+
+| `driverCode` | Meaning |
+|--------------|---------|
+| `DB2_PARAMETER_COUNT` | Parameter count differs from the input descriptor count. |
+| `DB2_PARAMETER_TYPE` | A parameter cannot be converted or encoded for its target type, including invalid numeric text/range, unsupported JS values, or invalid byte arrays. |
+| `DB2_PROTOCOL` | A malformed or unexpected DRDA reply or protocol decoding failure. |
+| `DB2_INVALID_OPTION` | Malformed query options or an unsupported `rowMode` value/type. |
+
+```js
+try {
+  await client.query('VALUES CAST(? AS BOOLEAN)', ['invalid'])
+} catch (err) {
+  if (err.driverCode === 'DB2_PARAMETER_TYPE') {
+    // Ask the caller to correct the parameter.
+  }
+}
+```
+
+`driverCode` is additive: `code` retains the existing N-API status (usually
+`'GenericFailure'`), and existing parameter/server messages retain their content.
+Client-side parameter and option errors do not invent `sqlstate` or `sqlcode`
+values, and parameter/option text cannot mark an error retryable. Non-string
+`rowMode` values retain `StringExpected` with a deterministic validation message. Rejected `NaN`, `Infinity`,
+and `-Infinity` parameters retain their original `InvalidArg` code and conversion
+message while gaining `DB2_PARAMETER_TYPE`. Recognized protocol session errors
+(such as `QRYNOPRM` or a connection closed by the server) retain wrapper
+`retryable: true` metadata even when classified as `DB2_PROTOCOL`.
+Server SQL errors retain their SQLSTATE, SQLCODE, and retry behavior and have no `driverCode`, even if the server
+reports a parameter mistake. Wrapper APIs expose server `sqlstate`, `sqlcode`,
+and `retryable` properties as before; raw native APIs retain the server diagnostic
+message. `Db2Error` and `DriverErrorCode` provide the public TypeScript types.
 
 For Db2 for z/OS stale cursor/statement state, `SQLCODE=-502`, `SQLCODE=-514`, and `SQLCODE=-518` are marked `retryable: true`. Plain `client.query()` read operations can reconnect and retry internally. Prepared statements and transactions are bound to a specific server session, so after a reconnect you should create a new prepared statement or rerun the entire transaction body from the beginning. The driver does not replay writes or partial transaction work automatically.
 

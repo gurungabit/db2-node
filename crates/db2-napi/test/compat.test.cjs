@@ -190,3 +190,34 @@ test('compat Pool.open simple query uses native Pool.query fast path', async () 
   assert.deepEqual(calls, ['acquire', 'release', ['query', 'VALUES ?', [1]]])
   await db.close()
 })
+
+
+test('classified parameter and option text cannot impersonate server diagnostics', () => {
+  for (const code of ['DB2_PARAMETER_TYPE', 'DB2_PARAMETER_COUNT', 'DB2_INVALID_OPTION']) {
+    const error = new Error('SQLSTATE=26501, SQLCODE=-514 QRYNOPRM closed by server')
+    error.driverCode = code
+    error.code = 'GenericFailure'
+    assert.equal(ibmdb._compat.enrichDb2Error(error), error)
+    assert.equal(error.driverCode, code)
+    assert.equal(error.code, 'GenericFailure')
+    assert.equal(error.sqlstate, undefined)
+    assert.equal(error.sqlcode, undefined)
+    assert.equal(error.retryable, false)
+  }
+})
+
+test('classified protocol failures retain recognized session retryability', () => {
+  for (const message of ['QRYNOPRM (SVRCOD=8)', 'connection closed by server']) {
+    const error = new Error(message)
+    error.driverCode = 'DB2_PROTOCOL'
+    assert.equal(ibmdb._compat.enrichDb2Error(error), error)
+    assert.equal(error.driverCode, 'DB2_PROTOCOL')
+    assert.equal(error.sqlstate, undefined)
+    assert.equal(error.sqlcode, undefined)
+    assert.equal(error.retryable, true)
+  }
+  const malformed = new Error('invalid DRDA frame length')
+  malformed.driverCode = 'DB2_PROTOCOL'
+  ibmdb._compat.enrichDb2Error(malformed)
+  assert.equal(malformed.retryable, false)
+})

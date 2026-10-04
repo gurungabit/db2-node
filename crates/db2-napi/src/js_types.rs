@@ -3,6 +3,7 @@ use napi::bindgen_prelude::{
     Env, FromNapiValue, Null, ToNapiValue, TypeName, ValidateNapiValue, ValueType,
 };
 use napi::{sys, JsString, NapiRaw};
+use napi_derive::napi;
 use std::env;
 use std::ptr;
 use std::time::Instant;
@@ -242,8 +243,71 @@ fn parse_type_definition_name(value: Option<String>) -> napi::Result<Option<Stri
     }
 }
 
+/// Per-call result formatting; object rows are the compatible default.
+#[napi(object, object_from_js = false)]
+pub struct JsQueryOptions {
+    #[napi(ts_type = "import('./types').RowMode")]
+    pub row_mode: Option<String>,
+}
+
+// Validate before napi-rs's String decoder can discard the error classification
+// or include untrusted option contents in a message resembling server diagnostics.
+impl FromNapiValue for JsQueryOptions {
+    unsafe fn from_napi_value(env: sys::napi_env, raw: sys::napi_value) -> napi::Result<Self> {
+        let value = napi::JsUnknown::from_napi_value(env, raw)?;
+        if value.get_type()? != ValueType::Object || value.is_array()? {
+            return Err(option_error(
+                env,
+                napi::Error::from_reason("Query options must be an object"),
+            ));
+        }
+        let object = value.coerce_to_object()?;
+        let mode: napi::JsUnknown = object.get_named_property("rowMode")?;
+        let row_mode = match mode.get_type()? {
+            ValueType::Undefined | ValueType::Null => None,
+            // Keep string-value validation in RowMode::from_options so existing
+            // unsupported strings continue to reject asynchronously.
+            ValueType::String => Some(mode.coerce_to_string()?.into_utf8()?.as_str()?.to_owned()),
+            _ => {
+                return Err(option_error(
+                    env,
+                    napi::Error::new(
+                        napi::Status::StringExpected,
+                        "rowMode must be 'object' or 'array'",
+                    ),
+                ));
+            }
+        };
+        Ok(Self { row_mode })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowMode {
+    Object,
+    Array,
+}
+
+impl RowMode {
+    pub fn from_options(options: Option<JsQueryOptions>) -> Result<Self, JsFailure> {
+        match options.and_then(|options| options.row_mode).as_deref() {
+            None | Some("object") => Ok(Self::Object),
+            Some("array") => Ok(Self::Array),
+            Some(mode) => Err(JsFailure {
+                error: napi::Error::from_reason(format!(
+                    "Unsupported rowMode '{mode}'. Use 'object' or 'array'."
+                )),
+                driver_code: Some("DB2_INVALID_OPTION"),
+            }),
+        }
+    }
+}
+
 /// Convert a db2_client::QueryResult into our JS-facing QueryResult struct.
-pub fn query_result_to_js(result: db2_client::types::QueryResult) -> JsQueryResult {
+pub fn query_result_to_js(
+    result: db2_client::types::QueryResult,
+    row_mode: RowMode,
+) -> JsQueryResult {
     let db2_client::types::QueryResult {
         rows,
         row_count,
@@ -271,11 +335,18 @@ pub fn query_result_to_js(result: db2_client::types::QueryResult) -> JsQueryResu
     let col_names: Vec<String> = result_columns.into_iter().map(|c| c.name).collect();
 
     JsQueryResult {
-        rows: JsRows { rows, col_names },
+        rows: JsRows {
+            rows,
+            col_names,
+            row_mode,
+        },
         row_count,
         columns,
         diagnostics,
-        result_sets: result_sets.into_iter().map(query_result_to_js).collect(),
+        result_sets: result_sets
+            .into_iter()
+            .map(|result| query_result_to_js(result, row_mode))
+            .collect(),
         output_parameters: JsValues(output_parameters),
     }
 }
@@ -329,6 +400,7 @@ fn parse_enum_length(type_name: &str, variant: &str) -> Option<u16> {
 pub struct JsRows {
     rows: Vec<db2_client::Row>,
     col_names: Vec<String>,
+    row_mode: RowMode,
 }
 
 impl TypeName for JsRows {
@@ -364,42 +436,61 @@ impl ToNapiValue for JsRows {
         let started = query_diagnostics_enabled().then(Instant::now);
         let env_wrapper = Env::from(env);
         let mut js_rows = env_wrapper.create_array_with_length(val.rows.len())?;
-        let property_keys: napi::Result<Vec<JsString>> = val
-            .col_names
-            .iter()
-            .map(|name| env_wrapper.create_string(name))
-            .collect();
-        let property_keys = property_keys?;
-        let mut descriptors = property_keys
-            .iter()
-            .map(|key| sys::napi_property_descriptor {
-                utf8name: ptr::null(),
-                name: key.raw(),
-                method: None,
-                getter: None,
-                setter: None,
-                value: ptr::null_mut(),
-                attributes: sys::PropertyAttributes::writable
-                    | sys::PropertyAttributes::enumerable
-                    | sys::PropertyAttributes::configurable,
-                data: ptr::null_mut(),
-            })
-            .collect::<Vec<_>>();
-
-        for (row_index, row) in val.rows.into_iter().enumerate() {
-            let js_row = env_wrapper.create_object()?;
-            let mut values = row.into_values().into_iter();
-            let raw_row = js_row.raw();
-            for descriptor in &mut descriptors {
-                descriptor.value = match values.next() {
-                    Some(value) => db2_value_to_napi_value(env, value)?,
-                    None => ToNapiValue::to_napi_value(env, Null)?,
-                };
+        if val.row_mode == RowMode::Array {
+            for (row_index, row) in val.rows.into_iter().enumerate() {
+                let js_row = env_wrapper.create_array_with_length(column_count)?;
+                let mut values = row.into_values().into_iter();
+                for index in 0..column_count {
+                    let value = db2_value_to_napi_value(
+                        env,
+                        values.next().unwrap_or(db2_proto::types::Db2Value::Null),
+                    )?;
+                    napi::check_status!(sys::napi_set_element(
+                        env,
+                        js_row.raw(),
+                        index as u32,
+                        value
+                    ))?;
+                }
+                js_rows.set_element(row_index as u32, js_row)?;
             }
-            define_raw_properties(env, raw_row, &descriptors)?;
-            js_rows.set_element(row_index as u32, js_row)?;
-        }
+        } else {
+            let property_keys: napi::Result<Vec<JsString>> = val
+                .col_names
+                .iter()
+                .map(|name| env_wrapper.create_string(name))
+                .collect();
+            let property_keys = property_keys?;
+            let mut descriptors = property_keys
+                .iter()
+                .map(|key| sys::napi_property_descriptor {
+                    utf8name: ptr::null(),
+                    name: key.raw(),
+                    method: None,
+                    getter: None,
+                    setter: None,
+                    value: ptr::null_mut(),
+                    attributes: sys::PropertyAttributes::writable
+                        | sys::PropertyAttributes::enumerable
+                        | sys::PropertyAttributes::configurable,
+                    data: ptr::null_mut(),
+                })
+                .collect::<Vec<_>>();
 
+            for (row_index, row) in val.rows.into_iter().enumerate() {
+                let js_row = env_wrapper.create_object()?;
+                let mut values = row.into_values().into_iter();
+                let raw_row = js_row.raw();
+                for descriptor in &mut descriptors {
+                    descriptor.value = match values.next() {
+                        Some(value) => db2_value_to_napi_value(env, value)?,
+                        None => ToNapiValue::to_napi_value(env, Null)?,
+                    };
+                }
+                define_raw_properties(env, raw_row, &descriptors)?;
+                js_rows.set_element(row_index as u32, js_row)?;
+            }
+        }
         if let Some(started) = started {
             eprintln!(
                 "[db2-diagnostics] napi_rows_to_js_ms={:.3} rows={} columns={}",
@@ -554,6 +645,10 @@ impl FromNapiValue for JsParameter {
             ),
             ValueType::Undefined | ValueType::Null => serde_json::Value::Null,
             ValueType::Object if value.is_date()? => {
+                let date = napi::JsDate::from_napi_value(env, raw)?;
+                if !date.value_of()?.is_finite() {
+                    return Err(parameter_error(env, "Invalid Date parameter"));
+                }
                 let object = value.coerce_to_object()?;
                 let to_iso: napi::JsFunction = object.get_named_property("toISOString")?;
                 let text = to_iso
@@ -615,13 +710,15 @@ impl FromNapiValue for JsParameter {
                 for index in 0..object.get_array_length()? {
                     let item: napi::JsUnknown = object.get_element(index)?;
                     if item.get_type()? != ValueType::Number {
-                        return Err(napi::Error::from_reason(
+                        return Err(parameter_error(
+                            env,
                             "Array parameters must contain only integer bytes (0..255)",
                         ));
                     }
                     let byte = item.coerce_to_number()?.get_double()?;
                     if !byte.is_finite() || byte.fract() != 0.0 || !(0.0..=255.0).contains(&byte) {
-                        return Err(napi::Error::from_reason(
+                        return Err(parameter_error(
+                            env,
                             "Array parameters must contain only integer bytes (0..255)",
                         ));
                     }
@@ -630,11 +727,21 @@ impl FromNapiValue for JsParameter {
                 serde_json::Value::Array(bytes)
             }
             ValueType::Object => {
-                return Err(napi::Error::from_reason(
+                return Err(parameter_error(
+                    env,
                     "Unsupported object parameter; use Date, Buffer, or a byte array",
                 ));
             }
-            _ => unsafe { serde_json::Value::from_napi_value(env, raw)? },
+            ValueType::Number => serde_json::Value::from_napi_value(env, raw).map_err(|error| {
+                JsFailure {
+                    error,
+                    driver_code: Some("DB2_PARAMETER_TYPE"),
+                }
+                .into_napi_error(env)
+                .unwrap_or_else(|error| error)
+            })?,
+            ValueType::String | ValueType::Boolean => serde_json::Value::from_napi_value(env, raw)?,
+            _ => return Err(parameter_error(env, "Unsupported parameter type")),
         };
         Ok(Self(json))
     }
@@ -724,8 +831,57 @@ fn json_number_array_to_bytes(values: &[serde_json::Value]) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Convert a db2_client::Error into a napi::Error with descriptive message.
-pub fn client_error_to_napi(err: db2_client::Error) -> napi::Error {
+/// Keep the structured classification until conversion on the JavaScript thread.
+/// napi's async runtime otherwise reduces every Rust error to a status and reason.
+pub struct JsFailure {
+    error: napi::Error,
+    driver_code: Option<&'static str>,
+}
+
+impl From<napi::Error> for JsFailure {
+    fn from(error: napi::Error) -> Self {
+        Self {
+            error,
+            driver_code: None,
+        }
+    }
+}
+
+pub struct JsOutcome<T>(pub Result<T, JsFailure>);
+
+impl<T: TypeName> TypeName for JsOutcome<T> {
+    fn type_name() -> &'static str {
+        T::type_name()
+    }
+    fn value_type() -> ValueType {
+        T::value_type()
+    }
+}
+
+impl<T: ToNapiValue> ToNapiValue for JsOutcome<T> {
+    unsafe fn to_napi_value(env: sys::napi_env, outcome: Self) -> napi::Result<sys::napi_value> {
+        match outcome.0 {
+            Ok(value) => T::to_napi_value(env, value),
+            Err(failure) => Err(failure.into_napi_error(env)?),
+        }
+    }
+}
+
+impl JsFailure {
+    unsafe fn into_napi_error(self, env: sys::napi_env) -> napi::Result<napi::Error> {
+        let Some(code) = self.driver_code else {
+            return Ok(self.error);
+        };
+        let raw = napi::JsError::from(self.error).into_value(env);
+        let mut error = napi::JsObject::from_napi_value(env, raw)?;
+        error.set_named_property("driverCode", code)?;
+        Ok(napi::Error::from(error.into_unknown()))
+    }
+}
+
+/// Convert a client error without inventing a server SQLSTATE or SQLCODE.
+pub fn client_error_to_js(err: db2_client::Error) -> JsFailure {
+    let driver_code = err.driver_code();
     let message = match &err {
         db2_client::Error::Sql {
             sqlstate,
@@ -737,7 +893,28 @@ pub fn client_error_to_napi(err: db2_client::Error) -> napi::Error {
         ),
         other => other.to_string(),
     };
-    napi::Error::from_reason(message)
+    JsFailure {
+        error: napi::Error::from_reason(message),
+        driver_code,
+    }
+}
+
+unsafe fn option_error(env: sys::napi_env, error: napi::Error) -> napi::Error {
+    JsFailure {
+        error,
+        driver_code: Some("DB2_INVALID_OPTION"),
+    }
+    .into_napi_error(env)
+    .unwrap_or_else(|error| error)
+}
+
+unsafe fn parameter_error(env: sys::napi_env, reason: &str) -> napi::Error {
+    JsFailure {
+        error: napi::Error::from_reason(reason),
+        driver_code: Some("DB2_PARAMETER_TYPE"),
+    }
+    .into_napi_error(env)
+    .unwrap_or_else(|error| error)
 }
 
 #[cfg(test)]
