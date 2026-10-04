@@ -10,7 +10,8 @@
     "test:txn": "node --import tsx --test ./transaction.test.ts",
     "test:error": "node --import tsx --test ./error-handling.test.ts",
     "test:ddl": "node --import tsx --test ./ddl-dml.test.ts",
-    "test:api-types": "tsc --strict --noEmit --target es2022 --module node16 --moduleResolution node16 --types node query-api.types.ts"
+    "test:api-types": "tsc --strict --noEmit --target es2022 --module node16 --moduleResolution node16 --types node query-api.types.ts",
+    "test:downstream-types": "node --test ./downstream-types.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^22",

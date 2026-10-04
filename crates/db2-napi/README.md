@@ -90,6 +90,14 @@ and array results, so callers must handle both shapes.
 For the `ibm_db`-style `Database.query`, `queryResult`, and `queryStream`, use the SQL
 object form `{ sql, params, rowMode: 'array' }`.
 
+`queryStream` returns an object-mode Node.js Readable. Its self-contained
+`RowStream` type covers row-aware async iteration, `read()` and `'data'` events,
+error/lifecycle listeners, piping, and pause/resume/destroy controls without
+requiring `@types/node`. Default rows are objects; an explicit array mode yields
+arrays, and dynamic modes expose both shapes. Consumers with Node typings can
+pipe to an object-mode `Writable`, use `stream/promises.pipeline`, or use
+`Readable.from(rows)` when an API requires the full Node `Readable` declaration.
+
 ## `ibm_db` Compatibility
 
 The CommonJS entry point also supports the common `ibm_db` shapes:
