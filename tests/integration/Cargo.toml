@@ -40,3 +40,7 @@ path = "edge_cases_test.rs"
 [[test]]
 name = "tls_test"
 path = "tls_test.rs"
+
+[[test]]
+name = "lob_regressions_test"
+path = "lob_regressions_test.rs"

@@ -23,7 +23,17 @@ pub struct ColumnDescriptor {
     pub nullable: bool,
     pub ccsid: u16,
     pub db2_type: Db2Type,
+    /// Width of an external LOB reference declared by QRYDSC, excluding the
+    /// nullable indicator. SQLDARD column sizes are not wire reference widths.
+    pub extdta_reference_length: Option<u16>,
     pub byte_order: ByteOrder,
+}
+
+/// A decoded row plus the columns whose wire values reference EXTDTA.
+#[derive(Debug, Default)]
+pub struct DecodedRow {
+    pub values: Vec<Db2Value>,
+    pub extdta_columns: Vec<usize>,
 }
 
 /// FD:OCA triplet types used in QRYDSC.
@@ -195,6 +205,7 @@ fn parse_compact_gda_triplet(
                 nullable,
                 ccsid: env.ccsid,
                 db2_type,
+                extdta_reference_length: declared_lob_reference_length(env.drda_type, length),
                 byte_order: ByteOrder::BigEndian,
             });
             offset += 3;
@@ -227,6 +238,7 @@ fn parse_compact_gda_triplet(
             nullable,
             ccsid,
             db2_type,
+            extdta_reference_length: declared_lob_reference_length(lid, length),
             byte_order: ByteOrder::BigEndian,
         });
 
@@ -258,8 +270,22 @@ fn compact_gda_descriptor_type(
     }
 
     let length = u16::from_be_bytes([attr1, attr2]);
-    let (db2_type, nullable) = Db2Type::from_drda_type(drda_type, length, 0, 0);
+    // Default SQLDTAGRP LIDs are not the standalone DRDA scalar type codes.
+    // In particular 0x0A/0x0C describe eight/four-byte floats, and 0x36/0x38
+    // describe DBCS strings. MDD/SDA overrides are resolved before this path.
+    let db2_type = match base {
+        0x0A => Db2Type::Double,
+        0x0C => Db2Type::Real,
+        0x36 => Db2Type::Graphic(length),
+        0x38 | 0x3A => Db2Type::VarGraphic(length),
+        0xCE => Db2Type::Clob,
+        _ => Db2Type::from_drda_type(drda_type, length, 0, 0).0,
+    };
     (db2_type, nullable, length, 0, 0)
+}
+
+fn declared_lob_reference_length(drda_type: u8, length: u16) -> Option<u16> {
+    ((0xC8..=0xCF).contains(&drda_type) && length & 0x8000 != 0).then_some(length & 0x7FFF)
 }
 
 /// Parse a single SDA (Structured Data Area) triplet's data portion.
@@ -324,6 +350,7 @@ fn parse_sda_triplet(data: &[u8], col_index: usize) -> Option<ColumnDescriptor> 
         nullable,
         ccsid,
         db2_type,
+        extdta_reference_length: declared_lob_reference_length(drda_type, length),
         byte_order: ByteOrder::LittleEndian,
     })
 }
@@ -340,15 +367,15 @@ fn parse_sda_triplet(data: &[u8], col_index: usize) -> Option<ColumnDescriptor> 
 pub fn decode_row(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2Value>, usize)> {
     if data.len() >= 2 && data[0] == 0xFF {
         let (values, consumed) = decode_row_body(&data[2..], columns)?;
-        return Ok((values, consumed + 2));
+        return Ok((values.values, consumed + 2));
     }
 
-    decode_row_body(data, columns)
+    decode_row_body(data, columns).map(|(row, consumed)| (row.values, consumed))
 }
 
 /// Decode a protocol row, including its SQLCA and SQLDTAGRP envelope.
 /// A warning carries a full SQLCA instead of the usual null SQLCA byte.
-fn decode_qrydta_row(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2Value>, usize)> {
+fn decode_qrydta_row(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(DecodedRow, usize)> {
     let mut offset = if data.first() == Some(&0x00) {
         let (card, mut offset) = crate::replies::sqldard::consume_sqlca_group(data)?;
         if card.is_error() {
@@ -381,7 +408,7 @@ fn decode_qrydta_row(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<D
     })?;
     offset += 1;
     if *indicator == 0xFF {
-        return Ok((Vec::new(), offset));
+        return Ok((DecodedRow::default(), offset));
     }
     if *indicator != 0x00 {
         return Err(ProtoError::Other(format!(
@@ -433,8 +460,9 @@ pub fn decode_output_parameters(
     Ok(values)
 }
 
-fn decode_row_body(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2Value>, usize)> {
+fn decode_row_body(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(DecodedRow, usize)> {
     let mut values = Vec::with_capacity(columns.len());
+    let mut extdta_columns = Vec::new();
     let mut offset = 0;
 
     for col in columns {
@@ -456,11 +484,42 @@ fn decode_row_body(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2
 
         let remaining = &data[offset..];
         let (value, consumed) = decode_column_value(remaining, col)?;
+        if column_has_extdta_reference(remaining, col, &value) {
+            extdta_columns.push(values.len());
+        }
         values.push(value);
         offset += consumed;
     }
 
-    Ok((values, offset))
+    Ok((
+        DecodedRow {
+            values,
+            extdta_columns,
+        },
+        offset,
+    ))
+}
+
+fn column_has_extdta_reference(data: &[u8], col: &ColumnDescriptor, value: &Db2Value) -> bool {
+    // A zero-length LOB reference represents an empty value and has no EXTDTA.
+    if matches!(value, Db2Value::Blob(bytes) if bytes.is_empty())
+        || matches!(value, Db2Value::Clob(text) | Db2Value::Xml(text) if text.is_empty())
+    {
+        return false;
+    }
+    match col.db2_type {
+        Db2Type::Blob | Db2Type::Clob | Db2Type::DbClob | Db2Type::Xml => {
+            col.extdta_reference_length.is_some()
+                || externalized_lob_reference_len(data).is_some()
+                || (col.length == 0 && !matches!(col.db2_type, Db2Type::Xml))
+        }
+        Db2Type::BlobLocator | Db2Type::ClobLocator | Db2Type::DbClobLocator => true,
+        Db2Type::VarChar(len) | Db2Type::VarGraphic(len) => len & 0x8000 != 0,
+        Db2Type::LobBytes(len) | Db2Type::LobChar(len) => {
+            is_short_externalized_lob_reference(data, usize::from(len & 0x7FFF))
+        }
+        _ => false,
+    }
 }
 
 /// Decode multiple rows from QRYDTA data.
@@ -478,6 +537,17 @@ pub fn decode_rows_with_tail(
     columns: &[ColumnDescriptor],
     tail: &mut Vec<u8>,
 ) -> Result<Vec<Vec<Db2Value>>> {
+    decode_rows_with_extdta(data, columns, tail)
+        .map(|rows| rows.into_iter().map(|row| row.values).collect())
+}
+
+/// Decode rows while retaining explicit external-data references and a partial tail.
+/// Inline LOB contents are never used to decide whether EXTDTA is needed.
+pub fn decode_rows_with_extdta(
+    data: &[u8],
+    columns: &[ColumnDescriptor],
+    tail: &mut Vec<u8>,
+) -> Result<Vec<DecodedRow>> {
     if tail.is_empty() {
         return decode_rows_from_buffer(data, columns, tail);
     }
@@ -511,7 +581,7 @@ fn decode_rows_from_buffer(
     buffer: &[u8],
     columns: &[ColumnDescriptor],
     tail: &mut Vec<u8>,
-) -> Result<Vec<Vec<Db2Value>>> {
+) -> Result<Vec<DecodedRow>> {
     let mut rows = Vec::new();
     let mut offset = 0;
 
@@ -525,7 +595,7 @@ fn decode_rows_from_buffer(
                 if consumed == 0 {
                     break;
                 }
-                if !row.is_empty() {
+                if !row.values.is_empty() {
                     rows.push(row);
                 }
                 offset += consumed;
@@ -690,7 +760,7 @@ fn find_partial_row_start(
 }
 
 fn decode_row_strict(data: &[u8], columns: &[ColumnDescriptor]) -> Result<(Vec<Db2Value>, usize)> {
-    decode_qrydta_row(data, columns)
+    decode_qrydta_row(data, columns).map(|(row, consumed)| (row.values, consumed))
 }
 
 /// Decode a single column value from bytes based on its descriptor.
@@ -921,6 +991,30 @@ fn decode_column_value(data: &[u8], col: &ColumnDescriptor) -> Result<(Db2Value,
             ))
         }
         Db2Type::Blob | Db2Type::Clob | Db2Type::DbClob | Db2Type::Xml => {
+            if let Some(width) = col.extdta_reference_length {
+                let width = usize::from(width);
+                if data.len() < width {
+                    return Err(ProtoError::BufferTooShort {
+                        expected: width,
+                        actual: data.len(),
+                    });
+                }
+                let reference = &data[..width];
+                if reference.iter().all(|byte| *byte == 0)
+                    || (externalized_lob_reference_len(reference).is_some()
+                        && reference[1..].iter().all(|byte| *byte == 0))
+                {
+                    return Ok((empty_lob_value(&col.db2_type), width));
+                }
+                let value = match col.db2_type {
+                    // z/OS keeps its legacy four-byte BLOB marker when the
+                    // row sidecar is disabled; LUW uses the explicit sidecar.
+                    Db2Type::Blob => Db2Value::Blob(reference[..width.min(4)].to_vec()),
+                    Db2Type::Xml => Db2Value::Xml(format_lob_locator(reference)),
+                    _ => Db2Value::Clob(format_lob_locator(reference)),
+                };
+                return Ok((value, width));
+            }
             // LOB values may be materialized inline as a 4-byte length plus
             // bytes, or represented by a short externalized-data reference.
             if data.len() < 4 {
@@ -931,6 +1025,9 @@ fn decode_column_value(data: &[u8], col: &ColumnDescriptor) -> Result<(Db2Value,
             }
             if let Some(reference_len) = externalized_lob_reference_len(data) {
                 let reference = &data[..reference_len];
+                if reference[1..].iter().all(|byte| *byte == 0) {
+                    return Ok((empty_lob_value(&col.db2_type), reference_len));
+                }
                 return match &col.db2_type {
                     Db2Type::Blob => Ok((Db2Value::Blob(reference[..4].to_vec()), reference_len)),
                     Db2Type::Clob | Db2Type::DbClob => {
@@ -1103,10 +1200,31 @@ fn decode_externalized_lob_header(
     }
     let header = &data[header_start..header_start + header_len];
 
+    if externalized_lob_reference_len(header).is_some()
+        && header[1..9].iter().all(|byte| *byte == 0)
+    {
+        return Ok((
+            if is_character {
+                Db2Value::Clob(String::new())
+            } else {
+                Db2Value::Blob(Vec::new())
+            },
+            total,
+        ));
+    }
+
     if is_character {
         Ok((Db2Value::Clob(format_lob_locator(header)), total))
     } else {
         Ok((Db2Value::Blob(header.to_vec()), total))
+    }
+}
+
+fn empty_lob_value(db2_type: &Db2Type) -> Db2Value {
+    match db2_type {
+        Db2Type::Blob => Db2Value::Blob(Vec::new()),
+        Db2Type::Xml => Db2Value::Xml(String::new()),
+        _ => Db2Value::Clob(String::new()),
     }
 }
 
@@ -1220,6 +1338,7 @@ pub fn parse_qrydta(data: &[u8], num_columns: usize) -> Result<Vec<Vec<Db2Value>
             nullable: true,
             ccsid: 1208,
             db2_type: Db2Type::VarChar(32672),
+            extdta_reference_length: None,
             byte_order: ByteOrder::LittleEndian,
         })
         .collect();
@@ -1241,6 +1360,7 @@ mod tests {
             nullable: false,
             ccsid: 1208,
             db2_type: Db2Type::VarChar(10),
+            extdta_reference_length: None,
             byte_order: ByteOrder::LittleEndian,
         }];
         let mut data = vec![0];
@@ -1283,6 +1403,7 @@ mod tests {
                 nullable: false,
                 ccsid: 0,
                 db2_type: Db2Type::Integer,
+                extdta_reference_length: None,
                 byte_order: ByteOrder::LittleEndian,
             },
             ColumnDescriptor {
@@ -1294,6 +1415,7 @@ mod tests {
                 nullable: true,
                 ccsid: 1208,
                 db2_type: Db2Type::VarChar(100),
+                extdta_reference_length: None,
                 byte_order: ByteOrder::LittleEndian,
             },
         ];
@@ -1322,6 +1444,7 @@ mod tests {
             nullable: true,
             ccsid: 0,
             db2_type: Db2Type::Integer,
+            extdta_reference_length: None,
             byte_order: ByteOrder::LittleEndian,
         }];
 
@@ -1341,6 +1464,7 @@ mod tests {
             nullable: true,
             ccsid: 0,
             db2_type: Db2Type::Boolean,
+            extdta_reference_length: None,
             byte_order: ByteOrder::BigEndian,
         }];
 
@@ -1369,6 +1493,7 @@ mod tests {
                 nullable: false,
                 ccsid: 0,
                 db2_type: Db2Type::Integer,
+                extdta_reference_length: None,
                 byte_order: ByteOrder::LittleEndian,
             },
             ColumnDescriptor {
@@ -1380,6 +1505,7 @@ mod tests {
                 nullable: true,
                 ccsid: 0,
                 db2_type: Db2Type::Boolean,
+                extdta_reference_length: None,
                 byte_order: ByteOrder::BigEndian,
             },
         ];
@@ -1408,6 +1534,7 @@ mod tests {
                 nullable: false,
                 ccsid: 0,
                 db2_type: Db2Type::Integer,
+                extdta_reference_length: None,
                 byte_order: ByteOrder::LittleEndian,
             },
             ColumnDescriptor {
@@ -1419,6 +1546,7 @@ mod tests {
                 nullable: true,
                 ccsid: 0,
                 db2_type: Db2Type::Boolean,
+                extdta_reference_length: None,
                 byte_order: ByteOrder::BigEndian,
             },
         ];
@@ -1459,6 +1587,7 @@ mod tests {
             nullable: false,
             ccsid: 0,
             db2_type: Db2Type::Integer,
+            extdta_reference_length: None,
             byte_order: ByteOrder::LittleEndian,
         }];
 
@@ -1479,6 +1608,7 @@ mod tests {
             nullable: false,
             ccsid: 0,
             db2_type: Db2Type::Integer,
+            extdta_reference_length: None,
             byte_order: ByteOrder::BigEndian,
         }];
 
@@ -1526,6 +1656,23 @@ mod tests {
         assert_eq!(consumed, row_data.len());
         assert_eq!(values[0], Db2Value::Decimal("3".to_string()));
         assert_eq!(values[1], Db2Value::VarChar("112042F8730CA1".to_string()));
+    }
+
+    #[test]
+    fn test_compact_lob_query_uses_default_float_and_dbcs_lids() {
+        // Captured from SELECT D, G, CL over a DOUBLE, GRAPHIC(3), CLOB(1M)
+        // table on Db2 LUW. These LIDs differ from standalone scalar codes.
+        let descriptors = parse_qrydsc(&[
+            0x0C, 0x76, 0xD0, 0x0B, 0x00, 0x08, 0x37, 0x00, 0x03, 0xCF, 0x80, 0x09,
+        ])
+        .unwrap();
+        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors[0].db2_type, Db2Type::Double);
+        assert_eq!(descriptors[1].db2_type, Db2Type::Graphic(3));
+        assert_eq!(descriptors[2].db2_type, Db2Type::Clob);
+        assert!(descriptors.iter().all(|column| column.nullable));
+        let real = parse_qrydsc(&[0x06, 0x76, 0xD0, 0x0D, 0x00, 0x04]).unwrap();
+        assert_eq!(real[0].db2_type, Db2Type::Real);
     }
 
     #[test]
@@ -1588,6 +1735,7 @@ mod tests {
                 nullable: false,
                 ccsid: 1200,
                 db2_type: Db2Type::Graphic(4),
+                extdta_reference_length: None,
                 byte_order: ByteOrder::BigEndian,
             },
             ColumnDescriptor {
@@ -1599,6 +1747,7 @@ mod tests {
                 nullable: false,
                 ccsid: 1200,
                 db2_type: Db2Type::VarGraphic(8),
+                extdta_reference_length: None,
                 byte_order: ByteOrder::BigEndian,
             },
         ];
@@ -1625,6 +1774,7 @@ mod tests {
                 nullable: true,
                 ccsid: 1200,
                 db2_type: Db2Type::Graphic(3),
+                extdta_reference_length: None,
                 byte_order: ByteOrder::LittleEndian,
             },
             ColumnDescriptor {
@@ -1636,6 +1786,7 @@ mod tests {
                 nullable: true,
                 ccsid: 1200,
                 db2_type: Db2Type::VarGraphic(10),
+                extdta_reference_length: None,
                 byte_order: ByteOrder::LittleEndian,
             },
         ];
@@ -1684,6 +1835,7 @@ mod tests {
                 nullable: false,
                 ccsid: 1208,
                 db2_type: Db2Type::Clob,
+                extdta_reference_length: None,
                 byte_order: ByteOrder::BigEndian,
             },
             ColumnDescriptor {
@@ -1695,6 +1847,7 @@ mod tests {
                 nullable: false,
                 ccsid: 0,
                 db2_type: Db2Type::Integer,
+                extdta_reference_length: None,
                 byte_order: ByteOrder::BigEndian,
             },
         ];
@@ -1720,6 +1873,7 @@ mod tests {
             nullable: false,
             ccsid: 0,
             db2_type: Db2Type::RowId(4),
+            extdta_reference_length: None,
             byte_order: ByteOrder::BigEndian,
         }];
 
@@ -1739,6 +1893,7 @@ mod tests {
             nullable: false,
             ccsid: 1208,
             db2_type: Db2Type::LobBytes(8),
+            extdta_reference_length: None,
             byte_order: ByteOrder::BigEndian,
         }];
 
@@ -1758,6 +1913,7 @@ mod tests {
             nullable: false,
             ccsid: 1,
             db2_type: Db2Type::LobBytes(4096),
+            extdta_reference_length: None,
             byte_order: ByteOrder::LittleEndian,
         }];
         let data = [
@@ -1782,6 +1938,7 @@ mod tests {
             nullable: false,
             ccsid: 1208,
             db2_type: Db2Type::LobChar(11),
+            extdta_reference_length: None,
             byte_order: ByteOrder::BigEndian,
         }];
 
@@ -1801,6 +1958,7 @@ mod tests {
             nullable: false,
             ccsid: 0,
             db2_type: Db2Type::Blob,
+            extdta_reference_length: None,
             byte_order: ByteOrder::BigEndian,
         };
         let dbclob = ColumnDescriptor {
@@ -1812,6 +1970,7 @@ mod tests {
             nullable: false,
             ccsid: 1208,
             db2_type: Db2Type::DbClob,
+            extdta_reference_length: None,
             byte_order: ByteOrder::BigEndian,
         };
         let xml = ColumnDescriptor {
@@ -1823,6 +1982,7 @@ mod tests {
             nullable: false,
             ccsid: 1208,
             db2_type: Db2Type::Xml,
+            extdta_reference_length: None,
             byte_order: ByteOrder::BigEndian,
         };
 
@@ -1852,6 +2012,7 @@ mod tests {
             nullable: false,
             ccsid: 0,
             db2_type: Db2Type::Blob,
+            extdta_reference_length: None,
             byte_order: ByteOrder::BigEndian,
         };
         let dbclob = ColumnDescriptor {
@@ -1863,6 +2024,7 @@ mod tests {
             nullable: false,
             ccsid: 1200,
             db2_type: Db2Type::DbClob,
+            extdta_reference_length: None,
             byte_order: ByteOrder::BigEndian,
         };
         let xml = ColumnDescriptor {
@@ -1874,6 +2036,7 @@ mod tests {
             nullable: false,
             ccsid: 1208,
             db2_type: Db2Type::Xml,
+            extdta_reference_length: None,
             byte_order: ByteOrder::BigEndian,
         };
 
@@ -1906,6 +2069,7 @@ mod tests {
             nullable: false,
             ccsid: 1208,
             db2_type: Db2Type::VarChar(0x8009),
+            extdta_reference_length: None,
             byte_order: ByteOrder::BigEndian,
         }];
 

@@ -2850,6 +2850,7 @@ impl ClientInner {
                     }),
                     fetch_size_override.unwrap_or(self.config.fetch_size),
                     close_after_next_fetch,
+                    self.server_info.as_ref().is_some_and(is_db2_zos_server),
                 );
                 cursor.pending_row_bytes = std::mem::take(&mut pending_row_bytes);
 
@@ -2883,11 +2884,16 @@ impl ClientInner {
                     }
                     rows.extend(more_rows);
                     if !more_extdta_payloads.is_empty() {
-                        apply_extdta_payloads_to_rows(
-                            &mut rows,
-                            &cursor.descriptors,
-                            &more_extdta_payloads,
-                        );
+                        // LUW EXTDTA may follow the row block in later fetches.
+                        // Materialize it once, in row/column order, after fetching.
+                        // z/OS needs early materialization for its cursor cleanup.
+                        if self.server_info.as_ref().is_some_and(is_db2_zos_server) {
+                            apply_extdta_payloads_to_rows(
+                                &mut rows,
+                                &cursor.descriptors,
+                                &more_extdta_payloads,
+                            );
+                        }
                         extdta_payloads.extend(more_extdta_payloads);
                         if self.server_info.as_ref().is_some_and(is_db2_zos_server)
                             && !rows_need_extdta_payloads(&rows, &cursor.descriptors)
@@ -2979,6 +2985,13 @@ impl ClientInner {
         );
         if let Some(descriptors) = active_descriptors {
             apply_extdta_payloads_to_rows(&mut rows, descriptors, &extdta_payloads);
+            if !self.server_info.as_ref().is_some_and(is_db2_zos_server)
+                && rows_need_extdta_payloads(&rows, descriptors)
+            {
+                return Err(Error::Protocol(
+                    "query ended without all external LOB payloads".into(),
+                ));
+            }
         }
         let columns = if !column_info.is_empty() {
             if let Some(descriptors) = active_descriptors.filter(|d| d.len() == column_info.len()) {
@@ -6428,6 +6441,10 @@ fn normalize_luw_descriptors(
     use db2_proto::types::Db2Type;
     for descriptor in descriptors {
         match descriptor.drda_type & !1 {
+            0x36 | 0x38 | 0x3A => {
+                descriptor.ccsid = 1200;
+                descriptor.byte_order = ByteOrder::LittleEndian;
+            }
             0x3C => {
                 descriptor.db2_type = Db2Type::Char(descriptor.length);
                 descriptor.ccsid = 1208;
@@ -6468,6 +6485,7 @@ fn parse_sqldard_descriptors(obj: &DdmObject) -> Vec<db2_proto::fdoca::ColumnDes
             nullable: col.nullable,
             ccsid: col.ccsid,
             db2_type: col.db2_type,
+            extdta_reference_length: None,
             byte_order: col.byte_order,
         })
         .collect()
@@ -6494,6 +6512,7 @@ fn parse_input_sqldard_descriptors(obj: &DdmObject) -> Vec<db2_proto::fdoca::Col
                     nullable: true,
                     ccsid: col.ccsid,
                     db2_type: col.db2_type,
+                    extdta_reference_length: None,
                     byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
                 })
                 .collect();
@@ -6565,6 +6584,7 @@ fn parse_zos_input_sqldard(data: &[u8]) -> Vec<db2_proto::fdoca::ColumnDescripto
                 nullable,
                 ccsid,
                 db2_type,
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
             }
         })
@@ -6670,6 +6690,7 @@ fn parse_input_sqldard_compact(data: &[u8]) -> Vec<db2_proto::fdoca::ColumnDescr
             nullable,
             ccsid: 1208,
             db2_type,
+            extdta_reference_length: None,
             byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
         });
 
@@ -6815,6 +6836,7 @@ fn infer_parameter_descriptors(
                 nullable: true,
                 ccsid: 1208,
                 db2_type,
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
             })
         })
@@ -7310,6 +7332,7 @@ fn process_query_frames(
                             }
                             *qrydsc_descriptors = Some(descriptors);
                             decode_pending_query_data(
+                                is_zos,
                                 column_info,
                                 rows,
                                 sqldard_descriptors,
@@ -7356,7 +7379,7 @@ fn process_query_frames(
                         }
                         let rows_before = rows.len();
                         let pending_before = pending_row_bytes.len();
-                        let decoded_rows = db2_proto::fdoca::decode_rows_with_tail(
+                        let decoded_rows = db2_proto::fdoca::decode_rows_with_extdta(
                             &obj.data,
                             descs,
                             pending_row_bytes,
@@ -7364,11 +7387,11 @@ fn process_query_frames(
                         .map_err(|e| Error::Protocol(e.to_string()))?;
                         *end_of_query |= db2_proto::fdoca::take_query_end(pending_row_bytes);
                         let decoded_count = decoded_rows.len();
-                        if let Some(row_width) = decoded_rows.first().map(|values| values.len()) {
+                        if let Some(row_width) = decoded_rows.first().map(|row| row.values.len()) {
                             let col_names: Arc<[String]> =
                                 row_column_names(column_info, row_width).into();
-                            for values in decoded_rows {
-                                rows.push(Row::new_shared(col_names.clone(), values));
+                            for decoded in decoded_rows {
+                                rows.push(Row::from_wire(col_names.clone(), decoded, !is_zos));
                             }
                         }
                         if collect_diagnostics {
@@ -7458,6 +7481,7 @@ fn process_query_frames(
                         }
                         *sqldard_descriptors = Some(descriptors);
                         decode_pending_query_data(
+                            is_zos,
                             column_info,
                             rows,
                             sqldard_descriptors,
@@ -7499,6 +7523,7 @@ fn process_query_frames(
 
 #[allow(clippy::too_many_arguments)]
 fn decode_pending_query_data(
+    is_zos: bool,
     column_info: &[ColumnInfo],
     rows: &mut Vec<Row>,
     sqldard_descriptors: &Option<Vec<db2_proto::fdoca::ColumnDescriptor>>,
@@ -7525,13 +7550,13 @@ fn decode_pending_query_data(
 
     let pending_before = pending_row_bytes.len();
     let mut buffered = std::mem::take(pending_row_bytes);
-    let decoded_rows = db2_proto::fdoca::decode_rows_with_tail(&[], descs, &mut buffered)
+    let decoded_rows = db2_proto::fdoca::decode_rows_with_extdta(&[], descs, &mut buffered)
         .map_err(|e| Error::Protocol(e.to_string()))?;
     let decoded_count = decoded_rows.len();
-    if let Some(row_width) = decoded_rows.first().map(|values| values.len()) {
+    if let Some(row_width) = decoded_rows.first().map(|row| row.values.len()) {
         let col_names: Arc<[String]> = row_column_names(column_info, row_width).into();
-        for values in decoded_rows {
-            rows.push(Row::new_shared(col_names.clone(), values));
+        for decoded in decoded_rows {
+            rows.push(Row::from_wire(col_names.clone(), decoded, !is_zos));
         }
     }
     *pending_row_bytes = buffered;
@@ -7716,11 +7741,16 @@ fn apply_extdta_payloads_to_rows(
 
     let mut extdta_index = 0usize;
     for row in rows {
-        for (column_index, value) in row.values_mut().iter_mut().enumerate() {
+        for column_index in 0..row.values().len() {
             let Some(descriptor) = descriptors.get(column_index) else {
                 continue;
             };
-            if !descriptor_uses_extdta(descriptor) || !value_needs_extdta(value) {
+            if !descriptor_uses_extdta(descriptor)
+                || !row.needs_extdta(
+                    column_index,
+                    value_needs_extdta(&row.values()[column_index]),
+                )
+            {
                 continue;
             }
             let Some(payload) = extdta_payloads.get(extdta_index) else {
@@ -7728,6 +7758,7 @@ fn apply_extdta_payloads_to_rows(
             };
             extdta_index += 1;
             let payload = extdta_value_payload(payload, descriptor.nullable);
+            let value = &mut row.values_mut()[column_index];
             match descriptor.db2_type {
                 db2_proto::types::Db2Type::Blob
                 | db2_proto::types::Db2Type::BlobLocator
@@ -7750,6 +7781,7 @@ fn apply_extdta_payloads_to_rows(
                 }
                 _ => {}
             }
+            row.mark_extdta_materialized(column_index);
         }
     }
 }
@@ -7764,7 +7796,8 @@ fn rows_need_extdta_payloads(
             .enumerate()
             .any(|(column_index, value)| {
                 descriptors.get(column_index).is_some_and(|descriptor| {
-                    descriptor_uses_extdta(descriptor) && value_needs_extdta(value)
+                    descriptor_uses_extdta(descriptor)
+                        && row.needs_extdta(column_index, value_needs_extdta(value))
                 })
             })
     })
@@ -9524,6 +9557,7 @@ mod tests {
                     precision: 11,
                     scale: 0,
                 },
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
             },
             db2_proto::fdoca::ColumnDescriptor {
@@ -9535,6 +9569,7 @@ mod tests {
                 nullable: false,
                 ccsid: 0,
                 db2_type: db2_proto::types::Db2Type::VarGraphic(32_704),
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
             },
         ];
@@ -9559,6 +9594,7 @@ mod tests {
                 nullable: false,
                 ccsid: 37,
                 db2_type: db2_proto::types::Db2Type::Char(18),
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
             },
             db2_proto::fdoca::ColumnDescriptor {
@@ -9570,6 +9606,7 @@ mod tests {
                 nullable: false,
                 ccsid: 37,
                 db2_type: db2_proto::types::Db2Type::VarChar(32),
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
             },
             db2_proto::fdoca::ColumnDescriptor {
@@ -9581,6 +9618,7 @@ mod tests {
                 nullable: false,
                 ccsid: 37,
                 db2_type: db2_proto::types::Db2Type::Char(8),
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
             },
         ];
@@ -9593,6 +9631,7 @@ mod tests {
             nullable: false,
             ccsid: 0,
             db2_type: db2_proto::types::Db2Type::LobBytes(4096),
+            extdta_reference_length: None,
             byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
         }];
 
@@ -9702,6 +9741,139 @@ mod tests {
                 Db2Value::Char("20310409".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn luw_compact_lob_rows_decode_fixed_columns_and_nulls_across_blocks() {
+        let mut descriptors = db2_proto::fdoca::parse_qrydsc(&[
+            0x0C, 0x76, 0xD0, 0x0B, 0, 8, 0x37, 0, 3, 0xCF, 0x80, 9,
+        ])
+        .unwrap();
+        normalize_luw_descriptors(&mut descriptors, None);
+        let mut data = Vec::new();
+        for (index, text) in ["abc", "def", "ghi"].iter().enumerate() {
+            data.extend_from_slice(&[0xFF, 0x00, 0x00]); // SQLCA, SQLDTAGRP, DOUBLE non-null
+            data.extend_from_slice(&(index as f64 + 1.5).to_le_bytes());
+            data.push(0x00); // GRAPHIC non-null
+            for unit in text.encode_utf16() {
+                data.extend_from_slice(&unit.to_be_bytes());
+            }
+            if index == 0 {
+                data.extend_from_slice(&[0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 30]); // non-null LOB reference
+            } else {
+                data.push(0xFF);
+            }
+        }
+        // Split inside the DOUBLE and inside the external LOB reference.
+        for split in [5, 22, data.len() - 1] {
+            let mut tail = Vec::new();
+            let mut values =
+                db2_proto::fdoca::decode_rows_with_tail(&data[..split], &descriptors, &mut tail)
+                    .unwrap();
+            values.extend(
+                db2_proto::fdoca::decode_rows_with_tail(&data[split..], &descriptors, &mut tail)
+                    .unwrap(),
+            );
+            assert!(tail.is_empty());
+            let mut rows = values
+                .into_iter()
+                .map(|values| Row::new(vec!["D".into(), "G".into(), "CL".into()], values))
+                .collect::<Vec<_>>();
+            apply_extdta_payloads_to_rows(
+                &mut rows,
+                &descriptors,
+                &[b"\0clob text xxxxxxxxxxxxxxxxxxxx".to_vec()],
+            );
+            assert_eq!(rows.len(), 3);
+            for (index, row) in rows.iter().enumerate() {
+                assert_eq!(row.get::<f64>("D"), Some(index as f64 + 1.5));
+                assert_eq!(
+                    row.get::<String>("G").as_deref(),
+                    Some(["abc", "def", "ghi"][index])
+                );
+                assert_eq!(
+                    row.get::<String>("CL").as_deref(),
+                    if index == 0 {
+                        Some("clob text xxxxxxxxxxxxxxxxxxxx")
+                    } else {
+                        None
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn luw_inline_lob_contents_cannot_consume_external_payloads() {
+        use db2_proto::fdoca::{decode_rows_with_extdta, ByteOrder, ColumnDescriptor};
+        use db2_proto::types::Db2Type;
+        let descriptors = [Db2Type::Blob, Db2Type::Clob, Db2Type::Clob, Db2Type::Blob]
+            .into_iter()
+            .enumerate()
+            .map(|(column_index, db2_type)| ColumnDescriptor {
+                column_index,
+                drda_type: if db2_type == Db2Type::Blob {
+                    0xC8
+                } else {
+                    0xCA
+                },
+                length: 1024,
+                precision: 0,
+                scale: 0,
+                nullable: false,
+                ccsid: 1208,
+                db2_type,
+                extdta_reference_length: None,
+                byte_order: ByteOrder::BigEndian,
+            })
+            .collect::<Vec<_>>();
+        let inline_text = "LOB locator 0xABCD";
+        let mut data = vec![0xFF, 0, 0, 0, 0, 4, 0, 1, 254, 255];
+        data.extend_from_slice(&(inline_text.len() as u32).to_be_bytes());
+        data.extend_from_slice(inline_text.as_bytes());
+        data.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0, 30]);
+        data.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0, 4]);
+        let mut tail = Vec::new();
+        let decoded = decode_rows_with_extdta(&data, &descriptors, &mut tail)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(tail.is_empty());
+        assert_eq!(decoded.extdta_columns, [2, 3]);
+        let mut rows = vec![Row::from_wire(
+            vec![
+                "BL_INLINE".into(),
+                "CL_INLINE".into(),
+                "CL_EXT".into(),
+                "BL_EXT".into(),
+            ]
+            .into(),
+            decoded,
+            true,
+        )];
+        assert!(rows_need_extdta_payloads(&rows, &descriptors));
+        apply_extdta_payloads_to_rows(
+            &mut rows,
+            &descriptors,
+            &[
+                b"clob text xxxxxxxxxxxxxxxxxxxx".to_vec(),
+                vec![0xAB, 0xCD, 0x12, 0x34],
+            ],
+        );
+        let expected = vec![
+            Db2Value::Blob(vec![0, 1, 254, 255]),
+            Db2Value::Clob(inline_text.into()),
+            Db2Value::Clob("clob text xxxxxxxxxxxxxxxxxxxx".into()),
+            Db2Value::Blob(vec![0xAB, 0xCD, 0x12, 0x34]),
+        ];
+        assert_eq!(rows[0].values(), expected);
+        assert!(!rows_need_extdta_payloads(&rows, &descriptors));
+        apply_extdta_payloads_to_rows(
+            &mut rows,
+            &descriptors,
+            &[b"unrelated later payload".to_vec()],
+        );
+        assert_eq!(rows[0].values(), expected);
     }
 
     #[test]
@@ -9815,3 +9987,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "lob_wire_regressions.rs"]
+mod lob_wire_regressions;
