@@ -50,10 +50,47 @@ cd tests/node
 node --import tsx --test ./lob-regressions.test.ts
 DB2_TEST_PORT=50002 node --import tsx --test ./lob-regressions.test.ts
 node --import tsx --test ./data-types.test.ts ./query.test.ts ./luw-regressions.test.ts ./luw-followup-regressions.test.ts
+DB2_TEST_PORT=50002 node --import tsx --test ./data-types.test.ts ./query.test.ts ./luw-regressions.test.ts ./luw-followup-regressions.test.ts
 ```
 
-The targeted Rust unit/protocol run passes 218 tests. The four live Rust suites
-pass 31 tests on each Db2 version; the new Node regressions pass on both versions.
-The existing Node type/query and LUW regression suites pass all 48 tests on 12.1.
+The targeted Rust unit/protocol run passes 227 tests. The four live Rust suites
+pass 32 tests on each Db2 version; the new Node regressions pass on both versions.
+The existing Node type/query and LUW regression suites pass all 48 tests on 12.1
+(50 including the new LOB cases). On 11.5 the combined run passes 37 of 50;
+the 13 failures are SQLCODE -204 / SQLSTATE 42704 for absent shared fixtures
+`DB2INST1.EMPLOYEES`, `DB2INST1.TEST_STRINGS`, and `DB2INST1.TEST_NULLS`. Both LOB
+cases and all 28 self-contained LUW tests pass on 11.5 (30 tests in the final
+self-contained rerun). Those shared fixtures were not created or modified.
 Cargo.lock and dependency versions are unchanged. TLS and authentication changes
 are outside this fix.
+
+PR #27 review follow-up reproduced two regressions at `fdbc871`: compact mixed
+CLOB QRYDSC `06 76 D0 CF 80 08` left four bytes undecoded, and an incomplete
+advertised LOB DSS chain remained pending beyond 31 seconds with the default
+query timeout. The comparison with main decoded the eight-byte reference and
+returned immediately from the synthetic fetch without following that chain.
+
+QRYDSC now retains the declared external reference width separately from SQLDARD
+column sizes. Decoding consumes that exact width before recording the column in
+the EXTDTA sidecar. Four/eight-byte length references and tagged nine-byte
+references survive every row split; empty and NULL values consume no payload.
+An inline four-byte BLOB preceding an eight-byte CLOB reference remains inline
+across every split in a mixed four-row query reply. SQLDARD sizes with the high
+bit set do not become reference widths. Declared BLOB references retain the
+four-byte marker used by z/OS materialization when its wire sidecar is disabled;
+a unit regression checks four/eight/nine-byte references on that path.
+
+All reads in the LUW LOB DSS chain share the original fetch deadline, using the
+configured query timeout or the existing 30-second fallback. Mock peers cover
+missing continuation frames, partial headers, partial payloads, and expiration
+across the first and continuation reads. A public `Client::query` test with an
+unset timeout returns `Error::Timeout` after 30 seconds and releases the mutex.
+
+The additional live test uses only VALUES expressions and a derived table,
+asserting direct and prepared execution at fetch size one for Unicode CLOBs,
+DBCLOBs, VARGRAPHIC/LONG VARGRAPHIC, REAL/DOUBLE, empty/NULL LOBs, and distinct
+four-byte BLOBs. Its large values include a 140,000-byte CLOB and a 70,000-byte
+DBCLOB, followed by empty, NULL, and Unicode tail rows. The original table tests
+retain unique names and assert successful cleanup. A final read of SYSCAT.TABLES
+found no `LOB_I19_%` or `LOB_I20_%` tables on either server. No live z/OS server was
+available; the existing z/OS protocol/unit regressions pass.

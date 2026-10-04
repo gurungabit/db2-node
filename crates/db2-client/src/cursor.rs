@@ -1,7 +1,7 @@
 use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at};
 use tracing::trace;
 
 use crate::column::ColumnInfo;
@@ -131,6 +131,26 @@ impl Cursor {
             pending_row_bytes: Vec::new(),
             last_fetch_diagnostics: Vec::new(),
             closed: false,
+        }
+    }
+
+    async fn read_fetch_frames(
+        &self,
+        inner: &mut ClientInner,
+        deadline: tokio::time::Instant,
+        read_timeout: Duration,
+        has_lobs: bool,
+    ) -> Result<Vec<db2_proto::dss::DssFrame>, Error> {
+        match timeout_at(deadline, inner.read_reply_frames()).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Timeout(format!(
+                "fetch timed out after {:?}; has_lobs={} pending_tail={} column_types=[{}] last_fetch=[{}]",
+                read_timeout,
+                has_lobs,
+                self.pending_row_bytes.len(),
+                column_type_summary(&self.column_info),
+                self.last_fetch_diagnostics.join("; ")
+            ))),
         }
     }
 
@@ -272,19 +292,10 @@ impl Cursor {
         } else {
             inner.config.query_timeout
         };
-        let frames = match timeout(read_timeout, inner.read_reply_frames()).await {
-            Ok(result) => result?,
-            Err(_) => {
-                return Err(Error::Timeout(format!(
-                    "fetch timed out after {:?}; has_lobs={} pending_tail={} column_types=[{}] last_fetch=[{}]",
-                    read_timeout,
-                    has_lobs,
-                    self.pending_row_bytes.len(),
-                    column_type_summary(&self.column_info),
-                    self.last_fetch_diagnostics.join("; ")
-                )));
-            }
-        };
+        let read_deadline = tokio::time::Instant::now() + read_timeout;
+        let frames = self
+            .read_fetch_frames(inner, read_deadline, read_timeout, has_lobs)
+            .await?;
         if debug_hex_enabled() && self.fetch_calls <= 5 {
             eprintln!("[db2-wire] CNTQRY received {} frame(s)", frames.len());
         }
@@ -307,12 +318,15 @@ impl Cursor {
         // LUW can split a LOB reply's QRYDTA and EXTDTA across TCP reads.
         // Sending another CNTQRY before the advertised DSS chain ends leaves
         // replies one request behind and can make Db2 close the connection.
+        // All reads share the original fetch deadline, including partial DSSes.
         if !is_zos && has_lobs {
             let mut chained = frames
                 .last()
                 .is_some_and(|frame| frame.header.flags.chained);
             while chained {
-                let more_frames = inner.read_reply_frames().await?;
+                let more_frames = self
+                    .read_fetch_frames(inner, read_deadline, read_timeout, has_lobs)
+                    .await?;
                 chained = more_frames
                     .last()
                     .is_some_and(|frame| frame.header.flags.chained);

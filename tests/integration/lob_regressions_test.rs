@@ -128,3 +128,71 @@ async fn large_clob_with_fixed_columns_preserves_null_rows() {
     client.close().await.unwrap();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[tokio::test]
+async fn unicode_lobs_and_graphic_values_survive_single_row_direct_and_prepared_fetches() {
+    use db2_proto::types::Db2Value::*;
+    let mut config = test_config();
+    config.fetch_size = 1;
+    let mut client = db2_client::Client::new(config);
+    client.connect().await.unwrap();
+    let cases = [
+        (
+            "VALUES (CLOB(''), BLOB(X'')), (CLOB('clob text xxxxxxxxxxxxxxxxxxxx'),BLOB(X'01020304')), (CAST(NULL AS CLOB(1M)),CAST(NULL AS BLOB(1M))), (CLOB('LOB locator 0x12345678'),BLOB(X'ABCD1234'))",
+            vec![
+                vec![Clob("".into()), Blob(vec![])],
+                vec![Clob("clob text xxxxxxxxxxxxxxxxxxxx".into()), Blob(vec![1, 2, 3, 4])],
+                vec![Null, Null],
+                vec![Clob("LOB locator 0x12345678".into()), Blob(vec![0xAB, 0xCD, 0x12, 0x34])],
+            ],
+        ),
+        (
+            "VALUES (CAST(1.25 AS REAL), CAST('é漢' AS VARGRAPHIC(8)), CLOB('clob text xxxxxxxxxxxxxxxxxxxx')), (CAST(2.25 AS REAL), CAST('abc' AS VARGRAPHIC(8)), CAST(NULL AS CLOB(1M)))",
+            vec![
+                vec![Real(1.25), VarChar("é漢".into()), Clob("clob text xxxxxxxxxxxxxxxxxxxx".into())],
+                vec![Real(2.25), VarChar("abc".into()), Null],
+            ],
+        ),
+        (
+            "VALUES (CAST(1.25 AS DOUBLE), CAST('é漢' AS LONG VARGRAPHIC), CLOB('clob text xxxxxxxxxxxxxxxxxxxx')), (CAST(2.25 AS DOUBLE), CAST('abc' AS LONG VARGRAPHIC), CAST(NULL AS CLOB(1M)))",
+            vec![
+                vec![Double(1.25), VarChar("é漢".into()), Clob("clob text xxxxxxxxxxxxxxxxxxxx".into())],
+                vec![Double(2.25), VarChar("abc".into()), Null],
+            ],
+        ),
+        (
+            "VALUES (CLOB('a'), DBCLOB('é漢'),BLOB(X'FF')), (CAST(NULL AS CLOB(1M)),DBCLOB(''),BLOB(X'')), (CLOB('x'),DBCLOB('abc'),BLOB(X'00010203'))",
+            vec![
+                vec![Clob("a".into()), Clob("é漢".into()), Blob(vec![255])],
+                vec![Null, Clob("".into()), Blob(vec![])],
+                vec![Clob("x".into()), Clob("abc".into()), Blob(vec![0, 1, 2, 3])],
+            ],
+        ),
+        (
+            "SELECT * FROM (VALUES (1,REPEAT(CLOB('α'),70000),REPEAT(DBCLOB('漢'),35000),BLOB(X'12345678')), (2,CAST(NULL AS CLOB(1M)),CAST(NULL AS DBCLOB(1M)),CAST(NULL AS BLOB(1M))), (3,CLOB(''),DBCLOB(''),BLOB(X'')), (4,CLOB('tail'),DBCLOB('é'),BLOB(X'ABCD1234'))) V(ID,CL,DC,BL) ORDER BY ID",
+            vec![
+                vec![Integer(1), Clob("α".repeat(70000)), Clob("漢".repeat(35000)), Blob(vec![0x12, 0x34, 0x56, 0x78])],
+                vec![Integer(2), Null, Null, Null],
+                vec![Integer(3), Clob("".into()), Clob("".into()), Blob(vec![])],
+                vec![Integer(4), Clob("tail".into()), Clob("é".into()), Blob(vec![0xAB, 0xCD, 0x12, 0x34])],
+            ],
+        ),
+    ];
+    for (index, (sql, expected)) in cases.iter().enumerate() {
+        let direct = client.query(sql, &[]).await.unwrap();
+        let statement = client.prepare(sql).await.unwrap();
+        let prepared = statement.execute(&[]).await.unwrap();
+        statement.close().await.unwrap();
+        for (mode, result) in [("direct", direct), ("prepared", prepared)] {
+            let actual: Vec<Vec<Db2Value>> = result
+                .rows
+                .iter()
+                .map(|row| row.values().to_vec())
+                .collect();
+            assert_eq!(&actual, expected, "case={index} mode={mode}");
+        }
+    }
+    let followup = client.query("VALUES 42", &[]).await.unwrap();
+    assert_eq!(followup.rows[0].get_by_index::<i32>(0), Some(42));
+    client.close().await.unwrap();
+}

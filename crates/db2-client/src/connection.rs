@@ -6485,6 +6485,7 @@ fn parse_sqldard_descriptors(obj: &DdmObject) -> Vec<db2_proto::fdoca::ColumnDes
             nullable: col.nullable,
             ccsid: col.ccsid,
             db2_type: col.db2_type,
+            extdta_reference_length: None,
             byte_order: col.byte_order,
         })
         .collect()
@@ -6511,6 +6512,7 @@ fn parse_input_sqldard_descriptors(obj: &DdmObject) -> Vec<db2_proto::fdoca::Col
                     nullable: true,
                     ccsid: col.ccsid,
                     db2_type: col.db2_type,
+                    extdta_reference_length: None,
                     byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
                 })
                 .collect();
@@ -6582,6 +6584,7 @@ fn parse_zos_input_sqldard(data: &[u8]) -> Vec<db2_proto::fdoca::ColumnDescripto
                 nullable,
                 ccsid,
                 db2_type,
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
             }
         })
@@ -6687,6 +6690,7 @@ fn parse_input_sqldard_compact(data: &[u8]) -> Vec<db2_proto::fdoca::ColumnDescr
             nullable,
             ccsid: 1208,
             db2_type,
+            extdta_reference_length: None,
             byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
         });
 
@@ -6832,6 +6836,7 @@ fn infer_parameter_descriptors(
                 nullable: true,
                 ccsid: 1208,
                 db2_type,
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
             })
         })
@@ -9552,6 +9557,7 @@ mod tests {
                     precision: 11,
                     scale: 0,
                 },
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
             },
             db2_proto::fdoca::ColumnDescriptor {
@@ -9563,6 +9569,7 @@ mod tests {
                 nullable: false,
                 ccsid: 0,
                 db2_type: db2_proto::types::Db2Type::VarGraphic(32_704),
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
             },
         ];
@@ -9587,6 +9594,7 @@ mod tests {
                 nullable: false,
                 ccsid: 37,
                 db2_type: db2_proto::types::Db2Type::Char(18),
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
             },
             db2_proto::fdoca::ColumnDescriptor {
@@ -9598,6 +9606,7 @@ mod tests {
                 nullable: false,
                 ccsid: 37,
                 db2_type: db2_proto::types::Db2Type::VarChar(32),
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
             },
             db2_proto::fdoca::ColumnDescriptor {
@@ -9609,6 +9618,7 @@ mod tests {
                 nullable: false,
                 ccsid: 37,
                 db2_type: db2_proto::types::Db2Type::Char(8),
+                extdta_reference_length: None,
                 byte_order: db2_proto::fdoca::ByteOrder::BigEndian,
             },
         ];
@@ -9621,6 +9631,7 @@ mod tests {
             nullable: false,
             ccsid: 0,
             db2_type: db2_proto::types::Db2Type::LobBytes(4096),
+            extdta_reference_length: None,
             byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
         }];
 
@@ -9812,6 +9823,7 @@ mod tests {
                 nullable: false,
                 ccsid: 1208,
                 db2_type,
+                extdta_reference_length: None,
                 byte_order: ByteOrder::BigEndian,
             })
             .collect::<Vec<_>>();
@@ -9975,3 +9987,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "lob_wire_regressions.rs"]
+mod lob_wire_regressions;
