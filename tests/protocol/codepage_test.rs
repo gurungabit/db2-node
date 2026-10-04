@@ -9,7 +9,9 @@ fn test_drda_500_printable_ascii_reference_vector() {
     let hex = "404f7f7b5b6c507d4d5d5c4e6b604b61f0f1f2f3f4f5f6f7f8f97a5e4c7e6e6f7cc1c2c3c4c5c6c7c8c9d1d2d3d4d5d6d7d8d9e2e3e4e5e6e7e8e94ae05a5f6d79818283848586878889919293949596979899a2a3a4a5a6a7a8a9c0bbd0a1";
     let expected: Vec<_> = hex
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
         .collect();
     assert_eq!(utf8_to_ebcdic500(&input), expected);
