@@ -24,10 +24,10 @@ npm install db2-node
 Install from a GitHub release tarball:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.24/db2-node-1.0.24.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.25/db2-node-1.0.25.tgz
 ```
 
-Replace `v1.0.24` and `1.0.24` with the release version you want.
+Replace `v1.0.25` and `1.0.25` with the release version you want.
 
 ```ts
 import { Client } from "db2-node";
@@ -223,7 +223,7 @@ The deployed docs site lives at `https://db2-node.github.io/`.
 
 ## Status
 
-The `1.0.24` release fixes the LUW issues reported in #11 and #12, validated with Docker Db2 12.1 and 11.5:
+The `1.0.25` release fixes the issues reported in #19–25: mixed/NULL LOB decoding, duplicate result columns, BOOLEAN text bindings, driver error classifications, bundled TLS libraries, and LUW password punctuation. Validation uses Docker Db2 12.1 and 11.5:
 
 - Rust and Node integration suites are green
 - TLS behavior is covered in both Rust and Node tests
