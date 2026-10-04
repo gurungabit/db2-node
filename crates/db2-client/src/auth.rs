@@ -145,13 +145,16 @@ pub(crate) async fn authenticate(
         )));
     }
     let credential_encoding = effective_credential_encoding(config, &server_info);
+    let ebcdic500_encoding = server_ebcdic500_encoding(&server_info);
     let mut encrypted_password_encoding = effective_encrypted_password_encoding(
         config.encrypted_password_encoding,
         credential_encoding,
+        ebcdic500_encoding,
     );
     let mut encrypted_password_token_encoding = effective_encrypted_password_encoding(
         config.encrypted_password_token_encoding,
         credential_encoding,
+        ebcdic500_encoding,
     );
     // Parse ACCSECRD — get server's accepted mechanism and SECTKN
     let accsecrd_frame = &frames[1];
@@ -693,9 +696,11 @@ fn build_secchk_for_mechanism(
 fn effective_encrypted_password_encoding(
     config_value: EncryptedPasswordEncoding,
     credential_encoding: db2_proto::commands::secchk::CredentialEncoding,
+    ebcdic500_encoding: db2_proto::commands::secchk::CredentialEncoding,
 ) -> db2_proto::commands::secchk::CredentialEncoding {
     match config_value {
         EncryptedPasswordEncoding::SameAsCredential => credential_encoding,
+        EncryptedPasswordEncoding::Ebcdic500 => ebcdic500_encoding,
         EncryptedPasswordEncoding::Ebcdic037 => {
             db2_proto::commands::secchk::CredentialEncoding::Ebcdic037
         }
@@ -731,15 +736,39 @@ fn effective_credential_encoding(
     server_info: &ServerInfo,
 ) -> db2_proto::commands::secchk::CredentialEncoding {
     match config.credential_encoding {
+        CredentialEncoding::Ebcdic500 => server_ebcdic500_encoding(server_info),
         CredentialEncoding::Ebcdic037 => db2_proto::commands::secchk::CredentialEncoding::Ebcdic037,
         CredentialEncoding::Utf8 => db2_proto::commands::secchk::CredentialEncoding::Utf8,
         CredentialEncoding::Auto => {
             if server_supports_utf8_credentials(server_info) {
                 db2_proto::commands::secchk::CredentialEncoding::Utf8
             } else {
-                db2_proto::commands::secchk::CredentialEncoding::Ebcdic037
+                // Database/data CCSIDs in ACCRDB do not determine SECCHK's
+                // character parameter encoding. Without UNICODEMGR=1208,
+                // DRDA uses CCSID 500, including on UTF-8 LUW databases.
+                server_ebcdic500_encoding(server_info)
             }
         }
+    }
+}
+
+fn server_ebcdic500_encoding(
+    server_info: &ServerInfo,
+) -> db2_proto::commands::secchk::CredentialEncoding {
+    // The IBM CLI on LUW uses an ASCII-compatible CCSID 500 conversion, with
+    // '|' at 0x6A. Select it only for a positively identified LUW product, never
+    // from the database CCSID or an authentication failure. z/OS and unknown
+    // peers retain the standard IBM-500 mapping ('|' at 0xBB).
+    if !server_info_is_zos(server_info)
+        && server_info
+            .server_release
+            .trim()
+            .to_ascii_uppercase()
+            .starts_with("SQL")
+    {
+        db2_proto::commands::secchk::CredentialEncoding::Ebcdic500Luw
+    } else {
+        db2_proto::commands::secchk::CredentialEncoding::Ebcdic500
     }
 }
 
@@ -783,12 +812,7 @@ fn encode_credential(
     value: &str,
     credential_encoding: db2_proto::commands::secchk::CredentialEncoding,
 ) -> Vec<u8> {
-    match credential_encoding {
-        db2_proto::commands::secchk::CredentialEncoding::Ebcdic037 => {
-            db2_proto::codepage::utf8_to_ebcdic037(value)
-        }
-        db2_proto::commands::secchk::CredentialEncoding::Utf8 => value.as_bytes().to_vec(),
-    }
+    credential_encoding.encode(value)
 }
 
 fn phase2_frames_complete(frames: &[DssFrame], _min_success_frames: usize) -> Result<bool, Error> {
@@ -1053,15 +1077,126 @@ mod tests {
     #[test]
     fn auto_credential_encoding_uses_utf8_when_unicode_manager_is_negotiated() {
         let config = Config::default();
-        let mut server_info = ServerInfo::default();
-        server_info
-            .manager_levels
-            .push((codepoints::UNICODEMGR, 1208));
+        for release in ["", "SQL12010", "DSN12015"] {
+            let server_info = ServerInfo {
+                server_release: release.into(),
+                manager_levels: vec![(codepoints::UNICODEMGR, 1208)],
+                ..Default::default()
+            };
+            let encoding = effective_credential_encoding(&config, &server_info);
+            assert_eq!(
+                encoding,
+                db2_proto::commands::secchk::CredentialEncoding::Utf8
+            );
+            assert_eq!(encoding.encode("!^[]|¢¬¦"), "!^[]|¢¬¦".as_bytes());
+        }
+    }
 
+    #[test]
+    fn auto_credential_encoding_uses_drda_500_without_unicode_negotiation() {
+        for (class, release) in [
+            ("QDB2/LINUXX8664", "SQL12010"),
+            ("QDB2/LINUXX8664", "SQL11059"),
+            ("DB2 Z/OS", "DSN12015"),
+            ("UNKNOWN", ""),
+        ] {
+            for levels in [vec![], vec![(codepoints::UNICODEMGR, 0)]] {
+                let server_info = ServerInfo {
+                    server_class: class.into(),
+                    server_release: release.into(),
+                    manager_levels: levels,
+                    ..Default::default()
+                };
+                let encoding = effective_credential_encoding(&Config::default(), &server_info);
+                let (expected, bar) = if release.starts_with("SQL") {
+                    (
+                        db2_proto::commands::secchk::CredentialEncoding::Ebcdic500Luw,
+                        0x6A,
+                    )
+                } else {
+                    (
+                        db2_proto::commands::secchk::CredentialEncoding::Ebcdic500,
+                        0xBB,
+                    )
+                };
+                assert_eq!(encoding, expected);
+                assert_eq!(
+                    encode_credential("!^[]|", encoding),
+                    [0x4F, 0x5F, 0x4A, 0x5A, bar]
+                );
+                assert_eq!(
+                    effective_encrypted_password_encoding(
+                        EncryptedPasswordEncoding::SameAsCredential,
+                        encoding,
+                        server_ebcdic500_encoding(&server_info),
+                    ),
+                    encoding
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_credential_encodings_override_unicode_negotiation() {
+        for level in [0, 1208] {
+            let server_info = ServerInfo {
+                manager_levels: vec![(codepoints::UNICODEMGR, level)],
+                ..Default::default()
+            };
+            for (configured, expected) in [
+                (
+                    CredentialEncoding::Ebcdic037,
+                    db2_proto::commands::secchk::CredentialEncoding::Ebcdic037,
+                ),
+                (
+                    CredentialEncoding::Ebcdic500,
+                    db2_proto::commands::secchk::CredentialEncoding::Ebcdic500,
+                ),
+                (
+                    CredentialEncoding::Utf8,
+                    db2_proto::commands::secchk::CredentialEncoding::Utf8,
+                ),
+            ] {
+                let config = Config {
+                    credential_encoding: configured,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    effective_credential_encoding(&config, &server_info),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn user_only_secchk_uses_the_selected_encoding() {
+        let config = Config {
+            user: "u!^[]|".into(),
+            ..Default::default()
+        };
+        let encoding = db2_proto::commands::secchk::CredentialEncoding::Ebcdic500;
+        let bytes = build_secchk_for_mechanism(
+            codepoints::SECMEC_USRIDONL,
+            None,
+            &[],
+            &config,
+            AuthCredentialOptions {
+                credential_encoding: encoding,
+                encrypted_password_encoding: encoding,
+                encrypted_password_token_encoding: encoding,
+                encryption_algorithm: db2_proto::secmec9::EncryptionAlgorithm::Des,
+            },
+            "",
+        )
+        .unwrap();
+        let (obj, _) = DdmObject::parse(&bytes).unwrap();
         assert_eq!(
-            effective_credential_encoding(&config, &server_info),
-            db2_proto::commands::secchk::CredentialEncoding::Utf8
+            obj.find_param(codepoints::USRID).unwrap().data,
+            [0xA4, 0x4F, 0x5F, 0x4A, 0x5A, 0xBB]
         );
+        assert!(obj.find_param(codepoints::PASSWORD).is_none());
+        assert!(obj.find_param(codepoints::SECTKN).is_none());
     }
 
     #[test]

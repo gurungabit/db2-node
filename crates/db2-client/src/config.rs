@@ -48,8 +48,10 @@ pub enum EncryptionAlgorithm {
 /// Encoding to use for DRDA credential string bytes in SECCHK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialEncoding {
-    /// Follow the server's negotiated Unicode manager support.
+    /// UTF-8 when UNICODEMGR=1208 is negotiated; otherwise DRDA CCSID 500.
     Auto,
+    /// EBCDIC code page 500 (DRDA's default character parameter CCSID).
+    Ebcdic500,
     /// EBCDIC code page 037.
     Ebcdic037,
     /// UTF-8.
@@ -61,6 +63,8 @@ pub enum CredentialEncoding {
 pub enum EncryptedPasswordEncoding {
     /// Use the same effective value as `credential_encoding`.
     SameAsCredential,
+    /// EBCDIC code page 500.
+    Ebcdic500,
     /// EBCDIC code page 037.
     Ebcdic037,
     /// UTF-8.

@@ -1,5 +1,5 @@
 //! Build SECCHK (Security Check) command.
-use crate::codepage::{pad_rdbnam, utf8_to_ebcdic037};
+use crate::codepage::{pad_rdbnam, utf8_to_ebcdic037, utf8_to_ebcdic500, utf8_to_ebcdic500_luw};
 use crate::codepoints::*;
 use crate::ddm::DdmBuilder;
 use crate::secmec9::EncryptionAlgorithm;
@@ -8,6 +8,10 @@ use crate::{ProtoError, Result};
 /// Encoding for credential string bytes sent in SECCHK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialEncoding {
+    /// EBCDIC code page 500, DRDA's default character parameter CCSID.
+    Ebcdic500,
+    /// Db2 LUW's ASCII-compatible CCSID 500 credential conversion.
+    Ebcdic500Luw,
     /// EBCDIC code page 037.
     Ebcdic037,
     /// UTF-8.
@@ -15,8 +19,11 @@ pub enum CredentialEncoding {
 }
 
 impl CredentialEncoding {
-    fn encode(self, value: &str) -> Vec<u8> {
+    /// Encode credential plaintext before framing or DRDA encryption.
+    pub fn encode(self, value: &str) -> Vec<u8> {
         match self {
+            CredentialEncoding::Ebcdic500 => utf8_to_ebcdic500(value),
+            CredentialEncoding::Ebcdic500Luw => utf8_to_ebcdic500_luw(value),
             CredentialEncoding::Ebcdic037 => utf8_to_ebcdic037(value),
             CredentialEncoding::Utf8 => value.as_bytes().to_vec(),
         }
@@ -331,6 +338,135 @@ fn valid_sectkn_len(server_sectkn: &[u8], expected_len: usize) -> bool {
 mod tests {
     use super::*;
     use crate::ddm::DdmObject;
+
+    fn unhex(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn secchk_500_preserves_all_variant_characters_in_both_credentials() {
+        let bytes = build_secchk_usridpwd_with_encoding(
+            "TESTDB",
+            "u!^[]|¢¬",
+            "Abc123!^[]|¢¬x",
+            CredentialEncoding::Ebcdic500,
+        );
+        let (obj, _) = DdmObject::parse(&bytes).unwrap();
+        assert_eq!(
+            obj.find_param(USRID).unwrap().data,
+            unhex("a44f5f4a5abbb0ba")
+        );
+        assert_eq!(
+            obj.find_param(PASSWORD).unwrap().data,
+            unhex("c18283f1f2f34f5f4a5abbb0baa7")
+        );
+        assert!(obj.find_param(RDBNAM).is_none());
+    }
+
+    #[test]
+    fn encrypted_500_credentials_match_independent_des_and_aes_vectors() {
+        // Independent standard cp500 / IBM CLI plaintext reference vectors,
+        // modular DH and Node/OpenSSL crypto (des-ede3-cbc with three identical
+        // keys = DES, aes-256-cbc). Fixed private keys are test data only.
+        for (encoding, algorithm, key_len, user9, password9, password7, encoded_user) in [
+            (
+                CredentialEncoding::Ebcdic500,
+                EncryptionAlgorithm::Des,
+                32,
+                "a15468ed2fb7ff1c",
+                "82565ce4f25c1c741967c6d8af223ba7",
+                "2a8db25793fb98d0e43332c6696959bc",
+                "a44f5f4a5abb",
+            ),
+            (
+                CredentialEncoding::Ebcdic500,
+                EncryptionAlgorithm::Aes,
+                64,
+                "f9c8281a22ff3be0dbc843d9973bbfc2",
+                "54ad7e1e86ee34bb86eb9e2d7ef25ad3",
+                "54ad7e1e86ee34bb86eb9e2d7ef25ad3",
+                "a44f5f4a5abb",
+            ),
+            (
+                CredentialEncoding::Ebcdic500Luw,
+                EncryptionAlgorithm::Des,
+                32,
+                "942347efbcebe022",
+                "82565ce4f25c1c748d00a593eba4fb51",
+                "0fd8c7df52c09b8b20e78ef5af36d293",
+                "a44f5f4a5a6a",
+            ),
+            (
+                CredentialEncoding::Ebcdic500Luw,
+                EncryptionAlgorithm::Aes,
+                64,
+                "4bbe6e44d94e515ae62b6c3dc0a0f7cb",
+                "d476eca0c62e0331bdb054c638fc7678",
+                "d476eca0c62e0331bdb054c638fc7678",
+                "a44f5f4a5a6a",
+            ),
+        ] {
+            let private = vec![0x11; key_len];
+            let server_public = crate::secmec9::calculate_public_key_with_algorithm(
+                &vec![0x22; key_len],
+                algorithm,
+            );
+            let bytes = build_secchk_eusridpwd_with_algorithm_and_encoding(
+                "TESTDB",
+                "u!^[]|",
+                "Abc123!^[]|¢¬x",
+                &server_public,
+                &private,
+                encoding,
+                algorithm,
+            )
+            .unwrap();
+            let (obj, _) = DdmObject::parse(&bytes).unwrap();
+            let tokens: Vec<_> = obj
+                .parameters()
+                .into_iter()
+                .filter(|p| p.code_point == SECTKN)
+                .collect();
+            assert_eq!(tokens.len(), 2);
+            assert_eq!(
+                tokens[0].data,
+                unhex(user9),
+                "SECMEC 9 {algorithm:?} user ID"
+            );
+            assert_eq!(
+                tokens[1].data,
+                unhex(password9),
+                "SECMEC 9 {algorithm:?} password"
+            );
+            assert!(obj.find_param(USRID).is_none());
+            assert!(obj.find_param(PASSWORD).is_none());
+
+            let bytes = build_secchk_usencpwd_with_algorithm_and_encodings(
+                "TESTDB",
+                "u!^[]|",
+                "Abc123!^[]|¢¬x",
+                &server_public,
+                &private,
+                EncryptedPasswordCredentialEncodings::same(encoding),
+                algorithm,
+            )
+            .unwrap();
+            let (obj, _) = DdmObject::parse(&bytes).unwrap();
+            assert_eq!(obj.find_param(USRID).unwrap().data, unhex(encoded_user));
+            assert_eq!(
+                obj.find_param(SECTKN).unwrap().data,
+                unhex(password7),
+                "SECMEC 7 {algorithm:?} password"
+            );
+            assert!(obj.find_param(PASSWORD).is_none());
+        }
+    }
 
     #[test]
     fn test_build_secchk() {

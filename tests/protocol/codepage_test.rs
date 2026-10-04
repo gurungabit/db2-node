@@ -1,6 +1,54 @@
-/// EBCDIC Code Page 037 conversion tests.
+/// EBCDIC Code Page 037 and DRDA CCSID 500 conversion tests.
 /// These tests do NOT require a DB2 server.
 use db2_proto::codepage::*;
+
+#[test]
+fn test_drda_500_printable_ascii_reference_vector() {
+    // Independent IBM-500 reference: Python's standard-library cp500 codec.
+    let input: String = (0x20..=0x7E).map(char::from).collect();
+    let hex = "404f7f7b5b6c507d4d5d5c4e6b604b61f0f1f2f3f4f5f6f7f8f97a5e4c7e6e6f7cc1c2c3c4c5c6c7c8c9d1d2d3d4d5d6d7d8d9e2e3e4e5e6e7e8e94ae05a5f6d79818283848586878889919293949596979899a2a3a4a5a6a7a8a9c0bbd0a1";
+    let expected: Vec<_> = hex
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    assert_eq!(utf8_to_ebcdic500(&input), expected);
+    assert_eq!(
+        utf8_to_ebcdic500("!^[]|¢¬"),
+        [0x4F, 0x5F, 0x4A, 0x5A, 0xBB, 0xB0, 0xBA]
+    );
+    // The existing explicit 037 encoding retains its distinct mappings.
+    assert_eq!(
+        utf8_to_ebcdic037("!^[]|¢¬"),
+        [0x5A, 0xB0, 0xBA, 0xBB, 0x4F, 0x4A, 0x5F]
+    );
+}
+
+#[test]
+fn test_drda_500_mapping_is_bijective_for_all_latin1_bytes() {
+    for byte in 0..=255u8 {
+        let character = char::from_u32(EBCDIC_500_TO_UNICODE[byte as usize] as u32).unwrap();
+        assert_eq!(utf8_to_ebcdic500(&character.to_string()), [byte]);
+    }
+}
+
+#[test]
+fn test_luw_500_credentials_match_successful_ibm_cli_wire_capture() {
+    // Db2 11.5.9 and 12.1.0, UNICODEMGR=0, SECMEC=3. IBM CLI used an
+    // ASCII-compatible conversion ('|' at 0x6A) in both successful traces.
+    assert_eq!(
+        utf8_to_ebcdic500_luw("Abc123!^[]|x"),
+        [0xC1, 0x82, 0x83, 0xF1, 0xF2, 0xF3, 0x4F, 0x5F, 0x4A, 0x5A, 0x6A, 0xA7,]
+    );
+    assert_eq!(utf8_to_ebcdic500_luw("|¦"), [0x6A, 0xBB]);
+    assert_eq!(utf8_to_ebcdic500("|¦"), [0xBB, 0x6A]);
+    for byte in 0..=255u8 {
+        let character = char::from_u32(EBCDIC_500_LUW_TO_UNICODE[byte as usize] as u32).unwrap();
+        assert_eq!(utf8_to_ebcdic500_luw(&character.to_string()), [byte]);
+    }
+}
 
 #[test]
 fn test_ebcdic_roundtrip() {

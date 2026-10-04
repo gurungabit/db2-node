@@ -15,9 +15,9 @@ interface ConnectionConfig {
   password: string;
   securityMechanism?: 'encrypted' | 'encryptedPassword' | 'userPassword' | 'userOnly';
   encryptionAlgorithm?: 'aes' | 'des';
-  credentialEncoding?: 'auto' | 'utf8' | 'ebcdic';
-  encryptedPasswordEncoding?: 'same' | 'utf8' | 'ebcdic';
-  encryptedPasswordTokenEncoding?: 'same' | 'utf8' | 'ebcdic';
+  credentialEncoding?: 'auto' | 'utf8' | 'ebcdic500' | 'ebcdic037' | 'ebcdic';
+  encryptedPasswordEncoding?: 'same' | 'utf8' | 'ebcdic500' | 'ebcdic037' | 'ebcdic';
+  encryptedPasswordTokenEncoding?: 'same' | 'utf8' | 'ebcdic500' | 'ebcdic037' | 'ebcdic';
   ssl?: boolean;                  // default: false
   rejectUnauthorized?: boolean;   // default: true (verify server cert)
   sslClientHostnameValidation?: 'Basic' | 'OFF'; // default: 'Basic'
@@ -34,6 +34,8 @@ interface ConnectionConfig {
 LUW uses `QTDSQLX86`; supplying another explicit `typeDefinitionName` raises an error during connect. Omit the option or use `QTDSQLX86`. z/OS keeps its existing configurable type definitions.
 
 The default encrypted mechanism refuses plaintext fallback without TLS. For a stock Docker server configured with `AUTHENTICATION=SERVER`, explicitly choose `securityMechanism: 'userPassword'`, enable TLS, or configure encrypted authentication on the server.
+
+`credentialEncoding: 'auto'` uses UTF-8 when `UNICODEMGR=1208` is negotiated, otherwise CCSID 500. For identified Db2 LUW servers, CCSID 500 uses the IBM CLI-compatible ASCII conversion (`|` at `0x6A`); z/OS and unknown peers use standard IBM-500 (`|` at `0xBB`). The explicit `'ebcdic500'` option uses the same server conversion profile. `'ebcdic'` remains an alias for `'ebcdic037'`. SQL/database data CCSIDs do not determine authentication encoding, and an explicit override does not change server negotiation.
 
 ### PoolConfig
 
