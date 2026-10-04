@@ -2,6 +2,16 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.25](https://github.com/gurungabit/db2-node/compare/v1.0.24...v1.0.25) (2026-10-04)
+
+
+### Bug Fixes
+
+* **napi:** enforce row modes and preserve classified diagnostics ([b946b05](https://github.com/gurungabit/db2-node/commit/b946b05afe64d322b615dbb5810a375afe2bc31a))
+* negotiate credential encodings for LUW password punctuation ([b720618](https://github.com/gurungabit/db2-node/commit/b720618059ff228b58352958c3f45e8b6025991c))
+* preserve duplicate columns, BOOLEAN text bindings, and error classifications ([a3bf12f](https://github.com/gurungabit/db2-node/commit/a3bf12ffc1c797522f61f60d74be693e187d516e))
+* **types:** remove ambient Node requirement from row streams ([1b56c16](https://github.com/gurungabit/db2-node/commit/1b56c16cfaa7d9111dc0592434ea4f59df0479bd))
+
 ## [1.0.24](https://github.com/gurungabit/db2-node/compare/v1.0.22...v1.0.24) (2026-10-03)
 
 ### Release Fix
