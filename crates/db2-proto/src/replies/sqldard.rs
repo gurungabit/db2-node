@@ -814,7 +814,10 @@ fn looks_like_compact_descriptor_start(data: &[u8]) -> bool {
         return false;
     }
 
+    // LOB declarations legitimately exceed the scalar/character length limit.
+    // Rejecting CLOB(1M) here hides the whole descriptor table or its last LOB.
     raw_length <= 0x0001_0000
+        || (matches!(base_sql_type, 404 | 408 | 412 | 988) && raw_length <= 0x7FFF_FFFF)
 }
 
 fn parse_column_descriptor(data: &[u8], index: usize) -> Result<ColumnMetadata> {
@@ -1375,6 +1378,38 @@ mod tests {
             0xFF,
         ];
         assert_eq!(extract_column_name(&descriptor), Some("NAME".to_string()));
+    }
+
+    #[test]
+    fn test_compact_sqldard_retains_large_lobs_and_following_columns() {
+        let mut data = vec![0xFF, 0xFF]; // null SQLCA and SQLDHGRP
+        data.extend_from_slice(&3u16.to_le_bytes());
+        for (name, length, sql_type, ccsid) in [
+            ("CL", 1_048_576u64, 409u16, 1208u16),
+            ("D", 8, 481, 0),
+            ("BL", 1_048_576, 405, 0),
+        ] {
+            data.extend_from_slice(&0u16.to_le_bytes()); // precision
+            data.extend_from_slice(&0u16.to_le_bytes()); // scale
+            data.extend_from_slice(&length.to_le_bytes());
+            data.extend_from_slice(&sql_type.to_le_bytes());
+            data.extend_from_slice(&ccsid.to_be_bytes());
+            data.extend_from_slice(&[0, 0, name.len() as u8]);
+            data.extend_from_slice(name.as_bytes());
+            data.push(0xFF); // next descriptor separator
+        }
+        let dard = parse_sqldard_data(&data).unwrap();
+        assert_eq!(dard.num_columns, 3);
+        assert_eq!(
+            dard.columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            ["CL", "D", "BL"]
+        );
+        assert_eq!(dard.columns[0].db2_type, Db2Type::Clob);
+        assert_eq!(dard.columns[1].db2_type, Db2Type::Double);
+        assert_eq!(dard.columns[2].db2_type, Db2Type::Blob);
     }
 
     #[test]

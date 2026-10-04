@@ -23,6 +23,7 @@ pub(crate) struct Cursor {
     pkgnamcsn: Vec<u8>,
     fetch_size: u32,
     close_after_next_fetch: bool,
+    is_zos: bool,
     fetch_calls: usize,
     pub(crate) pending_row_bytes: Vec<u8>,
     pub(crate) last_fetch_diagnostics: Vec<String>,
@@ -109,6 +110,7 @@ impl Cursor {
         pkgnamcsn: Vec<u8>,
         fetch_size: u32,
         close_after_next_fetch: bool,
+        is_zos: bool,
     ) -> Self {
         let column_names = column_info
             .iter()
@@ -124,6 +126,7 @@ impl Cursor {
             pkgnamcsn,
             fetch_size,
             close_after_next_fetch,
+            is_zos,
             fetch_calls: 0,
             pending_row_bytes: Vec::new(),
             last_fetch_diagnostics: Vec::new(),
@@ -301,7 +304,30 @@ impl Cursor {
             &mut end_of_query,
             collect_diagnostics,
         )?;
-        apply_extdta_payloads_to_rows(&mut rows, &self.descriptors, &extdta_payloads);
+        // LUW can split a LOB reply's QRYDTA and EXTDTA across TCP reads.
+        // Sending another CNTQRY before the advertised DSS chain ends leaves
+        // replies one request behind and can make Db2 close the connection.
+        if !is_zos && has_lobs {
+            let mut chained = frames
+                .last()
+                .is_some_and(|frame| frame.header.flags.chained);
+            while chained {
+                let more_frames = inner.read_reply_frames().await?;
+                chained = more_frames
+                    .last()
+                    .is_some_and(|frame| frame.header.flags.chained);
+                self.process_fetch_frames(
+                    &more_frames,
+                    &mut rows,
+                    &mut extdta_payloads,
+                    &mut end_of_query,
+                    collect_diagnostics,
+                )?;
+            }
+        }
+        if is_zos {
+            apply_extdta_payloads_to_rows(&mut rows, &self.descriptors, &extdta_payloads);
+        }
 
         if close_after_this_fetch && !close_reply_seen {
             let drain_timeout = zos_non_lob_fetch_end_drain_timeout();
@@ -342,7 +368,7 @@ impl Cursor {
             }
         }
 
-        if has_lobs && crate::connection::use_native_zos_lob_strategy() {
+        if is_zos && has_lobs && crate::connection::use_native_zos_lob_strategy() {
             while native_fetch_needs_more_frames(
                 &rows,
                 &self.descriptors,
@@ -763,7 +789,7 @@ impl Cursor {
                                 );
                             }
                         }
-                        let decoded_rows = db2_proto::fdoca::decode_rows_with_tail(
+                        let decoded_rows = db2_proto::fdoca::decode_rows_with_extdta(
                             &obj.data,
                             &self.descriptors,
                             &mut self.pending_row_bytes,
@@ -772,8 +798,12 @@ impl Cursor {
                         *end_of_query |=
                             db2_proto::fdoca::take_query_end(&mut self.pending_row_bytes);
                         if !decoded_rows.is_empty() {
-                            for values in decoded_rows {
-                                rows.push(Row::new_shared(self.column_names.clone(), values));
+                            for decoded in decoded_rows {
+                                rows.push(Row::from_wire(
+                                    self.column_names.clone(),
+                                    decoded,
+                                    !self.is_zos,
+                                ));
                             }
                         }
                     }

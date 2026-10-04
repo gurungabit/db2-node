@@ -8,6 +8,7 @@ pub struct Row {
     columns: Arc<[String]>,
     values: Vec<db2_proto::types::Db2Value>,
     column_map: OnceLock<HashMap<String, usize>>,
+    pending_extdta: Option<Vec<usize>>,
 }
 
 impl Row {
@@ -17,6 +18,7 @@ impl Row {
             columns: columns.into(),
             values,
             column_map: OnceLock::new(),
+            pending_extdta: None,
         }
     }
 
@@ -28,6 +30,31 @@ impl Row {
             columns,
             values,
             column_map: OnceLock::new(),
+            pending_extdta: None,
+        }
+    }
+
+    pub(crate) fn from_wire(
+        columns: Arc<[String]>,
+        decoded: db2_proto::fdoca::DecodedRow,
+        track_extdta: bool,
+    ) -> Self {
+        let mut row = Self::new_shared(columns, decoded.values);
+        if track_extdta {
+            row.pending_extdta = Some(decoded.extdta_columns);
+        }
+        row
+    }
+
+    pub(crate) fn needs_extdta(&self, column_index: usize, legacy_reference: bool) -> bool {
+        self.pending_extdta
+            .as_ref()
+            .map_or(legacy_reference, |columns| columns.contains(&column_index))
+    }
+
+    pub(crate) fn mark_extdta_materialized(&mut self, column_index: usize) {
+        if let Some(columns) = self.pending_extdta.as_mut() {
+            columns.retain(|index| *index != column_index);
         }
     }
 
