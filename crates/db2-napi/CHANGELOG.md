@@ -4,13 +4,16 @@ All notable changes to this package will be documented in this file.
 
 ## [1.0.25](https://github.com/gurungabit/db2-node/compare/v1.0.24...v1.0.25) (2026-10-04)
 
+db2-node 1.0.25 resolves seven reported issues across LOB decoding, JavaScript query APIs, bundled TLS libraries, and credential encoding.
 
-### Bug Fixes
+- Preserve mixed CLOB/BLOB values, Unicode/DBCLOB values, NULL rows, and wide result sets across direct and prepared fetches. Descriptor-sized external LOB references remain supported, and chained replies share the configured fetch deadline or the existing 30-second fallback. (#19, #20; PR #27)
+- Add opt-in `{ rowMode: 'array' }` to retain duplicate result columns across client, pool, prepared, transaction, CALL, and compatibility APIs. Object rows remain the default; TypeScript accurately distinguishes omitted, array, and dynamic options. (#21; PR #28)
+- Accept the documented BOOLEAN text aliases and provide additive `driverCode` classifications while preserving existing error status/messages, server diagnostics, and protocol retryability. Invalid options cannot masquerade as server SQL errors. (#22, #23; PR #28)
+- Rebuild the native binaries with patched rustls 0.23.45 and rustls-webpki 0.103.15. (#24; PR #26)
+- Negotiate credential encoding for LUW passwords containing punctuation, including `! ^ [ ] |`, with the identified LUW IBM CLI conversion profile. Explicit encoding overrides, z/OS behavior, and authentication protections are preserved. (#25; PR #29)
 
-* **napi:** enforce row modes and preserve classified diagnostics ([b946b05](https://github.com/gurungabit/db2-node/commit/b946b05afe64d322b615dbb5810a375afe2bc31a))
-* negotiate credential encodings for LUW password punctuation ([b720618](https://github.com/gurungabit/db2-node/commit/b720618059ff228b58352958c3f45e8b6025991c))
-* preserve duplicate columns, BOOLEAN text bindings, and error classifications ([a3bf12f](https://github.com/gurungabit/db2-node/commit/a3bf12ffc1c797522f61f60d74be693e187d516e))
-* **types:** remove ambient Node requirement from row streams ([1b56c16](https://github.com/gurungabit/db2-node/commit/1b56c16cfaa7d9111dc0592434ea4f59df0479bd))
+Independent review findings were corrected and rechecked. Combined validation covers Db2 LUW 12.1 and 11.5, TLS on 12.1, strict TypeScript, Rust/protocol tests, CJS/ESM and compatibility APIs, and disposable-user credential tests. No live z/OS server was available; synthetic z/OS protocol regressions pass.
+
 
 ## [1.0.24](https://github.com/gurungabit/db2-node/compare/v1.0.22...v1.0.24) (2026-10-03)
 
