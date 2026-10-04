@@ -24,18 +24,16 @@ impl JsTransaction {
 
 #[napi]
 impl JsTransaction {
+    // napi-rs emits one signature; append fixed overloads in its TS override so
+    // rebuilding cannot let return-type context infer an absent array option.
     #[napi(
-        ts_generic_types = "M extends import('./types').RowMode = 'object'",
-        ts_return_type = "Promise<import('./types').QueryResult<M>>"
+        ts_args_type = "sql: string, params?: import('./types').QueryParameters | null, options?: import('./types').QueryOptions<'object'> | null",
+        ts_return_type = "Promise<import('./types').QueryResult>;\n  query(sql: string, params: import('./types').QueryParameters | null | undefined, options: import('./types').QueryOptions<'array'>): Promise<import('./types').QueryResult<'array'>>;\n  query(sql: string, params: import('./types').QueryParameters | null | undefined, options: import('./types').QueryOptions | null | undefined): Promise<import('./types').QueryResult<import('./types').RowMode>>"
     )]
     pub async fn query(
         &self,
         sql: String,
-        #[napi(
-            ts_arg_type = "Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null"
-        )]
         params: Option<Vec<JsParameter>>,
-        #[napi(ts_arg_type = "import('./types').QueryOptions<M> | undefined | null")]
         options: Option<JsQueryOptions>,
     ) -> JsOutcome<JsQueryResult> {
         JsOutcome(

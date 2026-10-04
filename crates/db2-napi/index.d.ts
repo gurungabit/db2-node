@@ -79,7 +79,9 @@ export interface JsQueryOptions {
 export declare class JsClient {
   constructor(config: JsConnectionConfig)
   connect(): Promise<void>
-  query<M extends import('./types').RowMode = 'object'>(sql: string, params?: Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null, options?: import('./types').QueryOptions<M> | undefined | null): Promise<import('./types').QueryResult<M>>
+  query(sql: string, params?: import('./types').QueryParameters | null, options?: import('./types').QueryOptions<'object'> | null): Promise<import('./types').QueryResult>;
+  query(sql: string, params: import('./types').QueryParameters | null | undefined, options: import('./types').QueryOptions<'array'>): Promise<import('./types').QueryResult<'array'>>;
+  query(sql: string, params: import('./types').QueryParameters | null | undefined, options: import('./types').QueryOptions | null | undefined): Promise<import('./types').QueryResult<import('./types').RowMode>>
   /** Cancel a running LUW activity without waiting for query() to finish. */
   cancel(): Promise<boolean>
   prepare(sql: string): Promise<JsPreparedStatement>
@@ -91,7 +93,9 @@ export declare class JsPool {
   constructor(config: JsPoolConfig)
   connect(): Promise<void>
   warmup(): Promise<number>
-  query<M extends import('./types').RowMode = 'object'>(sql: string, params?: Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null, options?: import('./types').QueryOptions<M> | undefined | null): Promise<import('./types').QueryResult<M>>
+  query(sql: string, params?: import('./types').QueryParameters | null, options?: import('./types').QueryOptions<'object'> | null): Promise<import('./types').QueryResult>;
+  query(sql: string, params: import('./types').QueryParameters | null | undefined, options: import('./types').QueryOptions<'array'>): Promise<import('./types').QueryResult<'array'>>;
+  query(sql: string, params: import('./types').QueryParameters | null | undefined, options: import('./types').QueryOptions | null | undefined): Promise<import('./types').QueryResult<import('./types').RowMode>>
   acquire(): Promise<JsClient>
   release(client: JsClient): Promise<void>
   close(): Promise<void>
@@ -101,16 +105,22 @@ export declare class JsPool {
   maxConnections(): number
 }
 export declare class JsPreparedStatement {
-  execute<M extends import('./types').RowMode = 'object'>(params?: Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null, options?: import('./types').QueryOptions<M> | undefined | null): Promise<import('./types').QueryResult<M>>
+  execute(params?: import('./types').QueryParameters | null, options?: import('./types').QueryOptions<'object'> | null): Promise<import('./types').QueryResult>;
+  execute(params: import('./types').QueryParameters | null | undefined, options: import('./types').QueryOptions<'array'>): Promise<import('./types').QueryResult<'array'>>;
+  execute(params: import('./types').QueryParameters | null | undefined, options: import('./types').QueryOptions | null | undefined): Promise<import('./types').QueryResult<import('./types').RowMode>>
   /**
    * Execute the prepared statement as a batch with multiple rows of parameters.
    * Each element of `param_rows` is an array of parameter values for one row.
    */
-  executeBatch<M extends import('./types').RowMode = 'object'>(paramRows: Array<Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]>>, options?: import('./types').QueryOptions<M> | undefined | null): Promise<import('./types').QueryResult<M>>
+  executeBatch(paramRows: import('./types').QueryParameters[], options?: import('./types').QueryOptions<'object'> | null): Promise<import('./types').QueryResult>;
+  executeBatch(paramRows: import('./types').QueryParameters[], options: import('./types').QueryOptions<'array'>): Promise<import('./types').QueryResult<'array'>>;
+  executeBatch(paramRows: import('./types').QueryParameters[], options: import('./types').QueryOptions | null | undefined): Promise<import('./types').QueryResult<import('./types').RowMode>>
   close(): Promise<void>
 }
 export declare class JsTransaction {
-  query<M extends import('./types').RowMode = 'object'>(sql: string, params?: Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null, options?: import('./types').QueryOptions<M> | undefined | null): Promise<import('./types').QueryResult<M>>
+  query(sql: string, params?: import('./types').QueryParameters | null, options?: import('./types').QueryOptions<'object'> | null): Promise<import('./types').QueryResult>;
+  query(sql: string, params: import('./types').QueryParameters | null | undefined, options: import('./types').QueryOptions<'array'>): Promise<import('./types').QueryResult<'array'>>;
+  query(sql: string, params: import('./types').QueryParameters | null | undefined, options: import('./types').QueryOptions | null | undefined): Promise<import('./types').QueryResult<import('./types').RowMode>>
   /** Prepare a SQL statement within this transaction. */
   prepare(sql: string): Promise<JsPreparedStatement>
   commit(): Promise<void>

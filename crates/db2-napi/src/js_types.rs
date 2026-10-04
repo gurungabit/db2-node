@@ -238,10 +238,42 @@ fn parse_type_definition_name(value: Option<String>) -> napi::Result<Option<Stri
 }
 
 /// Per-call result formatting; object rows are the compatible default.
-#[napi(object)]
+#[napi(object, object_from_js = false)]
 pub struct JsQueryOptions {
     #[napi(ts_type = "import('./types').RowMode")]
     pub row_mode: Option<String>,
+}
+
+// Validate before napi-rs's String decoder can discard the error classification
+// or include untrusted option contents in a message resembling server diagnostics.
+impl FromNapiValue for JsQueryOptions {
+    unsafe fn from_napi_value(env: sys::napi_env, raw: sys::napi_value) -> napi::Result<Self> {
+        let value = napi::JsUnknown::from_napi_value(env, raw)?;
+        if value.get_type()? != ValueType::Object || value.is_array()? {
+            return Err(option_error(
+                env,
+                napi::Error::from_reason("Query options must be an object"),
+            ));
+        }
+        let object = value.coerce_to_object()?;
+        let mode: napi::JsUnknown = object.get_named_property("rowMode")?;
+        let row_mode = match mode.get_type()? {
+            ValueType::Undefined | ValueType::Null => None,
+            // Keep string-value validation in RowMode::from_options so existing
+            // unsupported strings continue to reject asynchronously.
+            ValueType::String => Some(mode.coerce_to_string()?.into_utf8()?.as_str()?.to_owned()),
+            _ => {
+                return Err(option_error(
+                    env,
+                    napi::Error::new(
+                        napi::Status::StringExpected,
+                        "rowMode must be 'object' or 'array'",
+                    ),
+                ));
+            }
+        };
+        Ok(Self { row_mode })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -694,9 +726,15 @@ impl FromNapiValue for JsParameter {
                     "Unsupported object parameter; use Date, Buffer, or a byte array",
                 ));
             }
-            ValueType::String | ValueType::Number | ValueType::Boolean => {
-                serde_json::Value::from_napi_value(env, raw)?
-            }
+            ValueType::Number => serde_json::Value::from_napi_value(env, raw).map_err(|error| {
+                JsFailure {
+                    error,
+                    driver_code: Some("DB2_PARAMETER_TYPE"),
+                }
+                .into_napi_error(env)
+                .unwrap_or_else(|error| error)
+            })?,
+            ValueType::String | ValueType::Boolean => serde_json::Value::from_napi_value(env, raw)?,
             _ => return Err(parameter_error(env, "Unsupported parameter type")),
         };
         Ok(Self(json))
@@ -853,6 +891,15 @@ pub fn client_error_to_js(err: db2_client::Error) -> JsFailure {
         error: napi::Error::from_reason(message),
         driver_code,
     }
+}
+
+unsafe fn option_error(env: sys::napi_env, error: napi::Error) -> napi::Error {
+    JsFailure {
+        error,
+        driver_code: Some("DB2_INVALID_OPTION"),
+    }
+    .into_napi_error(env)
+    .unwrap_or_else(|error| error)
 }
 
 unsafe fn parameter_error(env: sys::napi_env, reason: &str) -> napi::Error {

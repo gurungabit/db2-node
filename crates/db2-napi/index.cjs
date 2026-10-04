@@ -17,14 +17,15 @@ function enrichDb2Error(error) {
   if (!error || typeof error !== 'object') return error
 
   const message = String(error.message || error)
-  const match = error.driverCode == null ? SQL_ERROR_RE.exec(message) : null
+  const canUseServerDiagnostics = error.driverCode == null || error.driverCode === 'DB2_PROTOCOL'
+  const match = canUseServerDiagnostics ? SQL_ERROR_RE.exec(message) : null
   if (match) {
     if (error.sqlstate == null) error.sqlstate = match[1]
     if (error.sqlcode == null) error.sqlcode = Number(match[2])
   }
 
   const normalized = message.toLowerCase()
-  const retryable = error.driverCode == null && (
+  const retryable = canUseServerDiagnostics && (
     RETRYABLE_SESSION_SQLCODES.has(Number(error.sqlcode)) ||
     normalized.includes('closed by server') ||
     normalized.includes('qrynoprm')
@@ -526,8 +527,8 @@ class Database {
       async () => {
         const executor = this._executor()
         const result = executor
-          ? await executor.query(args.sql, args.params || null, args.options || null)
-          : await this._pool.query(args.sql, args.params || null, args.options || null)
+          ? await executor.query(args.sql, args.params || null, args.options ?? null)
+          : await this._pool.query(args.sql, args.params || null, args.options ?? null)
         const rows = args.noResults ? [] : result.rows
         return { rows, sqlca: sqlcaFromResult(result) }
       },
@@ -542,8 +543,8 @@ class Database {
       async () => {
         const executor = this._executor()
         const result = executor
-          ? await executor.query(args.sql, args.params || null, args.options || null)
-          : await this._pool.query(args.sql, args.params || null, args.options || null)
+          ? await executor.query(args.sql, args.params || null, args.options ?? null)
+          : await this._pool.query(args.sql, args.params || null, args.options ?? null)
         return new ODBCResult(result)
       },
       args.callback,
@@ -781,7 +782,7 @@ class CompatPool {
       options = undefined
     }
     return callbackOrPromise(
-      () => this._requireNative().query(sql, normalizeParams(params) || null, options || null),
+      () => this._requireNative().query(sql, normalizeParams(params) || null, options ?? null),
       callback
     )
   }
@@ -895,11 +896,11 @@ class PreparedStatement {
   }
 
   execute(params, options) {
-    return withDb2ErrorEnrichment(this._native.execute(normalizeParams(params) || null, options || null))
+    return withDb2ErrorEnrichment(this._native.execute(normalizeParams(params) || null, options ?? null))
   }
 
   executeBatch(paramRows, options) {
-    return withDb2ErrorEnrichment(this._native.executeBatch(normalizeParamRows(paramRows), options || null))
+    return withDb2ErrorEnrichment(this._native.executeBatch(normalizeParamRows(paramRows), options ?? null))
   }
 
   close() {
@@ -917,7 +918,7 @@ class Transaction {
   }
 
   query(sql, params, options) {
-    return withDb2ErrorEnrichment(this._native.query(sql, normalizeParams(params) || null, options || null))
+    return withDb2ErrorEnrichment(this._native.query(sql, normalizeParams(params) || null, options ?? null))
   }
 
   async prepare(sql) {
@@ -949,7 +950,7 @@ class Client {
   }
 
   query(sql, params, options) {
-    return withDb2ErrorEnrichment(this._native.query(sql, normalizeParams(params) || null, options || null))
+    return withDb2ErrorEnrichment(this._native.query(sql, normalizeParams(params) || null, options ?? null))
   }
 
   async prepare(sql) {
@@ -987,7 +988,7 @@ class Pool {
   }
 
   query(sql, params, options) {
-    return withDb2ErrorEnrichment(this._native.query(sql, normalizeParams(params) || null, options || null))
+    return withDb2ErrorEnrichment(this._native.query(sql, normalizeParams(params) || null, options ?? null))
   }
 
   async acquire() {

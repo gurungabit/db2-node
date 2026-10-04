@@ -24,17 +24,15 @@ impl JsPreparedStatement {
 
 #[napi]
 impl JsPreparedStatement {
+    // napi-rs emits one signature; append fixed overloads in its TS override so
+    // rebuilding cannot let return-type context infer an absent array option.
     #[napi(
-        ts_generic_types = "M extends import('./types').RowMode = 'object'",
-        ts_return_type = "Promise<import('./types').QueryResult<M>>"
+        ts_args_type = "params?: import('./types').QueryParameters | null, options?: import('./types').QueryOptions<'object'> | null",
+        ts_return_type = "Promise<import('./types').QueryResult>;\n  execute(params: import('./types').QueryParameters | null | undefined, options: import('./types').QueryOptions<'array'>): Promise<import('./types').QueryResult<'array'>>;\n  execute(params: import('./types').QueryParameters | null | undefined, options: import('./types').QueryOptions | null | undefined): Promise<import('./types').QueryResult<import('./types').RowMode>>"
     )]
     pub async fn execute(
         &self,
-        #[napi(
-            ts_arg_type = "Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null"
-        )]
         params: Option<Vec<JsParameter>>,
-        #[napi(ts_arg_type = "import('./types').QueryOptions<M> | undefined | null")]
         options: Option<JsQueryOptions>,
     ) -> JsOutcome<JsQueryResult> {
         JsOutcome(
@@ -70,16 +68,12 @@ impl JsPreparedStatement {
     /// Each element of `param_rows` is an array of parameter values for one row.
     #[napi(
         js_name = "executeBatch",
-        ts_generic_types = "M extends import('./types').RowMode = 'object'",
-        ts_return_type = "Promise<import('./types').QueryResult<M>>"
+        ts_args_type = "paramRows: import('./types').QueryParameters[], options?: import('./types').QueryOptions<'object'> | null",
+        ts_return_type = "Promise<import('./types').QueryResult>;\n  executeBatch(paramRows: import('./types').QueryParameters[], options: import('./types').QueryOptions<'array'>): Promise<import('./types').QueryResult<'array'>>;\n  executeBatch(paramRows: import('./types').QueryParameters[], options: import('./types').QueryOptions | null | undefined): Promise<import('./types').QueryResult<import('./types').RowMode>>"
     )]
     pub async fn execute_batch(
         &self,
-        #[napi(
-            ts_arg_type = "Array<Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]>>"
-        )]
         param_rows: Vec<Vec<JsParameter>>,
-        #[napi(ts_arg_type = "import('./types').QueryOptions<M> | undefined | null")]
         options: Option<JsQueryOptions>,
     ) -> JsOutcome<JsQueryResult> {
         JsOutcome(

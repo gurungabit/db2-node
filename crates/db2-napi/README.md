@@ -81,7 +81,10 @@ and `PreparedStatement.executeBatch(paramRows, options)`, including the `Js*` an
 `null` for omitted parameters when supplying options. TypeScript infers
 `QueryResult<'array'>`; `QueryOptions`, `RowMode`, and generic `QueryResult` are
 exported. Omitted options and `{ rowMode: 'object' }` return the existing object
-rows, where the last value wins for duplicate names.
+rows, where the last value wins for duplicate names. `QueryOptions<'array'>`
+requires `rowMode: 'array'`; an empty options object cannot select array rows. A
+dynamic or optional `rowMode` returns `QueryResult<RowMode>`, a union of object
+and array results, so callers must handle both shapes.
 
 `Pool`/`CompatPool` callbacks also accept `query(sql, params, options, callback)`.
 For the `ibm_db`-style `Database.query`, `queryResult`, and `queryStream`, use the SQL
@@ -414,7 +417,7 @@ object, including through `Js*`/`Native*` APIs and callbacks:
 | `DB2_PARAMETER_COUNT` | Parameter count differs from the input descriptor count. |
 | `DB2_PARAMETER_TYPE` | A parameter cannot be converted or encoded for its target type, including invalid numeric text/range, unsupported JS values, or invalid byte arrays. |
 | `DB2_PROTOCOL` | A malformed or unexpected DRDA reply or protocol decoding failure. |
-| `DB2_INVALID_OPTION` | An unsupported `rowMode`. |
+| `DB2_INVALID_OPTION` | Malformed query options or an unsupported `rowMode` value/type. |
 
 ```js
 try {
@@ -427,9 +430,15 @@ try {
 ```
 
 `driverCode` is additive: `code` retains the existing N-API status (usually
-`'GenericFailure'`), and messages retain their existing content. Client-side
-errors do not invent `sqlstate` or `sqlcode` values. Server SQL errors retain their
-SQLSTATE, SQLCODE, and retry behavior and have no `driverCode`, even if the server
+`'GenericFailure'`), and existing parameter/server messages retain their content.
+Client-side parameter and option errors do not invent `sqlstate` or `sqlcode`
+values, and parameter/option text cannot mark an error retryable. Non-string
+`rowMode` values retain `StringExpected` with a deterministic validation message. Rejected `NaN`, `Infinity`,
+and `-Infinity` parameters retain their original `InvalidArg` code and conversion
+message while gaining `DB2_PARAMETER_TYPE`. Recognized protocol session errors
+(such as `QRYNOPRM` or a connection closed by the server) retain wrapper
+`retryable: true` metadata even when classified as `DB2_PROTOCOL`.
+Server SQL errors retain their SQLSTATE, SQLCODE, and retry behavior and have no `driverCode`, even if the server
 reports a parameter mistake. Wrapper APIs expose server `sqlstate`, `sqlcode`,
 and `retryable` properties as before; raw native APIs retain the server diagnostic
 message. `Db2Error` and `DriverErrorCode` provide the public TypeScript types.
