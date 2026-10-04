@@ -1,10 +1,12 @@
-use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::js_connection::JsQueryResult;
-use crate::js_types::{client_error_to_napi, js_params_to_db2, query_result_to_js, JsParameter};
+use crate::js_types::{
+    client_error_to_js, js_params_to_db2, query_result_to_js, JsOutcome, JsParameter,
+    JsQueryOptions, RowMode,
+};
 
 #[napi]
 pub struct JsPreparedStatement {
@@ -22,76 +24,104 @@ impl JsPreparedStatement {
 
 #[napi]
 impl JsPreparedStatement {
-    #[napi]
+    #[napi(
+        ts_generic_types = "M extends import('./types').RowMode = 'object'",
+        ts_return_type = "Promise<import('./types').QueryResult<M>>"
+    )]
     pub async fn execute(
         &self,
         #[napi(
             ts_arg_type = "Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null"
         )]
         params: Option<Vec<JsParameter>>,
-    ) -> Result<JsQueryResult> {
-        let mut guard = self.inner.lock().await;
-        let stmt = guard
-            .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("PreparedStatement is closed"))?;
+        #[napi(ts_arg_type = "import('./types').QueryOptions<M> | undefined | null")]
+        options: Option<JsQueryOptions>,
+    ) -> JsOutcome<JsQueryResult> {
+        JsOutcome(
+            async {
+                let row_mode = RowMode::from_options(options)?;
+                let mut guard = self.inner.lock().await;
+                let stmt = guard
+                    .as_mut()
+                    .ok_or_else(|| napi::Error::from_reason("PreparedStatement is closed"))?;
 
-        let db2_params = match &params {
-            Some(p) => js_params_to_db2(p),
-            None => Vec::new(),
-        };
+                let db2_params = match &params {
+                    Some(p) => js_params_to_db2(p),
+                    None => Vec::new(),
+                };
 
-        let param_refs: Vec<&dyn db2_client::ToSql> = db2_params
-            .iter()
-            .map(|p| p as &dyn db2_client::ToSql)
-            .collect();
+                let param_refs: Vec<&dyn db2_client::ToSql> = db2_params
+                    .iter()
+                    .map(|p| p as &dyn db2_client::ToSql)
+                    .collect();
 
-        let result = stmt
-            .execute(&param_refs)
-            .await
-            .map_err(client_error_to_napi)?;
+                let result = stmt
+                    .execute(&param_refs)
+                    .await
+                    .map_err(client_error_to_js)?;
 
-        Ok(query_result_to_js(result))
+                Ok(query_result_to_js(result, row_mode))
+            }
+            .await,
+        )
     }
 
     /// Execute the prepared statement as a batch with multiple rows of parameters.
     /// Each element of `param_rows` is an array of parameter values for one row.
-    #[napi(js_name = "executeBatch")]
+    #[napi(
+        js_name = "executeBatch",
+        ts_generic_types = "M extends import('./types').RowMode = 'object'",
+        ts_return_type = "Promise<import('./types').QueryResult<M>>"
+    )]
     pub async fn execute_batch(
         &self,
         #[napi(
             ts_arg_type = "Array<Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]>>"
         )]
         param_rows: Vec<Vec<JsParameter>>,
-    ) -> Result<JsQueryResult> {
-        let guard = self.inner.lock().await;
-        let stmt = guard
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("PreparedStatement is closed"))?;
+        #[napi(ts_arg_type = "import('./types').QueryOptions<M> | undefined | null")]
+        options: Option<JsQueryOptions>,
+    ) -> JsOutcome<JsQueryResult> {
+        JsOutcome(
+            async {
+                let row_mode = RowMode::from_options(options)?;
+                let guard = self.inner.lock().await;
+                let stmt = guard
+                    .as_ref()
+                    .ok_or_else(|| napi::Error::from_reason("PreparedStatement is closed"))?;
 
-        // Convert all rows from JSON to Db2Value
-        let db2_rows: Vec<Vec<db2_proto::types::Db2Value>> =
-            param_rows.iter().map(|row| js_params_to_db2(row)).collect();
+                // Convert all rows from JSON to Db2Value
+                let db2_rows: Vec<Vec<db2_proto::types::Db2Value>> =
+                    param_rows.iter().map(|row| js_params_to_db2(row)).collect();
 
-        // Build references for each row
-        let param_ref_rows: Vec<Vec<&dyn db2_client::ToSql>> = db2_rows
-            .iter()
-            .map(|row| row.iter().map(|p| p as &dyn db2_client::ToSql).collect())
-            .collect();
+                // Build references for each row
+                let param_ref_rows: Vec<Vec<&dyn db2_client::ToSql>> = db2_rows
+                    .iter()
+                    .map(|row| row.iter().map(|p| p as &dyn db2_client::ToSql).collect())
+                    .collect();
 
-        let result = stmt
-            .execute_batch(&param_ref_rows)
-            .await
-            .map_err(client_error_to_napi)?;
+                let result = stmt
+                    .execute_batch(&param_ref_rows)
+                    .await
+                    .map_err(client_error_to_js)?;
 
-        Ok(query_result_to_js(result))
+                Ok(query_result_to_js(result, row_mode))
+            }
+            .await,
+        )
     }
 
-    #[napi]
-    pub async fn close(&self) -> Result<()> {
-        let mut guard = self.inner.lock().await;
-        if let Some(stmt) = guard.take() {
-            stmt.close().await.map_err(client_error_to_napi)?;
-        }
-        Ok(())
+    #[napi(ts_return_type = "Promise<void>")]
+    pub async fn close(&self) -> JsOutcome<()> {
+        JsOutcome(
+            async {
+                let mut guard = self.inner.lock().await;
+                if let Some(stmt) = guard.take() {
+                    stmt.close().await.map_err(client_error_to_js)?;
+                }
+                Ok(())
+            }
+            .await,
+        )
     }
 }

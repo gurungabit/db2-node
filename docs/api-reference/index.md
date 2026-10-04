@@ -52,15 +52,49 @@ interface PoolConfig extends ConnectionConfig {
 ### QueryResult
 
 ```typescript
-interface QueryResult {
-  rows: Record<string, any>[];
+type RowMode = 'object' | 'array';
+interface QueryOptions<M extends RowMode = RowMode> { rowMode?: M; }
+interface QueryResult<M extends RowMode = 'object'> {
+  rows: (M extends 'array' ? any[] : Record<string, any>)[];
   rowCount: number;
   columns: ColumnInfo[];
   diagnostics: string[];
-  resultSets: QueryResult[];       // CALL result sets; rows/columns describe the first
+  resultSets: QueryResult<M>[];       // CALL result sets; rows/columns describe the first
   outputParameters: any[];        // OUT/INOUT only, in parameter order
 }
 ```
+
+
+### Array rows
+
+Use `{ rowMode: 'array' }` per call to retain duplicate column names:
+
+```js
+const result = await client.query(
+  'SELECT 1 AS A, 2 AS A FROM SYSIBM.SYSDUMMY1',
+  [],
+  { rowMode: 'array' }
+)
+// result.rows: [[1, 2]]
+// result.columns.map(column => column.name): ['A', 'A']
+```
+
+`rows[i][j]` corresponds to `columns[j]` in SELECT order. This also applies to every
+CALL `resultSets` entry. Value conversions and column metadata are the same as for
+object rows; OUT/INOUT values remain in `outputParameters` in parameter order.
+
+The optional final argument is supported by `Client.query`, `Pool.query`,
+`Db2Pool.query`, `Transaction.query`, `PreparedStatement.execute(params, options)`,
+and `PreparedStatement.executeBatch(paramRows, options)`, including the `Js*` and
+`Native*` classes and clients acquired from a pool. Pass `[]`, `undefined`, or
+`null` for omitted parameters when supplying options. TypeScript infers
+`QueryResult<'array'>`; `QueryOptions`, `RowMode`, and generic `QueryResult` are
+exported. Omitted options and `{ rowMode: 'object' }` return the existing object
+rows, where the last value wins for duplicate names.
+
+`Pool`/`CompatPool` callbacks also accept `query(sql, params, options, callback)`.
+For the `ibm_db`-style `Database.query`, `queryResult`, and `queryStream`, use the SQL
+object form `{ sql, params, rowMode: 'array' }`.
 
 ### ColumnInfo
 
@@ -136,7 +170,7 @@ Use `'OFF'` only when the DB2 certificate is trusted but was issued without a ho
 ### client.query()
 
 ```typescript
-query(sql: string, params?: any[]): Promise<QueryResult>
+query<M extends RowMode = 'object'>(sql: string, params?: any[] | null, options?: QueryOptions<M> | null): Promise<QueryResult<M>>
 ```
 
 Executes a SQL statement and returns the result.
@@ -239,7 +273,7 @@ The explicit native-style constructor is also exported as `Db2Pool`.
 ### pool.query()
 
 ```typescript
-query(sql: string, params?: any[]): Promise<QueryResult>
+query<M extends RowMode = 'object'>(sql: string, params?: any[] | null, options?: QueryOptions<M> | null): Promise<QueryResult<M>>
 ```
 
 Acquires a connection, executes the query, and releases the connection back — all in one call. This is the simplest way to run queries with pooling.
@@ -330,7 +364,7 @@ A prepared SQL statement that can be executed multiple times with different para
 ### stmt.execute()
 
 ```typescript
-execute(params?: any[]): Promise<QueryResult>
+execute<M extends RowMode = 'object'>(params?: any[] | null, options?: QueryOptions<M> | null): Promise<QueryResult<M>>
 ```
 
 Executes the prepared statement with the given parameters.
@@ -338,7 +372,7 @@ Executes the prepared statement with the given parameters.
 ### stmt.executeBatch()
 
 ```typescript
-executeBatch(paramRows: any[][]): Promise<QueryResult>
+executeBatch<M extends RowMode = 'object'>(paramRows: any[][], options?: QueryOptions<M> | null): Promise<QueryResult<M>>
 ```
 
 Executes the prepared statement as a batch with multiple rows of parameters. Each element of `paramRows` is an array of parameter values for one row. Uses a single network round-trip for efficiency.
@@ -371,7 +405,7 @@ A database transaction with manual commit/rollback control. If a transaction is 
 ### tx.query()
 
 ```typescript
-query(sql: string, params?: any[]): Promise<QueryResult>
+query<M extends RowMode = 'object'>(sql: string, params?: any[] | null, options?: QueryOptions<M> | null): Promise<QueryResult<M>>
 ```
 
 Executes a SQL statement within the transaction.
@@ -441,6 +475,31 @@ When passing parameters, JavaScript types are automatically mapped:
 
 ---
 
+
+### BOOLEAN parameters
+
+For a BOOLEAN target, string parameters accept these explicit, case-insensitive
+Db2 aliases, with leading and trailing ASCII spaces ignored:
+
+| Value | Accepted strings |
+|-------|------------------|
+| `true` | `'t'`, `'true'`, `'y'`, `'yes'`, `'on'`, `'1'` |
+| `false` | `'f'`, `'false'`, `'n'`, `'no'`, `'off'`, `'0'` |
+
+```js
+await client.query('VALUES CAST(? AS BOOLEAN)', [' false '])
+// rows: [{ '1': false }]
+```
+
+Booleans, integers (zero is false, nonzero is true), and NULL keep their existing
+behavior. Strings sent to VARCHAR targets remain strings. Other strings,
+including tabs/newlines around a token and numeric text such as `'2'`, are
+rejected with `driverCode: 'DB2_PARAMETER_TYPE'`. Db2 also accepts broader numeric
+text conversions; use `CAST(CAST(? AS VARCHAR(128)) AS BOOLEAN)` to delegate those
+to the server. See IBM's [BOOLEAN reference](https://www.ibm.com/docs/en/db2/12.1.x?topic=functions-boolean).
+
+---
+
 ## Error Handling
 
 All async methods throw on failure. SQL errors include SQLSTATE and SQLCODE in the message:
@@ -453,6 +512,35 @@ try {
   // "SQL Error [SQLSTATE=42601, SQLCODE=-104]: An unexpected token..."
 }
 ```
+
+
+Client-side binding and protocol errors expose a stable `driverCode` on the Error
+object, including through `Js*`/`Native*` APIs and callbacks:
+
+| `driverCode` | Meaning |
+|--------------|---------|
+| `DB2_PARAMETER_COUNT` | Parameter count differs from the input descriptor count. |
+| `DB2_PARAMETER_TYPE` | A parameter cannot be converted or encoded for its target type, including invalid numeric text/range, unsupported JS values, or invalid byte arrays. |
+| `DB2_PROTOCOL` | A malformed or unexpected DRDA reply or protocol decoding failure. |
+| `DB2_INVALID_OPTION` | An unsupported `rowMode`. |
+
+```js
+try {
+  await client.query('VALUES CAST(? AS BOOLEAN)', ['invalid'])
+} catch (err) {
+  if (err.driverCode === 'DB2_PARAMETER_TYPE') {
+    // Ask the caller to correct the parameter.
+  }
+}
+```
+
+`driverCode` is additive: `code` retains the existing N-API status (usually
+`'GenericFailure'`), and messages retain their existing content. Client-side
+errors do not invent `sqlstate` or `sqlcode` values. Server SQL errors retain their
+SQLSTATE, SQLCODE, and retry behavior and have no `driverCode`, even if the server
+reports a parameter mistake. Wrapper APIs expose server `sqlstate`, `sqlcode`,
+and `retryable` properties as before; raw native APIs retain the server diagnostic
+message. `Db2Error` and `DriverErrorCode` provide the public TypeScript types.
 
 ### Common Error Patterns
 

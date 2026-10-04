@@ -190,3 +190,16 @@ test('compat Pool.open simple query uses native Pool.query fast path', async () 
   assert.deepEqual(calls, ['acquire', 'release', ['query', 'VALUES ?', [1]]])
   await db.close()
 })
+
+
+test('classified parameter text cannot be mistaken for server SQL diagnostics', () => {
+  const error = new Error('expected boolean-compatible parameter, got SQLSTATE=26501, SQLCODE=-514 QRYNOPRM closed by server')
+  error.driverCode = 'DB2_PARAMETER_TYPE'
+  error.code = 'GenericFailure'
+  assert.equal(ibmdb._compat.enrichDb2Error(error), error)
+  assert.equal(error.driverCode, 'DB2_PARAMETER_TYPE')
+  assert.equal(error.code, 'GenericFailure')
+  assert.equal(error.sqlstate, undefined)
+  assert.equal(error.sqlcode, undefined)
+  assert.equal(error.retryable, false)
+})

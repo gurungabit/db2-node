@@ -4,7 +4,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::js_types::{
-    client_error_to_napi, config_from_js, js_params_to_db2, query_result_to_js, JsParameter,
+    client_error_to_js, config_from_js, js_params_to_db2, query_result_to_js, JsOutcome,
+    JsParameter, JsQueryOptions, RowMode,
 };
 
 #[napi(object)]
@@ -110,21 +111,29 @@ impl JsClient {
         }
     }
 
-    #[napi]
-    pub async fn connect(&self) -> Result<()> {
-        let mut client = db2_client::Client::new(self.config.clone());
-        client.connect().await.map_err(client_error_to_napi)?;
-        let mut guard = self.inner.lock().await;
-        *self
-            .cancel_handle
-            .lock()
-            .map_err(|_| napi::Error::from_reason("Cancellation lock poisoned"))? =
-            Some(client.cancellation_handle());
-        *guard = Some(client);
-        Ok(())
+    #[napi(ts_return_type = "Promise<void>")]
+    pub async fn connect(&self) -> JsOutcome<()> {
+        JsOutcome(
+            async {
+                let mut client = db2_client::Client::new(self.config.clone());
+                client.connect().await.map_err(client_error_to_js)?;
+                let mut guard = self.inner.lock().await;
+                *self
+                    .cancel_handle
+                    .lock()
+                    .map_err(|_| napi::Error::from_reason("Cancellation lock poisoned"))? =
+                    Some(client.cancellation_handle());
+                *guard = Some(client);
+                Ok(())
+            }
+            .await,
+        )
     }
 
-    #[napi]
+    #[napi(
+        ts_generic_types = "M extends import('./types').RowMode = 'object'",
+        ts_return_type = "Promise<import('./types').QueryResult<M>>"
+    )]
     pub async fn query(
         &self,
         sql: String,
@@ -132,78 +141,112 @@ impl JsClient {
             ts_arg_type = "Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null"
         )]
         params: Option<Vec<JsParameter>>,
-    ) -> Result<JsQueryResult> {
-        let mut guard = self.inner.lock().await;
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("Client is not connected"))?;
+        #[napi(ts_arg_type = "import('./types').QueryOptions<M> | undefined | null")]
+        options: Option<JsQueryOptions>,
+    ) -> JsOutcome<JsQueryResult> {
+        JsOutcome(
+            async {
+                let row_mode = RowMode::from_options(options)?;
+                let mut guard = self.inner.lock().await;
+                let client = guard
+                    .as_mut()
+                    .ok_or_else(|| napi::Error::from_reason("Client is not connected"))?;
 
-        let db2_params = match &params {
-            Some(p) => js_params_to_db2(p),
-            None => Vec::new(),
-        };
+                let db2_params = match &params {
+                    Some(p) => js_params_to_db2(p),
+                    None => Vec::new(),
+                };
 
-        let param_refs: Vec<&dyn db2_client::ToSql> = db2_params
-            .iter()
-            .map(|p| p as &dyn db2_client::ToSql)
-            .collect();
+                let param_refs: Vec<&dyn db2_client::ToSql> = db2_params
+                    .iter()
+                    .map(|p| p as &dyn db2_client::ToSql)
+                    .collect();
 
-        let result = client
-            .query(&sql, &param_refs)
-            .await
-            .map_err(client_error_to_napi)?;
+                let result = client
+                    .query(&sql, &param_refs)
+                    .await
+                    .map_err(client_error_to_js)?;
 
-        Ok(query_result_to_js(result))
+                Ok(query_result_to_js(result, row_mode))
+            }
+            .await,
+        )
     }
 
     /// Cancel a running LUW activity without waiting for query() to finish.
-    #[napi]
-    pub async fn cancel(&self) -> Result<bool> {
-        let handle = self
-            .cancel_handle
-            .lock()
-            .map_err(|_| napi::Error::from_reason("Cancellation lock poisoned"))?
-            .clone();
-        match handle {
-            Some(handle) => handle.cancel().await.map_err(client_error_to_napi),
-            None => Ok(false),
-        }
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub async fn cancel(&self) -> JsOutcome<bool> {
+        JsOutcome(
+            async {
+                let handle = self
+                    .cancel_handle
+                    .lock()
+                    .map_err(|_| napi::Error::from_reason("Cancellation lock poisoned"))?
+                    .clone();
+                match handle {
+                    Some(handle) => handle.cancel().await.map_err(client_error_to_js),
+                    None => Ok(false),
+                }
+            }
+            .await,
+        )
     }
 
-    #[napi]
-    pub async fn prepare(&self, sql: String) -> Result<crate::js_statement::JsPreparedStatement> {
-        let mut guard = self.inner.lock().await;
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("Client is not connected"))?;
+    #[napi(ts_return_type = "Promise<JsPreparedStatement>")]
+    pub async fn prepare(
+        &self,
+        sql: String,
+    ) -> JsOutcome<crate::js_statement::JsPreparedStatement> {
+        JsOutcome(
+            async {
+                let mut guard = self.inner.lock().await;
+                let client = guard
+                    .as_mut()
+                    .ok_or_else(|| napi::Error::from_reason("Client is not connected"))?;
 
-        let stmt = client.prepare(&sql).await.map_err(client_error_to_napi)?;
+                let stmt = client.prepare(&sql).await.map_err(client_error_to_js)?;
 
-        Ok(crate::js_statement::JsPreparedStatement::from_inner(stmt))
+                Ok(crate::js_statement::JsPreparedStatement::from_inner(stmt))
+            }
+            .await,
+        )
     }
 
-    #[napi(js_name = "beginTransaction")]
-    pub async fn begin_transaction(&self) -> Result<crate::js_transaction::JsTransaction> {
-        let mut guard = self.inner.lock().await;
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("Client is not connected"))?;
+    #[napi(
+        js_name = "beginTransaction",
+        ts_return_type = "Promise<JsTransaction>"
+    )]
+    pub async fn begin_transaction(&self) -> JsOutcome<crate::js_transaction::JsTransaction> {
+        JsOutcome(
+            async {
+                let mut guard = self.inner.lock().await;
+                let client = guard
+                    .as_mut()
+                    .ok_or_else(|| napi::Error::from_reason("Client is not connected"))?;
 
-        let txn = client
-            .begin_transaction()
-            .await
-            .map_err(client_error_to_napi)?;
+                let txn = client
+                    .begin_transaction()
+                    .await
+                    .map_err(client_error_to_js)?;
 
-        Ok(crate::js_transaction::JsTransaction::from_inner(txn))
+                Ok(crate::js_transaction::JsTransaction::from_inner(txn))
+            }
+            .await,
+        )
     }
 
-    #[napi]
-    pub async fn close(&self) -> Result<()> {
-        let mut guard = self.inner.lock().await;
-        if let Some(client) = guard.take() {
-            client.close().await.map_err(client_error_to_napi)?;
-        }
-        Ok(())
+    #[napi(ts_return_type = "Promise<void>")]
+    pub async fn close(&self) -> JsOutcome<()> {
+        JsOutcome(
+            async {
+                let mut guard = self.inner.lock().await;
+                if let Some(client) = guard.take() {
+                    client.close().await.map_err(client_error_to_js)?;
+                }
+                Ok(())
+            }
+            .await,
+        )
     }
 
     #[napi(js_name = "serverInfo")]

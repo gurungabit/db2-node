@@ -3,7 +3,6 @@
 
 export {
   JsConnectionConfig as ConnectionConfig,
-  JsQueryResult as QueryResult,
   JsColumnInfo as ColumnInfo,
   JsServerInfo as ServerInfo,
   JsPoolConfig as PoolConfig,
@@ -34,7 +33,22 @@ export type BinaryParameter = Uint8Array | ArrayBuffer | number[]
 export type QueryParameter = string | number | bigint | boolean | Date | null | BinaryParameter
 export type QueryParameters = QueryParameter[]
 
+/** Object rows are the compatible default; array entries follow columns by index. */
+export type RowMode = 'object' | 'array'
+export interface QueryOptions<M extends RowMode = RowMode> {
+  rowMode?: M
+}
+export type QueryRow<M extends RowMode = 'object'> = M extends 'array' ? any[] : Record<string, any>
+export interface QueryResult<M extends RowMode = 'object'> extends Omit<JsQueryResult, 'rows' | 'resultSets'> {
+  rows: QueryRow<M>[]
+  resultSets: QueryResult<M>[]
+}
+
+/** Stable driver classifications; server errors instead retain SQLSTATE/SQLCODE. */
+export type DriverErrorCode = 'DB2_PARAMETER_COUNT' | 'DB2_PARAMETER_TYPE' | 'DB2_PROTOCOL' | 'DB2_INVALID_OPTION'
 export interface Db2Error extends Error {
+  code?: string
+  driverCode?: DriverErrorCode
   sqlstate?: string
   sqlcode?: number
   retryable?: boolean
@@ -58,7 +72,7 @@ export interface IbmDbPoolOptions {
 export class Client {
   constructor(config: JsConnectionConfig)
   connect(): Promise<void>
-  query(sql: string, params?: QueryParameters | undefined | null): Promise<JsQueryResult>
+  query<M extends RowMode = 'object'>(sql: string, params?: QueryParameters | undefined | null, options?: QueryOptions<M> | null): Promise<QueryResult<M>>
   prepare(sql: string): Promise<PreparedStatement>
   beginTransaction(): Promise<Transaction>
   close(): Promise<void>
@@ -70,7 +84,8 @@ export class Pool {
   constructor(config?: JsPoolConfig | IbmDbPoolOptions)
   connect(callback?: (err?: Error | null) => void): Promise<void> | void
   warmup(callback?: (err: Error | null, created?: number) => void): Promise<number> | void
-  query(sql: string, params?: QueryParameters): Promise<any>
+  query<M extends RowMode = 'object'>(sql: string, params?: QueryParameters | null, options?: QueryOptions<M> | null): Promise<QueryResult<M>>
+  query<M extends RowMode = 'object'>(sql: string, params: QueryParameters | null | undefined, options: QueryOptions<M> | null, callback: (err: Db2Error | null, result: QueryResult<M>) => void): void
   query(sql: string, callback: (err: Error | null, result: any) => void): void
   query(sql: string, params: QueryParameters, callback: (err: Error | null, result: any) => void): void
   acquire(): Promise<Client>
@@ -93,7 +108,7 @@ export class Db2Pool {
   constructor(config: JsPoolConfig)
   connect(): Promise<void>
   warmup(): Promise<number>
-  query(sql: string, params?: QueryParameters | undefined | null): Promise<JsQueryResult>
+  query<M extends RowMode = 'object'>(sql: string, params?: QueryParameters | undefined | null, options?: QueryOptions<M> | null): Promise<QueryResult<M>>
   acquire(): Promise<Client>
   release(client: Client | JsClient): Promise<void>
   close(): Promise<void>
@@ -104,13 +119,13 @@ export class Db2Pool {
 }
 
 export class PreparedStatement {
-  execute(params?: QueryParameters | undefined | null): Promise<JsQueryResult>
-  executeBatch(paramRows: Array<QueryParameters>): Promise<JsQueryResult>
+  execute<M extends RowMode = 'object'>(params?: QueryParameters | undefined | null, options?: QueryOptions<M> | null): Promise<QueryResult<M>>
+  executeBatch<M extends RowMode = 'object'>(paramRows: Array<QueryParameters>, options?: QueryOptions<M> | null): Promise<QueryResult<M>>
   close(): Promise<void>
 }
 
 export class Transaction {
-  query(sql: string, params?: QueryParameters | undefined | null): Promise<JsQueryResult>
+  query<M extends RowMode = 'object'>(sql: string, params?: QueryParameters | undefined | null, options?: QueryOptions<M> | null): Promise<QueryResult<M>>
   prepare(sql: string): Promise<PreparedStatement>
   commit(): Promise<void>
   rollback(): Promise<void>
@@ -154,13 +169,13 @@ export class Database {
   open(connectionString: ConnectionString, callback: (err: Error | null, result?: boolean) => void): void
   open(connectionString: ConnectionString, options: Record<string, any>, callback: (err: Error | null, result?: boolean) => void): void
   open(connectionString: ConnectionString, options?: Record<string, any>): Promise<boolean>
-  query(sql: string | { sql: string; params?: QueryParameters; noResults?: boolean }, callback: IbmDbCallback<any[]>): void
-  query(sql: string | { sql: string; params?: QueryParameters; noResults?: boolean }, params?: QueryParameters): Promise<any[]>
-  query(sql: string | { sql: string; params?: QueryParameters; noResults?: boolean }, params: QueryParameters, callback: IbmDbCallback<any[]>): void
-  queryResult(sql: string, callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
-  queryResult(sql: string, params?: QueryParameters): Promise<ODBCResult>
-  queryResult(sql: string, params: QueryParameters, callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
-  queryStream(sql: string, params?: QueryParameters): any
+  query(sql: string | { sql: string; params?: QueryParameters; noResults?: boolean; rowMode?: RowMode }, callback: IbmDbCallback<any[]>): void
+  query(sql: string | { sql: string; params?: QueryParameters; noResults?: boolean; rowMode?: RowMode }, params?: QueryParameters): Promise<any[]>
+  query(sql: string | { sql: string; params?: QueryParameters; noResults?: boolean; rowMode?: RowMode }, params: QueryParameters, callback: IbmDbCallback<any[]>): void
+  queryResult(sql: string | { sql: string; params?: QueryParameters; rowMode?: RowMode }, callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
+  queryResult(sql: string | { sql: string; params?: QueryParameters; rowMode?: RowMode }, params?: QueryParameters): Promise<ODBCResult>
+  queryResult(sql: string | { sql: string; params?: QueryParameters; rowMode?: RowMode }, params: QueryParameters, callback: (err: Error | null, result: ODBCResult, outparams?: any) => void): void
+  queryStream(sql: string | { sql: string; params?: QueryParameters; rowMode?: RowMode }, params?: QueryParameters): any
   prepare(sql: string, callback: (err: Error | null, stmt: ODBCStatement) => void): void
   prepare(sql: string): Promise<ODBCStatement>
   beginTransaction(callback?: (err?: Error | null) => void): Promise<void> | void
@@ -176,7 +191,8 @@ export class CompatPool {
   constructor(config?: JsPoolConfig | IbmDbPoolOptions)
   connect(callback?: (err?: Error | null) => void): Promise<void> | void
   warmup(callback?: (err: Error | null, created?: number) => void): Promise<number> | void
-  query(sql: string, params?: QueryParameters): Promise<any>
+  query<M extends RowMode = 'object'>(sql: string, params?: QueryParameters | null, options?: QueryOptions<M> | null): Promise<QueryResult<M>>
+  query<M extends RowMode = 'object'>(sql: string, params: QueryParameters | null | undefined, options: QueryOptions<M> | null, callback: (err: Db2Error | null, result: QueryResult<M>) => void): void
   query(sql: string, callback: (err: Error | null, result: any) => void): void
   query(sql: string, params: QueryParameters, callback: (err: Error | null, result: any) => void): void
   acquire(): Promise<Client>

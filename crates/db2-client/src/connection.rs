@@ -6243,7 +6243,7 @@ pub(crate) fn build_sqldta(
     };
 
     if descriptors.len() != params.len() {
-        return Err(Error::Protocol(format!(
+        return Err(Error::ParameterCount(format!(
             "parameter descriptor count {} does not match parameter count {}",
             descriptors.len(),
             params.len()
@@ -6312,7 +6312,7 @@ fn build_sqldta_fdoca_prefix(
 
     let gda_len = 3 + descriptors.len() * 3;
     if gda_len > u8::MAX as usize {
-        return Err(Error::Other(format!(
+        return Err(Error::ParameterType(format!(
             "too many parameters for SQLDTA descriptor header: {}",
             descriptors.len()
         )));
@@ -6799,7 +6799,7 @@ fn infer_parameter_descriptors(
         .map(|(index, param)| {
             let db2_type = param.db2_type();
             if matches!(db2_type, db2_proto::types::Db2Type::Null) {
-                return Err(Error::Other(format!(
+                return Err(Error::ParameterType(format!(
                     "cannot infer protocol type for NULL parameter {} without input metadata",
                     index + 1
                 )));
@@ -6837,7 +6837,7 @@ fn build_sqldta_row_data(
             }
             data.push(INDICATOR_NOT_NULL);
         } else if value.is_null() {
-            return Err(Error::Other(format!(
+            return Err(Error::ParameterType(format!(
                 "parameter {} is NULL but the server reported a non-nullable input type",
                 index + 1
             )));
@@ -6858,12 +6858,12 @@ fn encode_parameter_value(
     let encoded = match &descriptor.db2_type {
         Db2Type::SmallInt => {
             let v = i16::try_from(expect_i64(value)?)
-                .map_err(|_| Error::Other("SMALLINT parameter out of range".into()))?;
+                .map_err(|_| Error::ParameterType("SMALLINT parameter out of range".into()))?;
             v.to_le_bytes().to_vec()
         }
         Db2Type::Integer => {
             let v = i32::try_from(expect_i64(value)?)
-                .map_err(|_| Error::Other("INTEGER parameter out of range".into()))?;
+                .map_err(|_| Error::ParameterType("INTEGER parameter out of range".into()))?;
             v.to_le_bytes().to_vec()
         }
         Db2Type::BigInt => expect_i64(value)?.to_le_bytes().to_vec(),
@@ -6880,11 +6880,13 @@ fn encode_parameter_value(
                     .map(|v| v.to_string())
                     .or_else(|| value.as_f64().map(|v| v.to_string()))
                     .ok_or_else(|| {
-                        Error::Other("DECIMAL parameters must be numeric or string values".into())
+                        Error::ParameterType(
+                            "DECIMAL parameters must be numeric or string values".into(),
+                        )
                     })?,
             };
             db2_proto::types::encode_packed_decimal(&decimal, *precision, *scale)
-                .map_err(Error::from)?
+                .map_err(|err| Error::ParameterType(format!("Protocol error: {err}")))?
         }
         Db2Type::DecFloat(digits) => {
             let decimal = match value {
@@ -6897,10 +6899,13 @@ fn encode_parameter_value(
                     .map(|v| v.to_string())
                     .or_else(|| value.as_f64().map(|v| v.to_string()))
                     .ok_or_else(|| {
-                        Error::Other("DECFLOAT parameters must be numeric or string values".into())
+                        Error::ParameterType(
+                            "DECFLOAT parameters must be numeric or string values".into(),
+                        )
                     })?,
             };
-            db2_proto::types::encode_decfloat(&decimal, *digits).map_err(Error::from)?
+            db2_proto::types::encode_decfloat(&decimal, *digits)
+                .map_err(|err| Error::ParameterType(format!("Protocol error: {err}")))?
         }
         Db2Type::Char(len) => encode_fixed_string(value, *len as usize, descriptor.ccsid)?,
         Db2Type::VarChar(_) | Db2Type::LongVarChar | Db2Type::Clob | Db2Type::Xml => {
@@ -6918,7 +6923,7 @@ fn encode_parameter_value(
         Db2Type::Timestamp => encode_timestamp(value, descriptor.ccsid)?,
         Db2Type::Boolean => u16::from(expect_bool(value)?).to_le_bytes().to_vec(),
         Db2Type::BlobLocator | Db2Type::ClobLocator | Db2Type::DbClobLocator | Db2Type::Null => {
-            return Err(Error::Other(format!(
+            return Err(Error::ParameterType(format!(
                 "unsupported parameter type for SQLDTA encoding: {:?}",
                 descriptor.db2_type
             )));
@@ -6936,7 +6941,7 @@ fn expect_i64(value: &db2_proto::types::Db2Value) -> Result<i64, Error> {
         _ => value.as_i64(),
     };
     parsed.ok_or_else(|| {
-        Error::Other(format!(
+        Error::ParameterType(format!(
             "expected integer-compatible parameter, got {:?}",
             value
         ))
@@ -6946,7 +6951,7 @@ fn expect_i64(value: &db2_proto::types::Db2Value) -> Result<i64, Error> {
 fn expect_f64(value: &db2_proto::types::Db2Value) -> Result<f64, Error> {
     value
         .as_f64()
-        .ok_or_else(|| Error::Other(format!("expected numeric parameter, got {:?}", value)))
+        .ok_or_else(|| Error::ParameterType(format!("expected numeric parameter, got {:?}", value)))
 }
 
 fn expect_bool(value: &db2_proto::types::Db2Value) -> Result<bool, Error> {
@@ -6955,7 +6960,18 @@ fn expect_bool(value: &db2_proto::types::Db2Value) -> Result<bool, Error> {
         db2_proto::types::Db2Value::SmallInt(v) => Ok(*v != 0),
         db2_proto::types::Db2Value::Integer(v) => Ok(*v != 0),
         db2_proto::types::Db2Value::BigInt(v) => Ok(*v != 0),
-        _ => Err(Error::Other(format!(
+        db2_proto::types::Db2Value::Char(text) | db2_proto::types::Db2Value::VarChar(text) => {
+            // Db2 ignores ASCII blanks and case, but not arbitrary whitespace.
+            match text.trim_matches(' ').to_ascii_lowercase().as_str() {
+                "t" | "true" | "y" | "yes" | "on" | "1" => Ok(true),
+                "f" | "false" | "n" | "no" | "off" | "0" => Ok(false),
+                _ => Err(Error::ParameterType(format!(
+                    "expected boolean-compatible parameter, got {:?}",
+                    value
+                ))),
+            }
+        }
+        _ => Err(Error::ParameterType(format!(
             "expected boolean-compatible parameter, got {:?}",
             value
         ))),
@@ -6969,7 +6985,7 @@ fn encode_exact_string(
 ) -> Result<Vec<u8>, Error> {
     let bytes = encode_text_bytes(value, ccsid)?;
     if bytes.len() != len {
-        return Err(Error::Other(format!(
+        return Err(Error::ParameterType(format!(
             "expected string length {} bytes, got {}",
             len,
             bytes.len()
@@ -6983,7 +6999,7 @@ fn encode_timestamp(value: &db2_proto::types::Db2Value, ccsid: u16) -> Result<Ve
     if matches!(bytes.len(), 26 | 29) {
         Ok(bytes)
     } else {
-        Err(Error::Other(format!(
+        Err(Error::ParameterType(format!(
             "expected timestamp length 26 or 29 bytes, got {}",
             bytes.len()
         )))
@@ -7007,7 +7023,9 @@ fn encode_fixed_string(
 fn encode_ld_string(value: &db2_proto::types::Db2Value, ccsid: u16) -> Result<Vec<u8>, Error> {
     let bytes = encode_text_bytes(value, ccsid)?;
     if bytes.len() > u16::MAX as usize {
-        return Err(Error::Other("string parameter too large for SQLDTA".into()));
+        return Err(Error::ParameterType(
+            "string parameter too large for SQLDTA".into(),
+        ));
     }
     let mut out = Vec::with_capacity(2 + bytes.len());
     out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
@@ -7036,7 +7054,7 @@ fn extract_text(value: &db2_proto::types::Db2Value) -> Result<&str, Error> {
         | db2_proto::types::Db2Value::Decimal(v)
         | db2_proto::types::Db2Value::RowId(v)
         | db2_proto::types::Db2Value::Xml(v) => Ok(v.as_str()),
-        _ => Err(Error::Other(format!(
+        _ => Err(Error::ParameterType(format!(
             "expected string-compatible parameter, got {:?}",
             value
         ))),
@@ -7075,7 +7093,7 @@ fn encode_ld_graphic(
         bytes.len()
     };
     if length > u16::MAX as usize {
-        return Err(Error::Other(
+        return Err(Error::ParameterType(
             "graphic string parameter too large for SQLDTA".into(),
         ));
     }
@@ -7113,7 +7131,9 @@ fn encode_fixed_binary(value: &db2_proto::types::Db2Value, len: usize) -> Result
 fn encode_ld_binary(value: &db2_proto::types::Db2Value) -> Result<Vec<u8>, Error> {
     let bytes = extract_binary(value)?;
     if bytes.len() > u16::MAX as usize {
-        return Err(Error::Other("binary parameter too large for SQLDTA".into()));
+        return Err(Error::ParameterType(
+            "binary parameter too large for SQLDTA".into(),
+        ));
     }
     let mut out = Vec::with_capacity(2 + bytes.len());
     out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
@@ -7126,7 +7146,7 @@ fn extract_binary(value: &db2_proto::types::Db2Value) -> Result<Vec<u8>, Error> 
         db2_proto::types::Db2Value::Binary(bytes) | db2_proto::types::Db2Value::Blob(bytes) => {
             Ok(bytes.clone())
         }
-        _ => Err(Error::Other(format!(
+        _ => Err(Error::ParameterType(format!(
             "expected binary-compatible parameter, got {:?}",
             value
         ))),
@@ -8330,6 +8350,45 @@ mod tests {
                 correlation_id,
             },
             payload,
+        }
+    }
+
+    #[test]
+    fn boolean_text_aliases_are_explicit_and_existing_integers_are_unchanged() {
+        use db2_proto::types::Db2Value;
+        for (expected, tokens) in [
+            (true, ["t", "true", "y", "yes", "on", "1"]),
+            (false, ["f", "false", "n", "no", "off", "0"]),
+        ] {
+            for token in tokens {
+                let text = format!(" {} ", token.to_ascii_uppercase());
+                assert_eq!(
+                    expect_bool(&Db2Value::VarChar(text.clone())).unwrap(),
+                    expected
+                );
+                assert_eq!(expect_bool(&Db2Value::Char(text)).unwrap(), expected);
+            }
+        }
+        for text in [
+            "",
+            "truth",
+            "falsehood",
+            "true false",
+            "\ttrue\t",
+            "\nfalse\n",
+            "2",
+        ] {
+            let err = expect_bool(&Db2Value::VarChar(text.into())).unwrap_err();
+            assert_eq!(err.driver_code(), Some("DB2_PARAMETER_TYPE"));
+        }
+        for (value, expected) in [
+            (Db2Value::Boolean(false), false),
+            (Db2Value::Boolean(true), true),
+            (Db2Value::SmallInt(0), false),
+            (Db2Value::Integer(-2), true),
+            (Db2Value::BigInt(i64::MAX), true),
+        ] {
+            assert_eq!(expect_bool(&value).unwrap(), expected);
         }
     }
 

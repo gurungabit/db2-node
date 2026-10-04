@@ -6,8 +6,9 @@ use std::time::Instant;
 
 use crate::js_connection::{JsClient, JsQueryResult};
 use crate::js_types::{
-    client_error_to_napi, config_from_js, emit_napi_diagnostics, js_params_to_db2,
-    push_elapsed_diagnostic, query_diagnostics_enabled, query_result_to_js, JsParameter,
+    client_error_to_js, config_from_js, emit_napi_diagnostics, js_params_to_db2,
+    push_elapsed_diagnostic, query_diagnostics_enabled, query_result_to_js, JsOutcome, JsParameter,
+    JsQueryOptions, RowMode,
 };
 
 #[napi(object)]
@@ -106,26 +107,39 @@ impl JsPool {
         })
     }
 
-    #[napi]
-    pub async fn connect(&self) -> Result<()> {
-        self.inner
-            .warmup_parallel()
-            .await
-            .map_err(client_error_to_napi)?;
-        Ok(())
+    #[napi(ts_return_type = "Promise<void>")]
+    pub async fn connect(&self) -> JsOutcome<()> {
+        JsOutcome(
+            async {
+                self.inner
+                    .warmup_parallel()
+                    .await
+                    .map_err(client_error_to_js)?;
+                Ok(())
+            }
+            .await,
+        )
     }
 
-    #[napi]
-    pub async fn warmup(&self) -> Result<u32> {
-        let created = self
-            .inner
-            .warmup_parallel()
-            .await
-            .map_err(client_error_to_napi)?;
-        Ok(created as u32)
+    #[napi(ts_return_type = "Promise<number>")]
+    pub async fn warmup(&self) -> JsOutcome<u32> {
+        JsOutcome(
+            async {
+                let created = self
+                    .inner
+                    .warmup_parallel()
+                    .await
+                    .map_err(client_error_to_js)?;
+                Ok(created as u32)
+            }
+            .await,
+        )
     }
 
-    #[napi]
+    #[napi(
+        ts_generic_types = "M extends import('./types').RowMode = 'object'",
+        ts_return_type = "Promise<import('./types').QueryResult<M>>"
+    )]
     pub async fn query(
         &self,
         sql: String,
@@ -133,153 +147,166 @@ impl JsPool {
             ts_arg_type = "Array<string | number | bigint | boolean | Date | null | Uint8Array | ArrayBuffer | number[]> | undefined | null"
         )]
         params: Option<Vec<JsParameter>>,
-    ) -> Result<JsQueryResult> {
-        let collect_diagnostics = query_diagnostics_enabled();
-        let total_started = collect_diagnostics.then(Instant::now);
-        let mut napi_diagnostics = Vec::new();
+        #[napi(ts_arg_type = "import('./types').QueryOptions<M> | undefined | null")]
+        options: Option<JsQueryOptions>,
+    ) -> JsOutcome<JsQueryResult> {
+        JsOutcome(
+            async {
+                let row_mode = RowMode::from_options(options)?;
+                let collect_diagnostics = query_diagnostics_enabled();
+                let total_started = collect_diagnostics.then(Instant::now);
+                let mut napi_diagnostics = Vec::new();
 
-        let params_started = collect_diagnostics.then(Instant::now);
-        let db2_params = match &params {
-            Some(p) => js_params_to_db2(p),
-            None => Vec::new(),
-        };
-        push_elapsed_diagnostic(&mut napi_diagnostics, "napi_pool_params_ms", params_started);
+                let params_started = collect_diagnostics.then(Instant::now);
+                let db2_params = match &params {
+                    Some(p) => js_params_to_db2(p),
+                    None => Vec::new(),
+                };
+                push_elapsed_diagnostic(&mut napi_diagnostics, "napi_pool_params_ms", params_started);
 
-        let refs_started = collect_diagnostics.then(Instant::now);
-        let param_refs: Vec<&dyn db2_client::ToSql> = db2_params
-            .iter()
-            .map(|p| p as &dyn db2_client::ToSql)
-            .collect();
-        push_elapsed_diagnostic(
-            &mut napi_diagnostics,
-            "napi_pool_param_refs_ms",
-            refs_started,
-        );
+                let refs_started = collect_diagnostics.then(Instant::now);
+                let param_refs: Vec<&dyn db2_client::ToSql> = db2_params
+                    .iter()
+                    .map(|p| p as &dyn db2_client::ToSql)
+                    .collect();
+                push_elapsed_diagnostic(
+                    &mut napi_diagnostics,
+                    "napi_pool_param_refs_ms",
+                    refs_started,
+                );
 
-        let acquire_state_before = if collect_diagnostics {
-            Some((
-                self.inner.idle_count().await,
-                self.inner.active_count().await,
-                self.inner.creating_count(),
-                self.inner.max_connections() as usize,
-            ))
-        } else {
-            None
-        };
-        let acquire_path = acquire_state_before
-            .as_ref()
-            .map(|(idle, active, creating, max)| {
-                pool_acquire_path(*idle, *active, *creating, *max)
-            });
-        let acquire_started = collect_diagnostics.then(Instant::now);
-        let client = match self.inner.acquire().await {
-            Ok(client) => client,
-            Err(err) => {
+                let acquire_state_before = if collect_diagnostics {
+                    Some((
+                        self.inner.idle_count().await,
+                        self.inner.active_count().await,
+                        self.inner.creating_count(),
+                        self.inner.max_connections() as usize,
+                    ))
+                } else {
+                    None
+                };
+                let acquire_path = acquire_state_before
+                    .as_ref()
+                    .map(|(idle, active, creating, max)| {
+                        pool_acquire_path(*idle, *active, *creating, *max)
+                    });
+                let acquire_started = collect_diagnostics.then(Instant::now);
+                let client = match self.inner.acquire().await {
+                    Ok(client) => client,
+                    Err(err) => {
+                        push_elapsed_diagnostic(
+                            &mut napi_diagnostics,
+                            "napi_pool_acquire_ms",
+                            acquire_started,
+                        );
+                        emit_napi_diagnostics(&napi_diagnostics);
+                        return Err(client_error_to_js(err));
+                    }
+                };
                 push_elapsed_diagnostic(
                     &mut napi_diagnostics,
                     "napi_pool_acquire_ms",
                     acquire_started,
                 );
+                if collect_diagnostics {
+                    napi_diagnostics.extend(client.take_connection_diagnostics().await);
+                }
+                if let Some((idle_before, active_before, creating_before, max_connections)) =
+                    acquire_state_before
+                {
+                    let idle_after = self.inner.idle_count().await;
+                    let active_after = self.inner.active_count().await;
+                    let creating_after = self.inner.creating_count();
+                    napi_diagnostics.push(format!(
+                        "napi_pool_acquire_state path={} idle_before={} active_before={} creating_before={} total_before={} idle_after={} active_after={} creating_after={} total_after={} max={}",
+                        acquire_path.unwrap_or("unknown"),
+                        idle_before,
+                        active_before,
+                        creating_before,
+                        idle_before + active_before,
+                        idle_after,
+                        active_after,
+                        creating_after,
+                        idle_after + active_after,
+                        max_connections
+                    ));
+                }
+
+                let query_started = collect_diagnostics.then(Instant::now);
+                let result = client.query(&sql, &param_refs).await;
+                push_elapsed_diagnostic(
+                    &mut napi_diagnostics,
+                    "napi_pool_client_query_ms",
+                    query_started,
+                );
+
+                let release_started = collect_diagnostics.then(Instant::now);
+                let release_outcome = self.inner.release_with_outcome(client).await;
+                push_elapsed_diagnostic(
+                    &mut napi_diagnostics,
+                    "napi_pool_release_ms",
+                    release_started,
+                );
+                let warmup_deferred = defer_background_warmup(&self.inner).await;
+                if collect_diagnostics && release_outcome.disconnected {
+                    let idle_after = self.inner.idle_count().await;
+                    let active_after = self.inner.active_count().await;
+                    let replacement_error = release_outcome
+                        .replacement_error
+                        .as_deref()
+                        .unwrap_or("none")
+                        .replace(' ', "_");
+                    napi_diagnostics.push(format!(
+                        "napi_pool_release_state disconnected=true replacement_created={} replacement_deferred={} replacement_error={} idle_after={} active_after={} total_after={}",
+                        release_outcome.replacement_created,
+                        warmup_deferred,
+                        replacement_error,
+                        idle_after,
+                        active_after,
+                        idle_after + active_after
+                    ));
+                } else if collect_diagnostics && warmup_deferred {
+                    napi_diagnostics.push("napi_pool_background_warmup_deferred=true".to_string());
+                }
+
+                let result = match result {
+                    Ok(result) => result,
+                    Err(err) => {
+                        emit_napi_diagnostics(&napi_diagnostics);
+                        return Err(client_error_to_js(err));
+                    }
+                };
+
+                let result_prepare_started = collect_diagnostics.then(Instant::now);
+                let mut js_result = query_result_to_js(result, row_mode);
+                push_elapsed_diagnostic(
+                    &mut napi_diagnostics,
+                    "napi_result_prepare_ms",
+                    result_prepare_started,
+                );
+                push_elapsed_diagnostic(
+                    &mut napi_diagnostics,
+                    "napi_pool_total_before_return_ms",
+                    total_started,
+                );
                 emit_napi_diagnostics(&napi_diagnostics);
-                return Err(client_error_to_napi(err));
+                js_result.diagnostics.extend(napi_diagnostics);
+
+                Ok(js_result)
             }
-        };
-        push_elapsed_diagnostic(
-            &mut napi_diagnostics,
-            "napi_pool_acquire_ms",
-            acquire_started,
-        );
-        if collect_diagnostics {
-            napi_diagnostics.extend(client.take_connection_diagnostics().await);
-        }
-        if let Some((idle_before, active_before, creating_before, max_connections)) =
-            acquire_state_before
-        {
-            let idle_after = self.inner.idle_count().await;
-            let active_after = self.inner.active_count().await;
-            let creating_after = self.inner.creating_count();
-            napi_diagnostics.push(format!(
-                "napi_pool_acquire_state path={} idle_before={} active_before={} creating_before={} total_before={} idle_after={} active_after={} creating_after={} total_after={} max={}",
-                acquire_path.unwrap_or("unknown"),
-                idle_before,
-                active_before,
-                creating_before,
-                idle_before + active_before,
-                idle_after,
-                active_after,
-                creating_after,
-                idle_after + active_after,
-                max_connections
-            ));
-        }
-
-        let query_started = collect_diagnostics.then(Instant::now);
-        let result = client.query(&sql, &param_refs).await;
-        push_elapsed_diagnostic(
-            &mut napi_diagnostics,
-            "napi_pool_client_query_ms",
-            query_started,
-        );
-
-        let release_started = collect_diagnostics.then(Instant::now);
-        let release_outcome = self.inner.release_with_outcome(client).await;
-        push_elapsed_diagnostic(
-            &mut napi_diagnostics,
-            "napi_pool_release_ms",
-            release_started,
-        );
-        let warmup_deferred = defer_background_warmup(&self.inner).await;
-        if collect_diagnostics && release_outcome.disconnected {
-            let idle_after = self.inner.idle_count().await;
-            let active_after = self.inner.active_count().await;
-            let replacement_error = release_outcome
-                .replacement_error
-                .as_deref()
-                .unwrap_or("none")
-                .replace(' ', "_");
-            napi_diagnostics.push(format!(
-                "napi_pool_release_state disconnected=true replacement_created={} replacement_deferred={} replacement_error={} idle_after={} active_after={} total_after={}",
-                release_outcome.replacement_created,
-                warmup_deferred,
-                replacement_error,
-                idle_after,
-                active_after,
-                idle_after + active_after
-            ));
-        } else if collect_diagnostics && warmup_deferred {
-            napi_diagnostics.push("napi_pool_background_warmup_deferred=true".to_string());
-        }
-
-        let result = match result {
-            Ok(result) => result,
-            Err(err) => {
-                emit_napi_diagnostics(&napi_diagnostics);
-                return Err(client_error_to_napi(err));
-            }
-        };
-
-        let result_prepare_started = collect_diagnostics.then(Instant::now);
-        let mut js_result = query_result_to_js(result);
-        push_elapsed_diagnostic(
-            &mut napi_diagnostics,
-            "napi_result_prepare_ms",
-            result_prepare_started,
-        );
-        push_elapsed_diagnostic(
-            &mut napi_diagnostics,
-            "napi_pool_total_before_return_ms",
-            total_started,
-        );
-        emit_napi_diagnostics(&napi_diagnostics);
-        js_result.diagnostics.extend(napi_diagnostics);
-
-        Ok(js_result)
+            .await,
+        )
     }
 
-    #[napi]
-    pub async fn acquire(&self) -> Result<JsClient> {
-        let client = self.inner.acquire().await.map_err(client_error_to_napi)?;
-        Ok(JsClient::from_inner(client, self.config.clone()))
+    #[napi(ts_return_type = "Promise<JsClient>")]
+    pub async fn acquire(&self) -> JsOutcome<JsClient> {
+        JsOutcome(
+            async {
+                let client = self.inner.acquire().await.map_err(client_error_to_js)?;
+                Ok(JsClient::from_inner(client, self.config.clone()))
+            }
+            .await,
+        )
     }
 
     #[napi]
@@ -292,10 +319,15 @@ impl JsPool {
         Ok(())
     }
 
-    #[napi]
-    pub async fn close(&self) -> Result<()> {
-        self.inner.close().await.map_err(client_error_to_napi)?;
-        Ok(())
+    #[napi(ts_return_type = "Promise<void>")]
+    pub async fn close(&self) -> JsOutcome<()> {
+        JsOutcome(
+            async {
+                self.inner.close().await.map_err(client_error_to_js)?;
+                Ok(())
+            }
+            .await,
+        )
     }
 
     #[napi(js_name = "idleCount")]

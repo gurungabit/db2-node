@@ -56,6 +56,12 @@ Encrypted authentication is the default and refuses plaintext fallback on non-TL
 
 Package-level usage and API details live in `crates/db2-napi/README.md`. The behavior changes and Docker verification for issues #11 and #12 are recorded in [tests/ISSUES-11-12.md](tests/ISSUES-11-12.md).
 
+For duplicate column names, pass `{ rowMode: 'array' }` as the final query or
+prepared-execution argument to receive positional rows. BOOLEAN targets accept
+explicit text aliases such as `'true'` and `'false'`. Client-side parameter and
+protocol errors expose a stable `driverCode`. See the [Node.js API documentation](crates/db2-napi/README.md)
+for signatures, types, and error classifications.
+
 ## Data Type Coverage
 
 The Rust protocol layer recognizes Db2 for z/OS built-in data families: numeric, decimal floating point, character, graphic, binary, `BLOB`, `CLOB`, `DBCLOB`, datetime, `ROWID`, `XML`, Boolean, nullable values, and distinct types through their source representation. Binary and BLOB results are returned as Node `Buffer`s; exact decimal values are returned as strings.
