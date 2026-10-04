@@ -118,11 +118,11 @@ impl PreparedStatement {
                     ddm.add_code_point(0x215D, &[0x01]); // QRYCLSIMP = 1
                     ddm.build()
                 };
-                let sqldta_data = build_sqldta(params, &self.param_descriptors)?;
+                let sqldta = build_sqldta(params, &self.param_descriptors)?;
 
                 let mut writer = DssWriter::new(corr_id);
                 writer.write_request_next_same_corr(&opnqry_data, true);
-                writer.write_object(&sqldta_data, false);
+                sqldta.write(&mut writer, false);
                 let send_buf = writer.finish();
                 if env::var_os("DB2_WIRE_DEBUG_HEX").is_some() {
                     eprintln!(
@@ -171,12 +171,12 @@ impl PreparedStatement {
                 } else {
                     db2_proto::commands::excsqlstt::build_excsqlstt_default(&pkgnamcsn)
                 };
-                let sqldta_data = build_sqldta(params, &self.param_descriptors)?;
+                let sqldta = build_sqldta(params, &self.param_descriptors)?;
                 let rdbcmm_data = db2_proto::commands::rdbcmm::build_rdbcmm();
 
                 let mut writer = DssWriter::new(corr_id);
                 writer.write_request_next_same_corr(&excsqlstt_data, true);
-                writer.write_object(&sqldta_data, guard.auto_commit);
+                sqldta.write(&mut writer, guard.auto_commit);
                 if guard.auto_commit {
                     writer.write_request(&rdbcmm_data, false);
                 }

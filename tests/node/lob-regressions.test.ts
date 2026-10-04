@@ -82,3 +82,62 @@ test('issue #20: 25-column rows retain DOUBLE, GRAPHIC and mixed large/NULL LOBs
     assert.deepEqual((await client.query('VALUES 1')).rows, [{ '1': 1 }]);
   } finally { await client.close(); }
 });
+
+test('issue #31: parameters bound to LOBs declared beyond 32767 bytes are written', { timeout: 120_000 }, async () => {
+  const client = new Client(getConfig());
+  await client.connect();
+  const table = uniqueTable(31);
+  const select = `SELECT ID, SMALL, BIG, BB, DB FROM ${table} ORDER BY ID`;
+  try {
+    await client.query(`CREATE TABLE ${table} (ID INTEGER NOT NULL PRIMARY KEY, SMALL CLOB(32767), BIG CLOB(32768), BB BLOB(1M), DB DBCLOB(32768))`);
+    try {
+      await client.query(`INSERT INTO ${table} (ID, SMALL, BIG) VALUES (1, 'old', 'old')`);
+      for (const [sql, params] of [
+        [`UPDATE ${table} SET SMALL = ? WHERE ID = 1`, ['new']],
+        [`UPDATE ${table} SET BIG = ? WHERE ID = 1`, ['new']],
+        [`UPDATE ${table} SET BB = ? WHERE ID = 1`, [Buffer.from([1, 2, 3])]],
+        [`UPDATE ${table} SET DB = ? WHERE ID = 1`, ['漢é\u{1D11E}']],
+      ] as const) {
+        assert.equal((await client.query(sql, [...params])).rowCount, 1, sql);
+      }
+      assert.deepEqual((await client.query(select)).rows, [
+        { ID: 1, SMALL: 'new', BIG: 'new', BB: Buffer.from([1, 2, 3]), DB: '漢é\u{1D11E}' },
+      ]);
+
+      assert.equal((await client.query(`UPDATE ${table} SET BB = CAST(? AS BLOB(1M)) WHERE ID = ?`, [Buffer.from([4, 5]), 1])).rowCount, 1);
+      assert.equal((await client.query(`UPDATE ${table} SET BIG = CAST(? AS VARCHAR(100)) WHERE ID = 1`, ['cast'])).rowCount, 1);
+      assert.deepEqual((await client.query(`SELECT BIG, BB FROM ${table} WHERE ID = 1`)).rows, [{ BIG: 'cast', BB: Buffer.from([4, 5]) }]);
+
+      // Boundary-sized and genuinely large values, several LOB parameters in
+      // one statement, followed by a non-LOB parameter.
+      const big = 'é'.repeat(16_384);
+      const blob = Buffer.from(Array.from({ length: 600_000 }, (_, index) => (index * 7) % 256));
+      const graphic = '漢\u{1D11E}'.repeat(10_000);
+      const update = `UPDATE ${table} SET SMALL = ?, BIG = ?, BB = ?, DB = ? WHERE ID = ?`;
+      assert.equal((await client.query(update, ['small', big, blob, graphic, 1])).rowCount, 1);
+      assert.deepEqual((await client.query(select)).rows, [{ ID: 1, SMALL: 'small', BIG: big, BB: blob, DB: graphic }]);
+      await assert.rejects(client.query(`UPDATE ${table} SET BIG = ? WHERE ID = 1`, [`${big}x`]), { sqlstate: '22001' });
+      assert.equal((await client.query(`SELECT LENGTH(BIG) AS L FROM ${table}`)).rows[0].L, 32_768);
+
+      const statement = await client.prepare(update);
+      try {
+        assert.equal((await statement.execute(['', '', Buffer.alloc(0), null, 1])).rowCount, 1);
+        assert.deepEqual((await client.query(select)).rows, [{ ID: 1, SMALL: '', BIG: '', BB: Buffer.alloc(0), DB: null }]);
+      } finally { await statement.close(); }
+
+      const insert = await client.prepare(`INSERT INTO ${table} (ID, BIG, BB, DB) VALUES (?, ?, ?, ?)`);
+      try {
+        assert.equal((await insert.executeBatch([[2, 'two', Buffer.from([2]), 'b'], [3, null, null, '']])).rowCount, 2);
+      } finally { await insert.close(); }
+      assert.deepEqual((await client.query(`SELECT ID, BIG, BB, DB FROM ${table} WHERE ID > 1 ORDER BY ID`)).rows, [
+        { ID: 2, BIG: 'two', BB: Buffer.from([2]), DB: 'b' },
+        { ID: 3, BIG: null, BB: null, DB: '' },
+      ]);
+
+      assert.deepEqual((await client.query(`SELECT ID FROM ${table} WHERE LENGTH(CAST(? AS CLOB(1M))) = ? ORDER BY ID`, [big, 32_768])).rows, [
+        { ID: 1 }, { ID: 2 }, { ID: 3 },
+      ]);
+    } finally { await client.query(`DROP TABLE ${table}`); }
+    assert.deepEqual((await client.query('VALUES 1')).rows, [{ '1': 1 }]);
+  } finally { await client.close(); }
+});

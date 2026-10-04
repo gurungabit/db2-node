@@ -73,6 +73,7 @@ pub const ENDQRYRM: u16 = 0x220B; // End of Query Reply Message
 pub const QRYNOPRM: u16 = 0x2202; // Query Not Open Reply Message
 pub const OPNQRYRM: u16 = 0x2205; // Open Query Complete Reply Message
 pub const DTAMCHRM: u16 = 0x220E; // Data Descriptor Mismatch Reply Message
+pub const DSCINVRM: u16 = 0x220A; // Invalid Description Reply Message
 pub const RDBUPDRM: u16 = 0x2218; // RDB Update Reply Message
 pub const SYNTAXRM: u16 = 0x124C; // Data Stream Syntax Error Reply Message
 pub const PRCCNVRM: u16 = 0x1245; // Conversational Protocol Error Reply Message

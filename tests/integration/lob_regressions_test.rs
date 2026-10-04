@@ -1,4 +1,4 @@
-//! Live regressions for GitHub issues #19 and #20 (Db2 LUW 11.5 and 12.1).
+//! Live regressions for GitHub issues #19, #20 and #31 (Db2 LUW 11.5 and 12.1).
 #[path = "../common/mod.rs"]
 mod common;
 use common::*;
@@ -194,5 +194,79 @@ async fn unicode_lobs_and_graphic_values_survive_single_row_direct_and_prepared_
     }
     let followup = client.query("VALUES 42", &[]).await.unwrap();
     assert_eq!(followup.rows[0].get_by_index::<i32>(0), Some(42));
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn lob_parameters_beyond_varying_descriptor_limit_are_written() {
+    use db2_proto::types::Db2Value::*;
+    let mut client = db2_client::Client::new(test_config());
+    client.connect().await.unwrap();
+    let table = unique_table(31);
+    client
+        .query(
+            &format!(
+                "CREATE TABLE {table} (ID INTEGER NOT NULL PRIMARY KEY, SMALL CLOB(32767), \
+                 BIG CLOB(32768), BB BLOB(1M), DB DBCLOB(32768))"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    let check = async {
+        client
+            .query(
+                &format!("INSERT INTO {table} (ID, SMALL, BIG) VALUES (1, 'old', 'old')"),
+                &[],
+            )
+            .await?;
+        // Exactly the declared 32768 bytes.
+        let big = "β".repeat(16_384);
+        let blob = (0..70_000).map(|index| index as u8).collect::<Vec<_>>();
+        let graphic = "漢\u{1D11E}".repeat(5_000);
+        let id = 1i32;
+        let update = format!("UPDATE {table} SET SMALL = ?, BIG = ?, BB = ?, DB = ? WHERE ID = ?");
+        let direct = client
+            .query(&update, &[&"small", &big, &blob, &graphic, &id])
+            .await?;
+        assert_eq!(direct.row_count, 1);
+        let select = format!("SELECT SMALL, BIG, BB, DB FROM {table} WHERE ID = 1");
+        let row = client.query(&select, &[]).await?.rows[0].values().to_vec();
+        assert_eq!(
+            row,
+            [Clob("small".into()), Clob(big), Blob(blob), Clob(graphic)]
+        );
+
+        let overflow = "β".repeat(16_385);
+        let err = client
+            .query(
+                &format!("UPDATE {table} SET BIG = ? WHERE ID = ?"),
+                &[&overflow, &id],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, db2_client::Error::Sql { sqlstate, .. } if sqlstate == "22001"),
+            "{err:?}"
+        );
+
+        let statement = client.prepare(&update).await?;
+        let empty: Vec<u8> = Vec::new();
+        let null_text: Option<&str> = None;
+        let prepared = statement
+            .execute(&[&"", &"", &empty, &null_text, &id])
+            .await?;
+        statement.close().await?;
+        assert_eq!(prepared.row_count, 1);
+        let row = client.query(&select, &[]).await?.rows[0].values().to_vec();
+        assert_eq!(row, [Clob("".into()), Clob("".into()), Blob(vec![]), Null]);
+        Ok::<_, db2_client::Error>(())
+    }
+    .await;
+    client
+        .query(&format!("DROP TABLE {table}"), &[])
+        .await
+        .unwrap();
+    check.unwrap();
     client.close().await.unwrap();
 }
