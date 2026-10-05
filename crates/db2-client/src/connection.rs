@@ -2464,8 +2464,9 @@ impl ClientInner {
         const PIPELINE_CHUNK: usize = 500;
 
         let mut total_row_count: i64 = 0;
+        let mut row_error = None;
 
-        for chunk in param_rows.chunks(PIPELINE_CHUNK) {
+        for (chunk_index, chunk) in param_rows.chunks(PIPELINE_CHUNK).enumerate() {
             let chunk_len = chunk.len();
             let mut send_buf = Vec::with_capacity(chunk_len * 100);
 
@@ -2485,7 +2486,9 @@ impl ClientInner {
 
             self.send_bytes(&send_buf).await?;
 
-            // Read reply frames until we've seen SQLCARD for each row in the chunk.
+            // Db2 executes every row in the chain, so read each row's SQLCARD
+            // before reporting the first failure; otherwise its replies would
+            // be read as the answer to the next request.
             let mut sqlcards_seen = 0;
             while sqlcards_seen < chunk_len {
                 let frames = self.read_reply_frames().await?;
@@ -2499,20 +2502,22 @@ impl ClientInner {
                                 let card = db2_proto::replies::sqlcard::parse_sqlcard(&obj)
                                     .map_err(|e| Error::Protocol(e.to_string()))?;
                                 if card.is_error() {
-                                    return Err(Error::Sql {
+                                    let row = chunk_index * PIPELINE_CHUNK + sqlcards_seen;
+                                    row_error.get_or_insert(Error::Sql {
                                         sqlstate: card.sqlstate,
                                         sqlcode: card.sqlcode,
                                         message: if card.sqlerrmc.is_empty() {
                                             format!(
                                                 "SQL error in batch row {}: SQLCODE={}",
-                                                sqlcards_seen, card.sqlcode
+                                                row, card.sqlcode
                                             )
                                         } else {
                                             card.sqlerrmc
                                         },
                                     });
+                                } else {
+                                    total_row_count += card.row_count() as i64;
                                 }
-                                total_row_count += card.row_count() as i64;
                                 sqlcards_seen += 1;
                             }
                             codepoints::RDBUPDRM | codepoints::ENDQRYRM => {}
@@ -2526,6 +2531,23 @@ impl ClientInner {
                     }
                 }
             }
+            if row_error.is_some() {
+                break;
+            }
+        }
+
+        // Under autocommit the batch is one unit: commit it once every row
+        // succeeded, or roll back the rows that did before reporting a failure.
+        if let Some(err) = row_error {
+            if self.auto_commit {
+                if let Err(rollback_err) = self.rollback().await {
+                    debug!("rollback after failed batch failed: {rollback_err}");
+                }
+            }
+            return Err(err);
+        }
+        if self.auto_commit {
+            self.commit().await?;
         }
 
         Ok(QueryResult {

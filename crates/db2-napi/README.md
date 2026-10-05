@@ -252,7 +252,8 @@ const stmt = await client.prepare('INSERT INTO logs (msg) VALUES (?)')
 await stmt.execute(['first message'])
 await stmt.execute(['second message'])
 
-// Batch insert (single round-trip for many rows)
+// Batch insert (single round-trip for many rows). Outside a transaction it
+// commits once all rows succeed; if any row fails, none are kept.
 await stmt.executeBatch([['row 1'], ['row 2'], ['row 3']])
 
 await stmt.close()  // always close when done
