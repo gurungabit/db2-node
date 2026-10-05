@@ -171,7 +171,7 @@ await client.query('INSERT INTO files (payload) VALUES (CAST(? AS BLOB(1M)))', [
 | `caCert` | `string` | — | Path to CA certificate PEM file |
 | `connectTimeout` | `number` | `30000` | Connection timeout in ms (covers TCP + TLS handshake) |
 | `queryTimeout` | `number` | `0` | Query execution timeout in ms (0 = no timeout); attempts LUW server cancellation before closing the connection |
-| `frameDrainTimeout` | `number` | `25` | Time in ms to wait for follow-up DRDA reply frames |
+| `frameDrainTimeout` | `number` | `25` | Db2 for z/OS only: time in ms to wait for follow-up DRDA reply frames. Other servers mark the end of each reply, so no wait is needed |
 | `currentSchema` | `string` | — | Default schema for unqualified table names |
 | `typeDefinitionName` | `string` | Server-dependent | LUW supports omitted or `'QTDSQLX86'`; other explicit values fail. z/OS supports `'QTDSQLASC'` (default), `'QTDSQL370'`, `'QTDSQLX86'`, `'QTDSQL400'`, or `'none'` |
 | `fetchSize` | `number` | `100` | Rows fetched per network round-trip |

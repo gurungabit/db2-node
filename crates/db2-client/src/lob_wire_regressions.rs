@@ -317,3 +317,71 @@ async fn lob_chain_uses_one_deadline_including_the_first_read() {
     server.abort();
     assert!(matches!(result, Err(Error::Timeout(_))), "{result:?}");
 }
+
+#[tokio::test]
+async fn luw_replies_complete_at_chain_end_without_drain_waits() {
+    let (stream, mut peer) = socket_pair().await;
+    // A drain wait anywhere would outlast the assertion below.
+    let client = Client::new(Config {
+        frame_drain_timeout: Duration::from_secs(5),
+        ..Config::default()
+    });
+    {
+        let mut inner = client.inner.lock().await;
+        inner.transport = Some(Transport::Tcp(stream));
+        inner.connected = true;
+        inner.server_info = Some(ServerInfo {
+            product_name: "QDB2/LINUXX8664".into(),
+            server_release: "SQL12010".into(),
+            server_class: "QDB2/LINUXX8664".into(),
+            manager_levels: Vec::new(),
+        });
+    }
+    let server = tokio::spawn(async move {
+        read_request(&mut peer).await; // PRPSQLSTT + SQLSTT
+        peer.write_all(&wire_bytes(frame(&[], false)))
+            .await
+            .unwrap();
+        read_request(&mut peer).await; // OPNQRY
+                                       // The reply chain spans two DSSes and two writes; only the
+                                       // unchained one ends it.
+        peer.write_all(&wire_bytes(frame(
+            &[(codepoints::QRYDSC, &[6, 0x76, 0xD0, 0x03, 0, 4])],
+            true,
+        )))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        peer.write_all(&wire_bytes(frame(
+            &[
+                (codepoints::QRYDTA, &[0xFF, 0, 0, 7, 0, 0, 0]),
+                (codepoints::ENDQRYRM, &[]),
+            ],
+            false,
+        )))
+        .await
+        .unwrap();
+        read_request(&mut peer).await; // EXCSQLIMM + SQLSTT + RDBCMM
+        peer.write_all(&wire_bytes(frame(&[(codepoints::RDBUPDRM, &[])], true)))
+            .await
+            .unwrap();
+        peer.write_all(&wire_bytes(frame(&[(codepoints::SQLCARD, &[0xFF])], false)))
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+
+    let started = Instant::now();
+    let rows = timeout(Duration::from_secs(2), client.query("VALUES 7", &[]))
+        .await
+        .expect("query waited for a frame drain")
+        .unwrap();
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(rows.rows[0].get_by_index::<i32>(0), Some(7));
+    timeout(Duration::from_secs(2), client.query("DELETE FROM T", &[]))
+        .await
+        .expect("execute waited for a frame drain")
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    server.abort();
+}
