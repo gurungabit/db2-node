@@ -379,6 +379,8 @@ executeBatch<M extends RowMode = 'object'>(paramRows: any[][], options?: QueryOp
 
 Executes the prepared statement as a batch with multiple rows of parameters. Each element of `paramRows` is an array of parameter values for one row. Uses a single network round-trip for efficiency.
 
+With autocommit (outside a transaction), the batch is one unit: it commits once every row succeeds, and if any row fails, no row of the batch is kept and the first error is thrown. Inside a transaction, the rows commit or roll back with the transaction.
+
 **Example**:
 ```typescript
 const stmt = await client.prepare('INSERT INTO items (name, qty) VALUES (?, ?)');

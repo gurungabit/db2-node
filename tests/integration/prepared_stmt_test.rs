@@ -354,3 +354,190 @@ async fn test_section_allocator_does_not_leak_across_many_cycles() {
 
     client.close().await.expect("close");
 }
+
+async fn count_rows(client: &db2_client::Client, table: &str) -> i64 {
+    client
+        .query(&format!("SELECT COUNT(*) AS N FROM {table}"), &[])
+        .await
+        .expect("count rows")
+        .rows[0]
+        .get::<i64>("N")
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn test_batch_commits_under_autocommit_and_rolls_back_on_failure() {
+    let client = connect().await;
+    let observer = connect().await;
+    let table = temp_table_name("pbatch");
+    drop_table(&client, &table).await;
+    client
+        .query(
+            &format!("CREATE TABLE {table} (id INTEGER NOT NULL PRIMARY KEY)"),
+            &[],
+        )
+        .await
+        .expect("create table");
+
+    let stmt = client
+        .prepare(&format!("INSERT INTO {table} VALUES (?)"))
+        .await
+        .expect("prepare insert");
+    let ids: Vec<i32> = (1..=600).collect();
+    let rows: Vec<Vec<&dyn db2_client::ToSql>> = ids
+        .iter()
+        .map(|id| vec![id as &dyn db2_client::ToSql])
+        .collect();
+    let result = stmt.execute_batch(&rows).await.expect("batch insert");
+    assert_eq!(result.row_count, 600);
+    // Another connection sees the rows only if the batch committed.
+    assert_eq!(count_rows(&observer, &table).await, 600);
+
+    // Row 550 (in the second pipeline chunk) duplicates an existing key.
+    let ids: Vec<i32> = (601..=1200)
+        .map(|id| if id == 1150 { 5 } else { id })
+        .collect();
+    let rows: Vec<Vec<&dyn db2_client::ToSql>> = ids
+        .iter()
+        .map(|id| vec![id as &dyn db2_client::ToSql])
+        .collect();
+    let err = stmt
+        .execute_batch(&rows)
+        .await
+        .expect_err("duplicate key fails the batch");
+    assert!(
+        matches!(&err, Error::Sql { sqlstate, .. } if sqlstate == "23505"),
+        "{err:?}"
+    );
+    // The whole batch rolled back, and the connection is still in sync.
+    assert_eq!(count_rows(&observer, &table).await, 600);
+    assert_eq!(count_rows(&client, &table).await, 600);
+    stmt.close().await.expect("close stmt");
+
+    drop_table(&client, &table).await;
+    observer.close().await.expect("close observer");
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn test_batch_in_transaction_commits_with_the_transaction() {
+    let client = connect().await;
+    let observer = connect().await;
+    let table = temp_table_name("ptxbatch");
+    drop_table(&client, &table).await;
+    client
+        .query(
+            &format!("CREATE TABLE {table} (id INTEGER NOT NULL PRIMARY KEY)"),
+            &[],
+        )
+        .await
+        .expect("create table");
+
+    let txn = client.begin_transaction().await.expect("begin");
+    let stmt = txn
+        .prepare(&format!("INSERT INTO {table} VALUES (?)"))
+        .await
+        .expect("prepare insert");
+    let ids = [1i32, 2, 3];
+    let rows: Vec<Vec<&dyn db2_client::ToSql>> = ids
+        .iter()
+        .map(|id| vec![id as &dyn db2_client::ToSql])
+        .collect();
+    assert_eq!(stmt.execute_batch(&rows).await.expect("batch").row_count, 3);
+    stmt.close().await.expect("close stmt");
+    // Uncommitted inserts are skipped by the other connection.
+    assert_eq!(count_rows(&observer, &table).await, 0);
+    txn.rollback().await.expect("rollback");
+    assert_eq!(count_rows(&client, &table).await, 0);
+
+    drop_table(&client, &table).await;
+    observer.close().await.expect("close observer");
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn test_statements_with_more_than_84_parameters() {
+    let client = connect().await;
+    // One FD:OCA group triplet holds 84 parameters; more continue in CPT triplets.
+    for count in [84usize, 85, 169, 300] {
+        let values: Vec<i32> = (1..=count as i32).collect();
+        let params: Vec<&dyn db2_client::ToSql> = values
+            .iter()
+            .map(|value| value as &dyn db2_client::ToSql)
+            .collect();
+        let sql = format!("VALUES {}", vec!["CAST(? AS INTEGER)"; count].join(" + "));
+        let direct = client.query(&sql, &params).await.expect("direct query");
+        let expected = (count * (count + 1) / 2) as i32;
+        assert_eq!(
+            direct.rows[0].get_by_index::<i32>(0),
+            Some(expected),
+            "{count}"
+        );
+        let stmt = client.prepare(&sql).await.expect("prepare");
+        let prepared = stmt.execute(&params).await.expect("prepared execute");
+        assert_eq!(
+            prepared.rows[0].get_by_index::<i32>(0),
+            Some(expected),
+            "{count}"
+        );
+        stmt.close().await.expect("close stmt");
+    }
+
+    // A 100-column insert whose 90th parameter is an externalized CLOB.
+    let table = temp_table_name("pwide");
+    drop_table(&client, &table).await;
+    let columns: Vec<String> = (1..=100)
+        .map(|index| {
+            if index == 90 {
+                format!("c{index} CLOB(1M)")
+            } else {
+                format!("c{index} INTEGER")
+            }
+        })
+        .collect();
+    client
+        .query(
+            &format!("CREATE TABLE {table} ({})", columns.join(", ")),
+            &[],
+        )
+        .await
+        .expect("create wide table");
+    let clob = "w".repeat(40_000);
+    let values: Vec<Db2Value> = (1..=100)
+        .map(|index| {
+            if index == 90 {
+                Db2Value::Clob(clob.clone())
+            } else {
+                Db2Value::Integer(index)
+            }
+        })
+        .collect();
+    let params: Vec<&dyn db2_client::ToSql> = values
+        .iter()
+        .map(|value| value as &dyn db2_client::ToSql)
+        .collect();
+    let insert = format!("INSERT INTO {table} VALUES ({})", vec!["?"; 100].join(", "));
+    assert_eq!(
+        client
+            .query(&insert, &params)
+            .await
+            .expect("insert")
+            .row_count,
+        1
+    );
+    let row = client
+        .query(
+            &format!("SELECT c89, LENGTH(c90) AS l90, c100 FROM {table}"),
+            &[],
+        )
+        .await
+        .expect("select")
+        .rows
+        .remove(0);
+    assert_eq!(row.get_by_index::<i32>(0), Some(89));
+    assert_eq!(row.get_by_index::<i32>(1), Some(40_000));
+    assert_eq!(row.get_by_index::<i32>(2), Some(100));
+
+    drop_table(&client, &table).await;
+    client.close().await.expect("close");
+}

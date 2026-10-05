@@ -685,13 +685,24 @@ impl ClientInner {
                     ));
                 }
                 let retry_auth_started = collect_diagnostics.then(Instant::now);
-                let result = auth::authenticate(
+                let result = match auth::authenticate(
                     &mut transport,
                     &self.config,
                     auth::AccsecRdbnamMode::LuwLegacy,
                     collect_diagnostics.then_some(&mut self.connection_diagnostics),
                 )
-                .await?;
+                .await
+                {
+                    Ok(result) => result,
+                    Err(Error::Connection(msg))
+                        if msg.to_lowercase().contains("closed by server") =>
+                    {
+                        return Err(Error::Connection(
+                            "RDB not accessed or database not found".into(),
+                        ));
+                    }
+                    Err(err) => return Err(err),
+                };
                 if let Some(started) = retry_auth_started {
                     self.connection_diagnostics.push(format!(
                         "db2_connect_retry_auth_ms={:.3}",
@@ -699,11 +710,6 @@ impl ClientInner {
                     ));
                 }
                 result
-            }
-            Err(Error::Connection(msg)) if msg.to_lowercase().contains("closed by server") => {
-                return Err(Error::Connection(
-                    "RDB not accessed or database not found".into(),
-                ));
             }
             Err(err) => return Err(err),
         };
@@ -788,7 +794,11 @@ impl ClientInner {
         match err {
             Error::Connection(msg) => {
                 let msg = msg.to_lowercase();
-                msg.contains("rdb not accessed") || msg.contains("database not found")
+                // Db2 12.1 rejects a trimmed RDBNAM and may close the socket
+                // before its RDBNFNRM reply is read.
+                msg.contains("rdb not accessed")
+                    || msg.contains("database not found")
+                    || msg.contains("closed by server")
             }
             Error::Protocol(msg) => msg.contains("Expected ACCSECRD, got 0x2211"),
             _ => false,
@@ -2454,8 +2464,9 @@ impl ClientInner {
         const PIPELINE_CHUNK: usize = 500;
 
         let mut total_row_count: i64 = 0;
+        let mut row_error = None;
 
-        for chunk in param_rows.chunks(PIPELINE_CHUNK) {
+        for (chunk_index, chunk) in param_rows.chunks(PIPELINE_CHUNK).enumerate() {
             let chunk_len = chunk.len();
             let mut send_buf = Vec::with_capacity(chunk_len * 100);
 
@@ -2475,7 +2486,9 @@ impl ClientInner {
 
             self.send_bytes(&send_buf).await?;
 
-            // Read reply frames until we've seen SQLCARD for each row in the chunk.
+            // Db2 executes every row in the chain, so read each row's SQLCARD
+            // before reporting the first failure; otherwise its replies would
+            // be read as the answer to the next request.
             let mut sqlcards_seen = 0;
             while sqlcards_seen < chunk_len {
                 let frames = self.read_reply_frames().await?;
@@ -2489,20 +2502,22 @@ impl ClientInner {
                                 let card = db2_proto::replies::sqlcard::parse_sqlcard(&obj)
                                     .map_err(|e| Error::Protocol(e.to_string()))?;
                                 if card.is_error() {
-                                    return Err(Error::Sql {
+                                    let row = chunk_index * PIPELINE_CHUNK + sqlcards_seen;
+                                    row_error.get_or_insert(Error::Sql {
                                         sqlstate: card.sqlstate,
                                         sqlcode: card.sqlcode,
                                         message: if card.sqlerrmc.is_empty() {
                                             format!(
                                                 "SQL error in batch row {}: SQLCODE={}",
-                                                sqlcards_seen, card.sqlcode
+                                                row, card.sqlcode
                                             )
                                         } else {
                                             card.sqlerrmc
                                         },
                                     });
+                                } else {
+                                    total_row_count += card.row_count() as i64;
                                 }
-                                total_row_count += card.row_count() as i64;
                                 sqlcards_seen += 1;
                             }
                             codepoints::RDBUPDRM | codepoints::ENDQRYRM => {}
@@ -2516,6 +2531,23 @@ impl ClientInner {
                     }
                 }
             }
+            if row_error.is_some() {
+                break;
+            }
+        }
+
+        // Under autocommit the batch is one unit: commit it once every row
+        // succeeded, or roll back the rows that did before reporting a failure.
+        if let Some(err) = row_error {
+            if self.auto_commit {
+                if let Err(rollback_err) = self.rollback().await {
+                    debug!("rollback after failed batch failed: {rollback_err}");
+                }
+            }
+            return Err(err);
+        }
+        if self.auto_commit {
+            self.commit().await?;
         }
 
         Ok(QueryResult {
@@ -6416,28 +6448,32 @@ fn build_sqldta_fdoca_prefix(
 ) -> Result<Vec<u8>, Error> {
     const FDODTA_HEADER_ID: u16 = 0x0010;
     const TRIPLET_TYPE_GDA: u8 = 0x76;
+    const TRIPLET_TYPE_CPT: u8 = 0x7F;
     const TRIPLET_TYPE_RLO: u8 = 0x71;
     const GDA_PREFIX: u8 = 0xD0;
     const RLO_BYTES: [u8; 4] = [0xE4, 0xD0, 0x00, 0x01];
+    // A one-byte triplet length holds 84 three-byte entries; longer groups
+    // continue in CPT triplets, as Db2 does in its own QRYDSC.
+    const MAX_ENTRIES_PER_TRIPLET: usize = 84;
 
-    let gda_len = 3 + descriptors.len() * 3;
-    if gda_len > u8::MAX as usize {
-        return Err(Error::ParameterType(format!(
-            "too many parameters for SQLDTA descriptor header: {}",
-            descriptors.len()
-        )));
+    let mut gda = Vec::with_capacity(descriptors.len() * 3 + 3);
+    for (index, chunk) in descriptors.chunks(MAX_ENTRIES_PER_TRIPLET).enumerate() {
+        gda.push((3 + chunk.len() * 3) as u8);
+        if index == 0 {
+            gda.extend_from_slice(&[TRIPLET_TYPE_GDA, GDA_PREFIX]);
+        } else {
+            gda.extend_from_slice(&[TRIPLET_TYPE_CPT, 0x00]);
+        }
+        for descriptor in chunk {
+            let length = descriptor
+                .extdta_reference_length
+                .map_or(descriptor.length, |width| 0x8000 | width);
+            gda.push(descriptor.drda_type);
+            gda.extend_from_slice(&length.to_be_bytes());
+        }
     }
-
-    let mut gda = Vec::with_capacity(gda_len);
-    gda.push(gda_len as u8);
-    gda.push(TRIPLET_TYPE_GDA);
-    gda.push(GDA_PREFIX);
-    for descriptor in descriptors {
-        let length = descriptor
-            .extdta_reference_length
-            .map_or(descriptor.length, |width| 0x8000 | width);
-        gda.push(descriptor.drda_type);
-        gda.extend_from_slice(&length.to_be_bytes());
+    if descriptors.is_empty() {
+        gda.extend_from_slice(&[3, TRIPLET_TYPE_GDA, GDA_PREFIX]);
     }
 
     let rlo = [
@@ -6449,6 +6485,12 @@ fn build_sqldta_fdoca_prefix(
         RLO_BYTES[3],
     ];
     let prefix_len = 4 + gda.len() + rlo.len();
+    if prefix_len > usize::from(u16::MAX) {
+        return Err(Error::ParameterType(format!(
+            "too many parameters for SQLDTA descriptor header: {}",
+            descriptors.len()
+        )));
+    }
 
     let mut prefix = Vec::with_capacity(prefix_len);
     prefix.extend_from_slice(&(prefix_len as u16).to_be_bytes());
@@ -8838,6 +8880,65 @@ mod tests {
                 .into_iter()
                 .collect::<Vec<_>>();
             assert_eq!(extdta, expected);
+        }
+    }
+
+    #[test]
+    fn trimmed_rdbnam_rejection_retries_even_when_the_socket_closes() {
+        for retryable in [
+            Error::Connection("RDB not accessed or database not found".into()),
+            Error::Connection("Connection closed by server".into()),
+            Error::Protocol("Expected ACCSECRD, got 0x2211".into()),
+        ] {
+            assert!(
+                ClientInner::should_retry_accsec_with_luw_legacy_handshake(&retryable),
+                "{retryable:?}"
+            );
+        }
+        for final_error in [
+            Error::Connection("Connection refused".into()),
+            Error::Auth("SECCHKRM: invalid password".into()),
+        ] {
+            assert!(
+                !ClientInner::should_retry_accsec_with_luw_legacy_handshake(&final_error),
+                "{final_error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sqldta_descriptors_beyond_84_parameters_continue_in_cpt_triplets() {
+        let integer = infer_parameter_descriptors(&[&1i32 as &dyn ToSql]).unwrap()[0].clone();
+        for count in [0usize, 1, 84, 85, 168, 169, 300] {
+            let prefix = build_sqldta_fdoca_prefix(&vec![integer.clone(); count]).unwrap();
+            assert_eq!(
+                usize::from(u16::from_be_bytes([prefix[0], prefix[1]])),
+                prefix.len()
+            );
+            assert_eq!(prefix[2..4], [0x00, 0x10]);
+            let mut offset = 4;
+            let mut entries = 0;
+            let mut headers = Vec::new();
+            while prefix[offset + 1] != 0x71 {
+                let len = usize::from(prefix[offset]);
+                headers.push((len, prefix[offset + 1], prefix[offset + 2]));
+                for entry in prefix[offset + 3..offset + len].chunks(3) {
+                    assert_eq!(entry, [integer.drda_type, 0x00, 0x04]);
+                    entries += 1;
+                }
+                offset += len;
+            }
+            assert_eq!(prefix[offset..], [0x06, 0x71, 0xE4, 0xD0, 0x00, 0x01]);
+            assert_eq!(entries, count);
+            // A GDA of up to 84 entries, then CPT triplets of up to 84 more.
+            let mut expected = vec![(3 + 3 * count.min(84), 0x76, 0xD0)];
+            let mut remaining = count.saturating_sub(84);
+            while remaining > 0 {
+                let chunk = remaining.min(84);
+                expected.push((3 + 3 * chunk, 0x7F, 0x00));
+                remaining -= chunk;
+            }
+            assert_eq!(headers, expected, "{count}");
         }
     }
 
