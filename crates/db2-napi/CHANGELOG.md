@@ -4,17 +4,14 @@ All notable changes to this package will be documented in this file.
 
 ## [1.0.26](https://github.com/gurungabit/db2-node/compare/v1.0.25...v1.0.26) (2026-10-05)
 
+db2-node 1.0.26 fixes LOB parameters that were silently not written and removes the fixed reply waits that dominated request latency on Db2 LUW.
 
-### Bug Fixes
+- Write parameters bound to CLOB, BLOB and DBCLOB columns declared larger than 32,767 bytes. They are now sent as DRDA LOB placeholders with EXTDTA, instead of oversized VARCHAR descriptors that Db2 LUW rejected while the statement reported `rowCount: 0`. Direct and prepared execution, batches, CALL, NULL and empty values are covered. A rejected descriptor (DSCINVRM) now raises an error instead of reporting success. (#31; PR #32)
+- Accept XML parameters larger than 32,767 bytes on Db2 LUW. (PR #32)
+- Pass `Buffer`, typed array and `ArrayBuffer` parameters to the native addon without per-byte conversion. A 50 MB BLOB write drops from about 3 s to under 0.5 s and no longer blocks the event loop. (PR #32)
+- Complete Db2 LUW replies at the end of the DRDA reply chain. The driver no longer waits `frameDrainTimeout` (25 ms) after each reply, or 250 ms before fetching results with LOB columns. On Db2 12.1, `VALUES 1` drops from about 30 ms to 0.5 ms and a LOB SELECT from about 285 ms to 1 ms. `frameDrainTimeout` now applies only to Db2 for z/OS. (PR #34)
 
-* send LUW LOB parameters beyond 32767 bytes as EXTDTA ([9a94ee4](https://github.com/gurungabit/db2-node/commit/9a94ee4425fa22c52407d47652c974551dfefbb6))
-
-
-### Performance Improvements
-
-* complete LUW replies at the DRDA chain end instead of timed drains ([7233a9e](https://github.com/gurungabit/db2-node/commit/7233a9e1be942817c99d6159afead2b22e5421f1))
-* complete LUW replies at the DRDA chain end instead of timed drains ([91d6927](https://github.com/gurungabit/db2-node/commit/91d6927b426ccbf1eb5790f770d81f75941699d6))
-* pass binary parameters to the addon without per-byte arrays ([37bae9a](https://github.com/gurungabit/db2-node/commit/37bae9a1eb78543a2e2f869a6195e6d1903681b6))
+Validation covers Db2 LUW 12.1 and 11.5, TLS on 12.1, and the full Rust and Node suites run through a DRDA protocol audit. No live z/OS server was available; z/OS keeps its existing reply handling.
 
 ## [1.0.25](https://github.com/gurungabit/db2-node/compare/v1.0.24...v1.0.25) (2026-10-04)
 
