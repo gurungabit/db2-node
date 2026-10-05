@@ -6448,28 +6448,32 @@ fn build_sqldta_fdoca_prefix(
 ) -> Result<Vec<u8>, Error> {
     const FDODTA_HEADER_ID: u16 = 0x0010;
     const TRIPLET_TYPE_GDA: u8 = 0x76;
+    const TRIPLET_TYPE_CPT: u8 = 0x7F;
     const TRIPLET_TYPE_RLO: u8 = 0x71;
     const GDA_PREFIX: u8 = 0xD0;
     const RLO_BYTES: [u8; 4] = [0xE4, 0xD0, 0x00, 0x01];
+    // A one-byte triplet length holds 84 three-byte entries; longer groups
+    // continue in CPT triplets, as Db2 does in its own QRYDSC.
+    const MAX_ENTRIES_PER_TRIPLET: usize = 84;
 
-    let gda_len = 3 + descriptors.len() * 3;
-    if gda_len > u8::MAX as usize {
-        return Err(Error::ParameterType(format!(
-            "too many parameters for SQLDTA descriptor header: {}",
-            descriptors.len()
-        )));
+    let mut gda = Vec::with_capacity(descriptors.len() * 3 + 3);
+    for (index, chunk) in descriptors.chunks(MAX_ENTRIES_PER_TRIPLET).enumerate() {
+        gda.push((3 + chunk.len() * 3) as u8);
+        if index == 0 {
+            gda.extend_from_slice(&[TRIPLET_TYPE_GDA, GDA_PREFIX]);
+        } else {
+            gda.extend_from_slice(&[TRIPLET_TYPE_CPT, 0x00]);
+        }
+        for descriptor in chunk {
+            let length = descriptor
+                .extdta_reference_length
+                .map_or(descriptor.length, |width| 0x8000 | width);
+            gda.push(descriptor.drda_type);
+            gda.extend_from_slice(&length.to_be_bytes());
+        }
     }
-
-    let mut gda = Vec::with_capacity(gda_len);
-    gda.push(gda_len as u8);
-    gda.push(TRIPLET_TYPE_GDA);
-    gda.push(GDA_PREFIX);
-    for descriptor in descriptors {
-        let length = descriptor
-            .extdta_reference_length
-            .map_or(descriptor.length, |width| 0x8000 | width);
-        gda.push(descriptor.drda_type);
-        gda.extend_from_slice(&length.to_be_bytes());
+    if descriptors.is_empty() {
+        gda.extend_from_slice(&[3, TRIPLET_TYPE_GDA, GDA_PREFIX]);
     }
 
     let rlo = [
@@ -6481,6 +6485,12 @@ fn build_sqldta_fdoca_prefix(
         RLO_BYTES[3],
     ];
     let prefix_len = 4 + gda.len() + rlo.len();
+    if prefix_len > usize::from(u16::MAX) {
+        return Err(Error::ParameterType(format!(
+            "too many parameters for SQLDTA descriptor header: {}",
+            descriptors.len()
+        )));
+    }
 
     let mut prefix = Vec::with_capacity(prefix_len);
     prefix.extend_from_slice(&(prefix_len as u16).to_be_bytes());
