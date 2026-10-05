@@ -6358,6 +6358,8 @@ pub(crate) fn build_sqldta(
 /// Describe LUW LOB inputs that exceed a varying-length descriptor as DRDA
 /// LOB placeholders, so their values are sent in EXTDTA after SQLDTA.
 /// Smaller LOB targets keep the VARCHAR/VARBINARY/VARGRAPHIC encoding.
+/// XML inputs declare no length, so they are always sent as LOBCMIXED
+/// text, which LUW parses into the XML target like a VARCHAR value.
 fn externalize_luw_lob_input_descriptors(
     descriptors: &mut [db2_proto::fdoca::ColumnDescriptor],
     server: Option<&ServerInfo>,
@@ -6368,12 +6370,14 @@ fn externalize_luw_lob_input_descriptors(
         return;
     }
     for descriptor in descriptors {
-        if descriptor.length <= MAX_VARYING_INPUT_LEN {
+        if descriptor.length <= MAX_VARYING_INPUT_LEN
+            && !matches!(descriptor.db2_type, Db2Type::Xml)
+        {
             continue;
         }
         let base = match descriptor.db2_type {
             Db2Type::Blob => db2_proto::types::DRDA_TYPE_BLOB,
-            Db2Type::Clob => DRDA_TYPE_CLOB_MIXED,
+            Db2Type::Clob | Db2Type::Xml => DRDA_TYPE_CLOB_MIXED,
             Db2Type::DbClob => db2_proto::types::DRDA_TYPE_DBCLOB,
             _ => continue,
         };
@@ -6947,6 +6951,12 @@ fn build_sqldta_row_data(
             let (bytes, length) = encode_lob_parameter_value(&value, descriptor)?;
             data.push(LUW_LOB_INPUT_EXTDTA_STATUS);
             data.extend_from_slice(&length.to_be_bytes());
+            // A zero-length value is complete in its placeholder. LUW pairs
+            // EXTDTA objects only with nonempty LOBs and rejects an empty
+            // object before a later LOB ("lob lengths don't match").
+            if bytes.is_empty() {
+                continue;
+            }
             // Like LOB result values, EXTDTA repeats the nullable indicator.
             let mut payload = Vec::with_capacity(1 + bytes.len());
             if descriptor.nullable {
@@ -6977,7 +6987,7 @@ fn encode_lob_parameter_value(
     let bytes = match descriptor.db2_type {
         Db2Type::Blob => extract_binary(value)?,
         // LOBCMIXED data uses the UTF-8 mixed-byte CCSID requested at ACCRDB.
-        Db2Type::Clob => extract_text(value)?.as_bytes().to_vec(),
+        Db2Type::Clob | Db2Type::Xml => extract_text(value)?.as_bytes().to_vec(),
         Db2Type::DbClob => encode_graphic_text_bytes(value)?,
         _ => {
             return Err(Error::ParameterType(format!(
@@ -8724,7 +8734,8 @@ mod tests {
         let id = 1i32;
         let null_clob: Option<&str> = None;
         let empty_blob: Vec<u8> = Vec::new();
-        let params: [&dyn ToSql; 7] = [&small, &clob, &blob, &dbclob, &id, &null_clob, &empty_blob];
+        // The empty BLOB precedes nonempty LOBs, which must not shift EXTDTA.
+        let params: [&dyn ToSql; 7] = [&small, &clob, &empty_blob, &dbclob, &id, &null_clob, &blob];
         let encoded = build_sqldta(&params, &descriptors).unwrap();
         let (triplets, fdodta) = split_sqldta(&encoded.sqldta);
         assert_eq!(
@@ -8743,12 +8754,12 @@ mod tests {
         let mut expected = vec![NULL_LID, 0x00, 0x00, 0x05];
         expected.extend_from_slice(b"small");
         expected.extend(lob_placeholder(2));
-        expected.extend(lob_placeholder(3));
+        expected.extend(lob_placeholder(0));
         // DBCLOB lengths count UTF-16 code units: d plus a surrogate pair.
         expected.extend(lob_placeholder(3));
         expected.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x00]);
         expected.push(NULL_DATA);
-        expected.extend(lob_placeholder(0));
+        expected.extend(lob_placeholder(3));
         assert_eq!(fdodta, expected);
 
         let extdta = encoded
@@ -8764,11 +8775,49 @@ mod tests {
             extdta,
             [
                 vec![0x00, 0xC3, 0xA9],
-                vec![0x00, 0x00, 0xFF, 0x07],
                 vec![0x00, 0x00, 0x64, 0xD8, 0x34, 0xDD, 0x1E],
-                vec![0x00],
+                vec![0x00, 0x00, 0xFF, 0x07],
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn luw_xml_inputs_always_use_placeholders_and_extdta() {
+        // XML has no declared input length, so values beyond 32767 bytes
+        // cannot fit a VARCHAR descriptor; LUW parses LOBCMIXED text instead.
+        let frames = vec![reply_frame(input_sqldard(&[(989, 0, 0), (497, 4, 0)]), 1)];
+        let client = Client::new(Config::default());
+        let inner = client.inner.lock().await;
+        let descriptors = inner.parse_input_descriptors(&frames).unwrap();
+        assert_eq!(descriptors[0].extdta_reference_length, Some(9));
+
+        let large = format!("<a>{}</a>", "é".repeat(20_000));
+        for (xml, id) in [(Some("<a/>"), 1i32), (Some(large.as_str()), 2), (None, 3)] {
+            let params: [&dyn ToSql; 2] = [&xml, &id];
+            let encoded = build_sqldta(&params, &descriptors).unwrap();
+            let (triplets, fdodta) = split_sqldta(&encoded.sqldta);
+            assert_eq!(triplets, [(0xCF, 0x8009), (0x03, 0x0004)]);
+
+            let mut expected = match xml {
+                Some(xml) => lob_placeholder(xml.len() as u64),
+                None => vec![NULL_DATA],
+            };
+            expected.insert(0, NULL_LID);
+            expected.push(INDICATOR_NOT_NULL);
+            expected.extend_from_slice(&id.to_le_bytes());
+            assert_eq!(fdodta, expected);
+
+            let extdta = encoded
+                .extdta
+                .iter()
+                .map(|object| ClientInner::parse_ddm(object).unwrap().data)
+                .collect::<Vec<_>>();
+            let expected = xml
+                .map(|xml| [&[0x00][..], xml.as_bytes()].concat())
+                .into_iter()
+                .collect::<Vec<_>>();
+            assert_eq!(extdta, expected);
+        }
     }
 
     #[test]

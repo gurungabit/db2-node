@@ -234,7 +234,12 @@ async fn lob_parameters_beyond_varying_descriptor_limit_are_written() {
         let row = client.query(&select, &[]).await?.rows[0].values().to_vec();
         assert_eq!(
             row,
-            [Clob("small".into()), Clob(big), Blob(blob), Clob(graphic)]
+            [
+                Clob("small".into()),
+                Clob(big),
+                Blob(blob),
+                Clob(graphic.clone())
+            ]
         );
 
         let overflow = "β".repeat(16_385);
@@ -260,6 +265,24 @@ async fn lob_parameters_beyond_varying_descriptor_limit_are_written() {
         assert_eq!(prepared.row_count, 1);
         let row = client.query(&select, &[]).await?.rows[0].values().to_vec();
         assert_eq!(row, [Clob("".into()), Clob("".into()), Blob(vec![]), Null]);
+
+        // Empty LOBs before a nonempty LOB send no EXTDTA of their own.
+        let statement = client.prepare(&update).await?;
+        let prepared = statement
+            .execute(&[&"s", &"", &empty, &graphic, &id])
+            .await?;
+        statement.close().await?;
+        assert_eq!(prepared.row_count, 1);
+        let row = client.query(&select, &[]).await?.rows[0].values().to_vec();
+        assert_eq!(
+            row,
+            [
+                Clob("s".into()),
+                Clob("".into()),
+                Blob(vec![]),
+                Clob(graphic)
+            ]
+        );
         Ok::<_, db2_client::Error>(())
     }
     .await;

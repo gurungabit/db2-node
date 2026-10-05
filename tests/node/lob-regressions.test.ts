@@ -141,3 +141,96 @@ test('issue #31: parameters bound to LOBs declared beyond 32767 bytes are writte
     assert.deepEqual((await client.query('VALUES 1')).rows, [{ '1': 1 }]);
   } finally { await client.close(); }
 });
+
+test('issue #31: empty LOB parameters do not shift later EXTDTA values', { timeout: 180_000 }, async () => {
+  const client = new Client(getConfig());
+  await client.connect();
+  const table = uniqueTable(31);
+  const routine = `${table}_P`;
+  const select = `SELECT ID, C, X, B, G FROM ${table} ORDER BY ID`;
+  let routineCreated = false;
+  try {
+    await client.query(`CREATE TABLE ${table} (ID INTEGER NOT NULL PRIMARY KEY, C CLOB(32768), X CLOB(2M), B BLOB(2M), G DBCLOB(1M))`);
+    try {
+      // Every empty/NULL/small/large order of the externalized columns;
+      // empty and NULL values must stay distinct.
+      const kinds = {
+        empty: ['', '', Buffer.alloc(0), ''],
+        null: [null, null, null, null],
+        small: ['é', 'x€\u{1D11E}', Buffer.from([0, 255, 1]), '漢\u{1D11E}'],
+        large: ['c'.repeat(32_768), 'x€'.repeat(20_000), Buffer.alloc(40_000, 3), '漢'.repeat(20_000)],
+      } as const;
+      const names = Object.keys(kinds) as (keyof typeof kinds)[];
+      const combinations = names.flatMap(c => names.flatMap(x => names.flatMap(b => names.map(g =>
+        [kinds[c][0], kinds[x][1], kinds[b][2], kinds[g][3]]))));
+      let rows = combinations.map((values, index) => [index + 1, ...values]);
+      const shift = (by: number) => rows.map(([id], index) => [id, ...combinations[(index + by) % combinations.length]]);
+
+      const insert = await client.prepare(`INSERT INTO ${table} VALUES (?, ?, ?, ?, ?)`);
+      try {
+        assert.equal((await insert.executeBatch(rows)).rowCount, rows.length);
+        // Reviewer shape: 10 rows of 33-60KB values with NULL and empty mixed in.
+        const mixed = Array.from({ length: 10 }, (_, i) => [
+          i + 1_000, i % 2 ? 'b' : null, i % 3 ? 'b€'.repeat(12_000) : null,
+          i % 4 ? Buffer.alloc(33_000 + i, i) : Buffer.alloc(0), i % 5 ? '漢'.repeat(20_000) : null,
+        ]);
+        assert.equal((await insert.executeBatch(mixed)).rowCount, mixed.length);
+        assert.deepEqual((await client.query(select, [], { rowMode: 'array' })).rows, [...rows, ...mixed]);
+        await client.query(`DELETE FROM ${table} WHERE ID >= 1000`);
+      } finally { await insert.close(); }
+
+      // Direct and prepared single executions alternate per row.
+      rows = shift(1);
+      const updateSql = `UPDATE ${table} SET C = ?, X = ?, B = ?, G = ? WHERE ID = ?`;
+      const update = await client.prepare(updateSql);
+      try {
+        for (const [index, [id, ...values]] of rows.entries()) {
+          const result = index % 2 ? await update.execute([...values, id]) : await client.query(updateSql, [...values, id]);
+          assert.equal(result.rowCount, 1);
+        }
+      } finally { await update.close(); }
+      assert.deepEqual((await client.query(select, [], { rowMode: 'array' })).rows, rows);
+
+      await client.query(`CREATE PROCEDURE ${routine} (IN P_ID INTEGER, IN P_C CLOB(32768), IN P_X CLOB(2M), IN P_B BLOB(2M), IN P_G DBCLOB(1M)) LANGUAGE SQL BEGIN UPDATE ${table} SET C = P_C, X = P_X, B = P_B, G = P_G WHERE ID = P_ID; END`);
+      routineCreated = true;
+      rows = shift(2);
+      for (const [id, ...values] of rows) {
+        await client.query(`CALL ${routine}(?, ?, ?, ?, ?)`, [id, ...values]);
+      }
+      assert.deepEqual((await client.query(select, [], { rowMode: 'array' })).rows, rows);
+    } finally {
+      if (routineCreated) await client.query(`DROP PROCEDURE ${routine}`);
+      await client.query(`DROP TABLE ${table}`);
+    }
+    assert.deepEqual((await client.query('VALUES 1')).rows, [{ '1': 1 }]);
+  } finally { await client.close(); }
+});
+
+test('issue #31: XML parameters beyond 32767 bytes are written', { timeout: 120_000 }, async () => {
+  const client = new Client(getConfig());
+  await client.connect();
+  const table = uniqueTable(31);
+  try {
+    await client.query(`CREATE TABLE ${table} (ID INTEGER NOT NULL PRIMARY KEY, X XML, C CLOB(1M))`);
+    try {
+      const small = '<a>é</a>';
+      const large = `<b>${'x€'.repeat(30_000)}</b>`;
+      const select = `SELECT ID, XMLSERIALIZE(X AS CLOB(1M)) AS X FROM ${table} ORDER BY ID`;
+      assert.equal((await client.query(`INSERT INTO ${table} (ID, X, C) VALUES (?, ?, ?)`, [1, large, 'c'.repeat(40_000)])).rowCount, 1);
+      assert.equal((await client.query(`UPDATE ${table} SET X = ? WHERE ID = ?`, [large.replace('b>', 'c>').replace('</b', '</c'), 1])).rowCount, 1);
+      const insert = await client.prepare(`INSERT INTO ${table} (ID, X) VALUES (?, ?)`);
+      try {
+        assert.equal((await insert.executeBatch([[2, small], [3, null], [4, large]])).rowCount, 3);
+      } finally { await insert.close(); }
+      assert.deepEqual((await client.query(select)).rows, [
+        { ID: 1, X: `<c>${'x€'.repeat(30_000)}</c>` },
+        { ID: 2, X: small },
+        { ID: 3, X: null },
+        { ID: 4, X: large },
+      ]);
+      assert.deepEqual((await client.query(`SELECT ID FROM ${table} WHERE XMLEXISTS('$d/b' PASSING CAST(? AS XML) AS "d") AND ID = ?`, [large, 4])).rows, [{ ID: 4 }]);
+      await assert.rejects(client.query(`UPDATE ${table} SET X = ? WHERE ID = 1`, ['<a>']), { sqlstate: '2200M' });
+    } finally { await client.query(`DROP TABLE ${table}`); }
+    assert.deepEqual((await client.query('VALUES 1')).rows, [{ '1': 1 }]);
+  } finally { await client.close(); }
+});
