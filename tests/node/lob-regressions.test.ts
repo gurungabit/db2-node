@@ -234,3 +234,34 @@ test('issue #31: XML parameters beyond 32767 bytes are written', { timeout: 120_
     assert.deepEqual((await client.query('VALUES 1')).rows, [{ '1': 1 }]);
   } finally { await client.close(); }
 });
+
+test('binary parameters pass byte views without per-byte conversion', { timeout: 120_000 }, async () => {
+  const client = new Client(getConfig());
+  await client.connect();
+  const table = uniqueTable(31);
+  try {
+    await client.query(`CREATE TABLE ${table} (ID INTEGER NOT NULL PRIMARY KEY, B BLOB(100M))`);
+    try {
+      const backing = Buffer.from([9, 1, 2, 3, 4, 9]);
+      const words = new Int16Array([0x0201, 0x0403]);
+      const large = Buffer.alloc(8 << 20);
+      for (let index = 0; index < large.length; index += 4096) large[index] = index >> 12;
+      const values: [unknown, Buffer][] = [
+        [backing.subarray(1, 5), Buffer.from([1, 2, 3, 4])],
+        [new Uint8Array(backing.buffer, backing.byteOffset + 2, 3), Buffer.from([2, 3, 4])],
+        [words, Buffer.from(words.buffer)],
+        [new DataView(backing.buffer, backing.byteOffset + 1, 2), Buffer.from([1, 2])],
+        [new Uint8Array([7, 8]).buffer, Buffer.from([7, 8])],
+        [[5, 6], Buffer.from([5, 6])],
+        [large, large],
+      ];
+      for (const [index, [value]] of values.entries()) {
+        assert.equal((await client.query(`INSERT INTO ${table} VALUES (?, ?)`, [index, value as Buffer])).rowCount, 1);
+      }
+      const rows = (await client.query(`SELECT B FROM ${table} ORDER BY ID`, [], { rowMode: 'array' })).rows;
+      assert.equal(rows.length, values.length);
+      for (const [index, [, expected]] of values.entries()) assert.ok(expected.equals(rows[index][0] as Buffer), `value ${index}`);
+      await assert.rejects(async () => client.query(`INSERT INTO ${table} VALUES (?, ?)`, [99, [1, 256] as unknown as Buffer]), /integer bytes/);
+    } finally { await client.query(`DROP TABLE ${table}`); }
+  } finally { await client.close(); }
+});

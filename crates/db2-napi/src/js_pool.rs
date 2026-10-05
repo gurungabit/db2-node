@@ -156,10 +156,7 @@ impl JsPool {
                 let mut napi_diagnostics = Vec::new();
 
                 let params_started = collect_diagnostics.then(Instant::now);
-                let db2_params = match &params {
-                    Some(p) => js_params_to_db2(p),
-                    None => Vec::new(),
-                };
+                let db2_params = params.map(js_params_to_db2).unwrap_or_default();
                 push_elapsed_diagnostic(&mut napi_diagnostics, "napi_pool_params_ms", params_started);
 
                 let refs_started = collect_diagnostics.then(Instant::now);

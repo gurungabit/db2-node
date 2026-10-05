@@ -623,7 +623,11 @@ fn env_truthy(name: &str) -> bool {
 }
 
 /// Convert parameters before napi's JSON decoder can panic on JavaScript BigInt.
-pub struct JsParameter(serde_json::Value);
+/// Binary values bypass JSON so a large Buffer is copied once, not per byte.
+pub enum JsParameter {
+    Json(serde_json::Value),
+    Bytes(Vec<u8>),
+}
 
 impl TypeName for JsParameter {
     fn type_name() -> &'static str {
@@ -661,21 +665,11 @@ impl FromNapiValue for JsParameter {
             }
             ValueType::Object if value.is_buffer()? => {
                 let buffer = unsafe { napi::bindgen_prelude::Buffer::from_napi_value(env, raw)? };
-                serde_json::Value::Array(
-                    buffer
-                        .iter()
-                        .map(|byte| serde_json::Value::from(*byte))
-                        .collect(),
-                )
+                return Ok(Self::Bytes(buffer.to_vec()));
             }
             ValueType::Object if value.is_typedarray()? => {
                 let bytes = napi::bindgen_prelude::Uint8Array::from_napi_value(env, raw)?;
-                serde_json::Value::Array(
-                    bytes
-                        .iter()
-                        .map(|byte| serde_json::Value::from(*byte))
-                        .collect(),
-                )
+                return Ok(Self::Bytes(bytes.to_vec()));
             }
             ValueType::Object
                 if {
@@ -697,12 +691,7 @@ impl FromNapiValue for JsParameter {
                 } else {
                     std::slice::from_raw_parts(data.cast::<u8>(), length)
                 };
-                serde_json::Value::Array(
-                    bytes
-                        .iter()
-                        .map(|byte| serde_json::Value::from(*byte))
-                        .collect(),
-                )
+                return Ok(Self::Bytes(bytes.to_vec()));
             }
             ValueType::Object if value.is_array()? => {
                 let object = value.coerce_to_object()?;
@@ -722,9 +711,9 @@ impl FromNapiValue for JsParameter {
                             "Array parameters must contain only integer bytes (0..255)",
                         ));
                     }
-                    bytes.push(serde_json::Value::from(byte as u8));
+                    bytes.push(byte as u8);
                 }
-                serde_json::Value::Array(bytes)
+                return Ok(Self::Bytes(bytes));
             }
             ValueType::Object => {
                 return Err(parameter_error(
@@ -743,23 +732,26 @@ impl FromNapiValue for JsParameter {
             ValueType::String | ValueType::Boolean => serde_json::Value::from_napi_value(env, raw)?,
             _ => return Err(parameter_error(env, "Unsupported parameter type")),
         };
-        Ok(Self(json))
+        Ok(Self::Json(json))
     }
 }
 
-pub fn js_params_to_db2(params: &[JsParameter]) -> Vec<db2_proto::types::Db2Value> {
+pub fn js_params_to_db2(params: Vec<JsParameter>) -> Vec<db2_proto::types::Db2Value> {
     params
-        .iter()
-        .map(|param| json_to_db2_value(&param.0))
+        .into_iter()
+        .map(|param| match param {
+            JsParameter::Json(value) => json_to_db2_value(value),
+            JsParameter::Bytes(bytes) => db2_proto::types::Db2Value::Binary(bytes),
+        })
         .collect()
 }
 
 /// Convert a single JSON value to a Db2Value.
-fn json_to_db2_value(val: &serde_json::Value) -> db2_proto::types::Db2Value {
+fn json_to_db2_value(val: serde_json::Value) -> db2_proto::types::Db2Value {
     use db2_proto::types::Db2Value;
     match val {
         serde_json::Value::Null => Db2Value::Null,
-        serde_json::Value::Bool(b) => Db2Value::Boolean(*b),
+        serde_json::Value::Bool(b) => Db2Value::Boolean(b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
@@ -773,7 +765,7 @@ fn json_to_db2_value(val: &serde_json::Value) -> db2_proto::types::Db2Value {
                 Db2Value::Null
             }
         }
-        serde_json::Value::String(s) => Db2Value::VarChar(s.clone()),
+        serde_json::Value::String(s) => Db2Value::VarChar(s),
         serde_json::Value::Array(arr) => {
             // Treat arrays of numbers as binary data
             let bytes: Vec<u8> = arr
@@ -782,9 +774,9 @@ fn json_to_db2_value(val: &serde_json::Value) -> db2_proto::types::Db2Value {
                 .collect();
             Db2Value::Binary(bytes)
         }
-        serde_json::Value::Object(obj) => buffer_like_object_to_bytes(obj)
+        serde_json::Value::Object(obj) => buffer_like_object_to_bytes(&obj)
             .map(Db2Value::Binary)
-            .unwrap_or_else(|| Db2Value::VarChar(val.to_string())),
+            .unwrap_or_else(|| Db2Value::VarChar(serde_json::Value::Object(obj).to_string())),
     }
 }
 
@@ -1052,7 +1044,7 @@ mod tests {
             "data": [0, 1, 127, 255]
         });
         assert_eq!(
-            json_to_db2_value(&node_buffer_json),
+            json_to_db2_value(node_buffer_json),
             db2_proto::types::Db2Value::Binary(vec![0, 1, 127, 255])
         );
 
@@ -1063,7 +1055,7 @@ mod tests {
             "3": 239
         });
         assert_eq!(
-            json_to_db2_value(&indexed_object),
+            json_to_db2_value(indexed_object),
             db2_proto::types::Db2Value::Binary(vec![222, 173, 190, 239])
         );
     }

@@ -43,10 +43,7 @@ impl JsPreparedStatement {
                     .as_mut()
                     .ok_or_else(|| napi::Error::from_reason("PreparedStatement is closed"))?;
 
-                let db2_params = match &params {
-                    Some(p) => js_params_to_db2(p),
-                    None => Vec::new(),
-                };
+                let db2_params = params.map(js_params_to_db2).unwrap_or_default();
 
                 let param_refs: Vec<&dyn db2_client::ToSql> = db2_params
                     .iter()
@@ -86,7 +83,7 @@ impl JsPreparedStatement {
 
                 // Convert all rows from JSON to Db2Value
                 let db2_rows: Vec<Vec<db2_proto::types::Db2Value>> =
-                    param_rows.iter().map(|row| js_params_to_db2(row)).collect();
+                    param_rows.into_iter().map(js_params_to_db2).collect();
 
                 // Build references for each row
                 let param_ref_rows: Vec<Vec<&dyn db2_client::ToSql>> = db2_rows
