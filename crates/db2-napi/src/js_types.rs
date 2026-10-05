@@ -622,6 +622,9 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// JavaScript's Number.MAX_SAFE_INTEGER: the largest exactly representable integer.
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
 /// Convert parameters before napi's JSON decoder can panic on JavaScript BigInt.
 /// Binary values bypass JSON so a large Buffer is copied once, not per byte.
 pub enum JsParameter {
@@ -721,14 +724,23 @@ impl FromNapiValue for JsParameter {
                     "Unsupported object parameter; use Date, Buffer, or a byte array",
                 ));
             }
-            ValueType::Number => serde_json::Value::from_napi_value(env, raw).map_err(|error| {
-                JsFailure {
-                    error,
-                    driver_code: Some("DB2_PARAMETER_TYPE"),
+            ValueType::Number => {
+                // napi keeps only u32-sized integers integral; carry every safe
+                // integer as one so BIGINT targets accept values above 2^32.
+                let number = value.coerce_to_number()?.get_double()?;
+                if number.fract() == 0.0 && number.abs() <= MAX_SAFE_INTEGER {
+                    serde_json::Value::from(number as i64)
+                } else {
+                    serde_json::Value::from_napi_value(env, raw).map_err(|error| {
+                        JsFailure {
+                            error,
+                            driver_code: Some("DB2_PARAMETER_TYPE"),
+                        }
+                        .into_napi_error(env)
+                        .unwrap_or_else(|error| error)
+                    })?
                 }
-                .into_napi_error(env)
-                .unwrap_or_else(|error| error)
-            })?,
+            }
             ValueType::String | ValueType::Boolean => serde_json::Value::from_napi_value(env, raw)?,
             _ => return Err(parameter_error(env, "Unsupported parameter type")),
         };
