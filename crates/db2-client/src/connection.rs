@@ -685,13 +685,24 @@ impl ClientInner {
                     ));
                 }
                 let retry_auth_started = collect_diagnostics.then(Instant::now);
-                let result = auth::authenticate(
+                let result = match auth::authenticate(
                     &mut transport,
                     &self.config,
                     auth::AccsecRdbnamMode::LuwLegacy,
                     collect_diagnostics.then_some(&mut self.connection_diagnostics),
                 )
-                .await?;
+                .await
+                {
+                    Ok(result) => result,
+                    Err(Error::Connection(msg))
+                        if msg.to_lowercase().contains("closed by server") =>
+                    {
+                        return Err(Error::Connection(
+                            "RDB not accessed or database not found".into(),
+                        ));
+                    }
+                    Err(err) => return Err(err),
+                };
                 if let Some(started) = retry_auth_started {
                     self.connection_diagnostics.push(format!(
                         "db2_connect_retry_auth_ms={:.3}",
@@ -699,11 +710,6 @@ impl ClientInner {
                     ));
                 }
                 result
-            }
-            Err(Error::Connection(msg)) if msg.to_lowercase().contains("closed by server") => {
-                return Err(Error::Connection(
-                    "RDB not accessed or database not found".into(),
-                ));
             }
             Err(err) => return Err(err),
         };
@@ -788,7 +794,11 @@ impl ClientInner {
         match err {
             Error::Connection(msg) => {
                 let msg = msg.to_lowercase();
-                msg.contains("rdb not accessed") || msg.contains("database not found")
+                // Db2 12.1 rejects a trimmed RDBNAM and may close the socket
+                // before its RDBNFNRM reply is read.
+                msg.contains("rdb not accessed")
+                    || msg.contains("database not found")
+                    || msg.contains("closed by server")
             }
             Error::Protocol(msg) => msg.contains("Expected ACCSECRD, got 0x2211"),
             _ => false,
