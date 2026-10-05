@@ -24,7 +24,7 @@ interface ConnectionConfig {
   caCert?: string;                // path to CA certificate PEM file
   connectTimeout?: number;        // ms, default: 30000 (covers TCP + TLS)
   queryTimeout?: number;          // ms, default: 0 (no timeout)
-  frameDrainTimeout?: number;     // ms, default: 25
+  frameDrainTimeout?: number;     // ms, default: 25 (Db2 for z/OS only)
   currentSchema?: string;
   typeDefinitionName?: 'QTDSQLASC' | 'QTDSQL370' | 'QTDSQLX86' | 'QTDSQL400' | 'none';
   fetchSize?: number;             // rows per fetch, default: 100

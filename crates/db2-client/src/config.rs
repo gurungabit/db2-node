@@ -17,6 +17,8 @@ pub struct Config {
     pub ssl_config: Option<SslConfig>,
     pub connect_timeout: Duration,
     pub query_timeout: Duration,
+    /// Db2 for z/OS only: how long to wait for follow-up reply frames. Other
+    /// servers end each reply chain explicitly, so replies complete without it.
     pub frame_drain_timeout: Duration,
     pub fetch_size: u32,
     pub current_schema: Option<String>,

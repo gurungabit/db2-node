@@ -396,7 +396,7 @@ impl DssReader {
         let payload_start = self.position + DSS_HEADER_LEN;
         let payload_end = self.position + seg_len;
         let mut payload = self.buffer[payload_start..payload_end].to_vec();
-        let first_header = header.clone();
+        let mut first_header = header.clone();
         self.position += seg_len;
 
         if raw_length == 0xFFFF {
@@ -495,6 +495,8 @@ impl DssReader {
             }
             payload.extend_from_slice(cont_payload);
             self.position += cont_len;
+            // The last merged segment says whether the reply chain continues.
+            first_header.flags.chained = peek.flags.chained;
         }
 
         Ok(Some(DssFrame {
@@ -715,6 +717,22 @@ mod tests {
             );
             assert_eq!(reader.remaining(), 0, "split {split}");
         }
+    }
+
+    #[test]
+    fn test_reader_merged_segments_report_last_chain_flag() {
+        // A raw same-correlation continuation is merged into the frame before
+        // it; its cleared chain bit is what ends the reply chain.
+        let mut qrydta = vec![0x00, 0x40, 0x24, 0x1B];
+        qrydta.resize(32, 0x11);
+        let tail = [0xFF, 0xFF, 0x00, 0x50, 0x22, 0x22, 0x22, 0x22];
+        let mut writer = DssWriter::new(3);
+        writer.write_dss_full(DssType::Object, true, true, &qrydta);
+        writer.write_dss_full(DssType::Object, false, true, &tail);
+        let frames = DssReader::new(writer.finish()).read_all_frames().unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].payload, [&qrydta[..], &tail[..]].concat());
+        assert!(!frames[0].header.flags.chained);
     }
 
     #[test]

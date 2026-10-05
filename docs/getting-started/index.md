@@ -51,7 +51,7 @@ await client.connect();
 | `caCert` | `string` | — | Path to CA certificate PEM file |
 | `connectTimeout` | `number` | `30000` | Connection timeout in ms (TCP + TLS) |
 | `queryTimeout` | `number` | `0` | Query timeout in ms (0 = no timeout) |
-| `frameDrainTimeout` | `number` | `25` | DRDA reply frame drain timeout in ms |
+| `frameDrainTimeout` | `number` | `25` | DRDA reply frame drain timeout in ms (Db2 for z/OS only) |
 | `currentSchema` | `string` | — | Default schema |
 | `fetchSize` | `number` | `100` | Rows per fetch batch |
 

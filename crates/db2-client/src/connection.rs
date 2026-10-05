@@ -250,12 +250,33 @@ impl ClientInner {
     }
 
     /// Read all available DSS frames (at least 1).
+    ///
+    /// Off z/OS this reads through the end of the reply chain: DRDA clears the
+    /// chain bit on the last reply DSS, and the server sends nothing more until
+    /// the next request. z/OS keeps the timed drains below.
     pub async fn read_reply_frames(&mut self) -> Result<Vec<DssFrame>, Error> {
-        self.read_frames(1).await
+        let mut frames = self.read_frames(1).await?;
+        if self.reply_chain_end_is_reliable() {
+            while !reply_chain_complete(&frames) {
+                frames.extend(self.read_frames(1).await?);
+            }
+        }
+        Ok(frames)
+    }
+
+    /// Whether `read_reply_frames` returns whole reply chains, so speculative
+    /// drains for follow-up frames would only wait out their timeout.
+    fn reply_chain_end_is_reliable(&self) -> bool {
+        self.server_info
+            .as_ref()
+            .is_some_and(|server| !is_db2_zos_server(server))
     }
 
     pub(crate) async fn read_prepare_reply_frames(&mut self) -> Result<Vec<DssFrame>, Error> {
         let mut frames = self.read_reply_frames().await?;
+        if self.reply_chain_end_is_reliable() {
+            return Ok(frames);
+        }
         let frame_drain_timeout = self.frame_drain_timeout();
 
         loop {
@@ -448,6 +469,9 @@ impl ClientInner {
     /// Read an execute reply and drain any chained commit frames that arrive immediately after.
     async fn read_execute_reply_frames(&mut self) -> Result<Vec<DssFrame>, Error> {
         let mut frames = self.read_reply_frames().await?;
+        if self.reply_chain_end_is_reliable() {
+            return Ok(frames);
+        }
         let frame_drain_timeout = self.frame_drain_timeout();
 
         loop {
@@ -2516,19 +2540,7 @@ impl ClientInner {
         let send_buf = writer.finish();
         self.send_bytes(&send_buf).await?;
 
-        let mut frames = self.read_reply_frames().await?;
-        let frame_drain_timeout = self.frame_drain_timeout();
-        loop {
-            let more_frames = match timeout(frame_drain_timeout, self.read_reply_frames()).await {
-                Ok(Ok(frames)) => frames,
-                Ok(Err(err)) => return Err(err),
-                Err(_) => break,
-            };
-            if more_frames.is_empty() {
-                break;
-            }
-            frames.extend(more_frames);
-        }
+        let frames = self.read_prepare_reply_frames().await?;
         if debug_hex_enabled() {
             for (frame_index, frame) in frames.iter().enumerate() {
                 let cps: Vec<String> = Self::parse_ddm_objects(&frame.payload)
@@ -3195,7 +3207,9 @@ impl ClientInner {
             return false;
         }
 
-        true
+        // The OPNQRY reply chain, including any extra QRYDTA blocks, was
+        // already read in full; nothing more arrives before CNTQRY.
+        !self.reply_chain_end_is_reliable()
     }
 
     /// Process reply frames from an execute (non-query) statement.
@@ -4959,6 +4973,13 @@ pub(crate) fn zos_native_lob_cntqry_rowset(fetch_size: u32) -> u32 {
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or_else(|| u64::from(fetch_size.clamp(1, 32_767)))
         .clamp(1, 32_767) as u32
+}
+
+/// DRDA clears the chain bit on the last DSS of a reply chain.
+fn reply_chain_complete(frames: &[DssFrame]) -> bool {
+    frames
+        .last()
+        .is_some_and(|frame| !frame.header.flags.chained)
 }
 
 fn zos_lob_frame_drain_timeout() -> Duration {
