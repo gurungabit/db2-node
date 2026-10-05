@@ -8884,6 +8884,65 @@ mod tests {
     }
 
     #[test]
+    fn trimmed_rdbnam_rejection_retries_even_when_the_socket_closes() {
+        for retryable in [
+            Error::Connection("RDB not accessed or database not found".into()),
+            Error::Connection("Connection closed by server".into()),
+            Error::Protocol("Expected ACCSECRD, got 0x2211".into()),
+        ] {
+            assert!(
+                ClientInner::should_retry_accsec_with_luw_legacy_handshake(&retryable),
+                "{retryable:?}"
+            );
+        }
+        for final_error in [
+            Error::Connection("Connection refused".into()),
+            Error::Auth("SECCHKRM: invalid password".into()),
+        ] {
+            assert!(
+                !ClientInner::should_retry_accsec_with_luw_legacy_handshake(&final_error),
+                "{final_error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sqldta_descriptors_beyond_84_parameters_continue_in_cpt_triplets() {
+        let integer = infer_parameter_descriptors(&[&1i32 as &dyn ToSql]).unwrap()[0].clone();
+        for count in [0usize, 1, 84, 85, 168, 169, 300] {
+            let prefix = build_sqldta_fdoca_prefix(&vec![integer.clone(); count]).unwrap();
+            assert_eq!(
+                usize::from(u16::from_be_bytes([prefix[0], prefix[1]])),
+                prefix.len()
+            );
+            assert_eq!(prefix[2..4], [0x00, 0x10]);
+            let mut offset = 4;
+            let mut entries = 0;
+            let mut headers = Vec::new();
+            while prefix[offset + 1] != 0x71 {
+                let len = usize::from(prefix[offset]);
+                headers.push((len, prefix[offset + 1], prefix[offset + 2]));
+                for entry in prefix[offset + 3..offset + len].chunks(3) {
+                    assert_eq!(entry, [integer.drda_type, 0x00, 0x04]);
+                    entries += 1;
+                }
+                offset += len;
+            }
+            assert_eq!(prefix[offset..], [0x06, 0x71, 0xE4, 0xD0, 0x00, 0x01]);
+            assert_eq!(entries, count);
+            // A GDA of up to 84 entries, then CPT triplets of up to 84 more.
+            let mut expected = vec![(3 + 3 * count.min(84), 0x76, 0xD0)];
+            let mut remaining = count.saturating_sub(84);
+            while remaining > 0 {
+                let chunk = remaining.min(84);
+                expected.push((3 + 3 * chunk, 0x7F, 0x00));
+                remaining -= chunk;
+            }
+            assert_eq!(headers, expected, "{count}");
+        }
+    }
+
+    #[test]
     fn zos_lob_input_descriptors_are_not_externalized() {
         let descriptor = db2_proto::fdoca::ColumnDescriptor {
             column_index: 0,
