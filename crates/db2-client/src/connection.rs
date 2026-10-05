@@ -1261,7 +1261,7 @@ impl ClientInner {
             }
 
             input_descriptors = self.describe_input(&pkgnamcsn).await?;
-            let sqldta_data = build_sqldta(params, &input_descriptors)?;
+            let sqldta = build_sqldta(params, &input_descriptors)?;
             let corr_id = self.next_correlation_id();
             let opnqry_data = {
                 let mut ddm = db2_proto::ddm::DdmBuilder::new(codepoints::OPNQRY);
@@ -1275,7 +1275,7 @@ impl ClientInner {
 
             let mut writer = DssWriter::new(corr_id);
             writer.write_request_next_same_corr(&opnqry_data, true);
-            writer.write_object(&sqldta_data, false);
+            sqldta.write(&mut writer, false);
             let send_buf = writer.finish();
             self.send_bytes(&send_buf).await?;
 
@@ -2263,7 +2263,7 @@ impl ClientInner {
             writer.write_request(&command, false);
         } else {
             writer.write_request_next_same_corr(&command, true);
-            writer.write_object(&build_sqldta(params, descriptors)?, false);
+            build_sqldta(params, descriptors)?.write(&mut writer, false);
         }
         self.send_bytes(&writer.finish()).await?;
         let frames = self.read_reply_frames().await?;
@@ -2382,12 +2382,12 @@ impl ClientInner {
         } else {
             db2_proto::commands::excsqlstt::build_excsqlstt_default(pkgnamcsn)
         };
-        let sqldta_data = build_sqldta(params, descriptors)?;
+        let sqldta = build_sqldta(params, descriptors)?;
         let rdbcmm_data = db2_proto::commands::rdbcmm::build_rdbcmm();
 
         let mut writer = DssWriter::new(corr_id);
         writer.write_request_next_same_corr(&excsqlstt_data, true);
-        writer.write_object(&sqldta_data, self.auto_commit);
+        sqldta.write(&mut writer, self.auto_commit);
         if self.auto_commit {
             writer.write_request(&rdbcmm_data, false);
         }
@@ -2441,11 +2441,11 @@ impl ClientInner {
 
                 let excsqlstt_data =
                     db2_proto::commands::excsqlstt::build_excsqlstt_default(pkgnamcsn);
-                let sqldta_data = build_sqldta(row, descriptors)?;
+                let sqldta = build_sqldta(row, descriptors)?;
 
                 let mut writer = DssWriter::new(corr_id);
                 writer.write_request_next_same_corr(&excsqlstt_data, true);
-                writer.write_object(&sqldta_data, !is_last);
+                sqldta.write(&mut writer, !is_last);
                 send_buf.extend_from_slice(&writer.finish());
             }
 
@@ -3367,7 +3367,12 @@ impl ClientInner {
                                 format_hex_preview(&obj.data, 160)
                             );
                         }
-                        descriptors.extend(parse_input_sqldard_descriptors(&obj));
+                        let mut parsed = parse_input_sqldard_descriptors(&obj);
+                        externalize_luw_lob_input_descriptors(
+                            &mut parsed,
+                            self.server_info.as_ref(),
+                        );
+                        descriptors.extend(parsed);
                     }
                     codepoints::SQLCARD => {
                         let card = db2_proto::replies::sqlcard::parse_sqlcard(&obj)
@@ -6245,10 +6250,42 @@ fn quote_sql_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// FD:OCA varying-length descriptors carry a 15-bit maximum; a set high bit
+/// declares a LOB placeholder instead, which LUW rejects with DSCINVRM when
+/// sent as VARCHAR/VARBINARY/VARGRAPHIC.
+const MAX_VARYING_INPUT_LEN: u16 = 0x7FFF;
+/// LUW LOB placeholder: a status byte and an eight-byte big-endian length,
+/// the same reference shape LUW returns for LOB result columns.
+const LUW_LOB_INPUT_PLACEHOLDER_LEN: u16 = 9;
+/// Placeholder status for a value that follows in an EXTDTA object.
+const LUW_LOB_INPUT_EXTDTA_STATUS: u8 = 0x02;
+
+/// Encoded SQLDTA plus the EXTDTA objects for its externalized LOB values.
+#[derive(Debug)]
+pub(crate) struct SqlDta {
+    pub(crate) sqldta: Vec<u8>,
+    pub(crate) extdta: Vec<Vec<u8>>,
+}
+
+impl SqlDta {
+    /// Write SQLDTA and its EXTDTA objects as one same-correlation chain.
+    pub(crate) fn write(&self, writer: &mut DssWriter, chained: bool) {
+        let Some((last, leading)) = self.extdta.split_last() else {
+            writer.write_object(&self.sqldta, chained);
+            return;
+        };
+        writer.write_object_same_corr(&self.sqldta, true);
+        for extdta in leading {
+            writer.write_object_same_corr(extdta, true);
+        }
+        writer.write_object(last, chained);
+    }
+}
+
 pub(crate) fn build_sqldta(
     params: &[&dyn ToSql],
     descriptors: &[db2_proto::fdoca::ColumnDescriptor],
-) -> Result<Vec<u8>, Error> {
+) -> Result<SqlDta, Error> {
     let descriptors = if descriptors.is_empty() {
         infer_parameter_descriptors(params)?
     } else {
@@ -6267,6 +6304,9 @@ pub(crate) fn build_sqldta(
         .iter()
         .zip(descriptors)
         .map(|(param, mut descriptor)| {
+            if descriptor.extdta_reference_length.is_some() {
+                return descriptor;
+            }
             let value = param.to_db2_value();
             if matches!(
                 value,
@@ -6298,20 +6338,56 @@ pub(crate) fn build_sqldta(
 
     let mut builder = db2_proto::ddm::DdmBuilder::new(codepoints::SQLDTA);
     builder.add_raw(&build_sqldta_fdoca_prefix(&descriptors)?);
-    let data = build_sqldta_row_data(params, &descriptors)?;
+    let (data, extdta) = build_sqldta_row_data(params, &descriptors)?;
     let mut inner = db2_proto::ddm::DdmBuilder::new(codepoints::FDODTA);
     inner.add_raw(&data);
     builder.add_raw(&inner.build());
     let sqldta = builder.build();
     if debug_hex_enabled() {
         eprintln!(
-            "[db2-wire] built SQLDTA with {} descriptor(s), total={} bytes, preview={}",
+            "[db2-wire] built SQLDTA with {} descriptor(s), total={} bytes, extdta={:?}, preview={}",
             descriptors.len(),
             sqldta.len(),
+            extdta.iter().map(Vec::len).collect::<Vec<_>>(),
             format_hex_preview(&sqldta, 128)
         );
     }
-    Ok(sqldta)
+    Ok(SqlDta { sqldta, extdta })
+}
+
+/// Describe LUW LOB inputs that exceed a varying-length descriptor as DRDA
+/// LOB placeholders, so their values are sent in EXTDTA after SQLDTA.
+/// Smaller LOB targets keep the VARCHAR/VARBINARY/VARGRAPHIC encoding.
+/// XML inputs declare no length, so they are always sent as LOBCMIXED
+/// text, which LUW parses into the XML target like a VARCHAR value.
+fn externalize_luw_lob_input_descriptors(
+    descriptors: &mut [db2_proto::fdoca::ColumnDescriptor],
+    server: Option<&ServerInfo>,
+) {
+    use db2_proto::types::Db2Type;
+
+    if server.is_some_and(is_db2_zos_server) {
+        return;
+    }
+    for descriptor in descriptors {
+        if descriptor.length <= MAX_VARYING_INPUT_LEN
+            && !matches!(descriptor.db2_type, Db2Type::Xml)
+        {
+            continue;
+        }
+        let base = match descriptor.db2_type {
+            Db2Type::Blob => db2_proto::types::DRDA_TYPE_BLOB,
+            Db2Type::Clob | Db2Type::Xml => DRDA_TYPE_CLOB_MIXED,
+            Db2Type::DbClob => db2_proto::types::DRDA_TYPE_DBCLOB,
+            _ => continue,
+        };
+        descriptor.drda_type = if descriptor.nullable {
+            base | 0x01
+        } else {
+            base
+        };
+        descriptor.extdta_reference_length = Some(LUW_LOB_INPUT_PLACEHOLDER_LEN);
+    }
 }
 
 fn build_sqldta_fdoca_prefix(
@@ -6336,8 +6412,11 @@ fn build_sqldta_fdoca_prefix(
     gda.push(TRIPLET_TYPE_GDA);
     gda.push(GDA_PREFIX);
     for descriptor in descriptors {
+        let length = descriptor
+            .extdta_reference_length
+            .map_or(descriptor.length, |width| 0x8000 | width);
         gda.push(descriptor.drda_type);
-        gda.extend_from_slice(&descriptor.length.to_be_bytes());
+        gda.extend_from_slice(&length.to_be_bytes());
     }
 
     let rlo = [
@@ -6630,6 +6709,8 @@ fn looks_like_zos_input_descriptor_start(data: &[u8]) -> bool {
         && matches!(ccsid, 0 | 37 | 500 | 819 | 1200 | 1208)
 }
 
+/// DRDA LOBCMIXED: CLOB data in the negotiated mixed-byte CCSID.
+const DRDA_TYPE_CLOB_MIXED: u8 = 0xCE;
 const NULL_LID: u8 = 0x00;
 const NULL_DATA: u8 = 0xFF;
 const INDICATOR_NOT_NULL: u8 = 0x00;
@@ -6846,8 +6927,9 @@ fn infer_parameter_descriptors(
 fn build_sqldta_row_data(
     params: &[&dyn ToSql],
     descriptors: &[db2_proto::fdoca::ColumnDescriptor],
-) -> Result<Vec<u8>, Error> {
+) -> Result<(Vec<u8>, Vec<Vec<u8>>), Error> {
     let mut data = Vec::with_capacity(1 + params.len() * 8);
+    let mut extdta = Vec::new();
     data.push(NULL_LID);
 
     for (index, (param, descriptor)) in params.iter().zip(descriptors.iter()).enumerate() {
@@ -6865,10 +6947,64 @@ fn build_sqldta_row_data(
             )));
         }
 
+        if descriptor.extdta_reference_length.is_some() {
+            let (bytes, length) = encode_lob_parameter_value(&value, descriptor)?;
+            data.push(LUW_LOB_INPUT_EXTDTA_STATUS);
+            data.extend_from_slice(&length.to_be_bytes());
+            // A zero-length value is complete in its placeholder. LUW pairs
+            // EXTDTA objects only with nonempty LOBs and rejects an empty
+            // object before a later LOB ("lob lengths don't match").
+            if bytes.is_empty() {
+                continue;
+            }
+            // Like LOB result values, EXTDTA repeats the nullable indicator.
+            let mut payload = Vec::with_capacity(1 + bytes.len());
+            if descriptor.nullable {
+                payload.push(INDICATOR_NOT_NULL);
+            }
+            payload.extend_from_slice(&bytes);
+            extdta.push(
+                db2_proto::ddm::DdmBuilder::new(codepoints::EXTDTA)
+                    .add_raw(&payload)
+                    .build(),
+            );
+            continue;
+        }
+
         data.extend_from_slice(&encode_parameter_value(&value, descriptor)?);
     }
 
-    Ok(data)
+    Ok((data, extdta))
+}
+
+/// Encode an externalized LOB value and the length its placeholder declares.
+fn encode_lob_parameter_value(
+    value: &db2_proto::types::Db2Value,
+    descriptor: &db2_proto::fdoca::ColumnDescriptor,
+) -> Result<(Vec<u8>, u64), Error> {
+    use db2_proto::types::Db2Type;
+
+    let bytes = match descriptor.db2_type {
+        Db2Type::Blob => extract_binary(value)?,
+        // LOBCMIXED data uses the UTF-8 mixed-byte CCSID requested at ACCRDB.
+        Db2Type::Clob | Db2Type::Xml => extract_text(value)?.as_bytes().to_vec(),
+        Db2Type::DbClob => encode_graphic_text_bytes(value)?,
+        _ => {
+            return Err(Error::ParameterType(format!(
+                "unsupported LOB parameter type: {:?}",
+                descriptor.db2_type
+            )))
+        }
+    };
+    // DBCLOB lengths count UTF-16 code units, as for LUW VARGRAPHIC input.
+    let length = if matches!(descriptor.db2_type, Db2Type::DbClob)
+        && graphic_length_is_character_count(descriptor)
+    {
+        bytes.len() / 2
+    } else {
+        bytes.len()
+    };
+    Ok((bytes, length as u64))
 }
 
 fn encode_parameter_value(
@@ -7691,6 +7827,7 @@ fn frames_have_data_or_terminal_reply(frames: &[DssFrame]) -> bool {
                             | codepoints::PRMNSPRM
                             | codepoints::VALNSPRM
                             | codepoints::DTAMCHRM
+                            | codepoints::DSCINVRM
                             | codepoints::QRYNOPRM
                     )
                 })
@@ -7715,6 +7852,7 @@ fn frames_have_query_data_or_query_end_reply(frames: &[DssFrame]) -> bool {
                             | codepoints::PRMNSPRM
                             | codepoints::VALNSPRM
                             | codepoints::DTAMCHRM
+                            | codepoints::DSCINVRM
                             | codepoints::QRYNOPRM
                     )
                 })
@@ -7975,6 +8113,7 @@ fn ddm_codepoint_name(code_point: u16) -> String {
         codepoints::ENDQRYRM => "ENDQRYRM",
         codepoints::QRYNOPRM => "QRYNOPRM",
         codepoints::DTAMCHRM => "DTAMCHRM",
+        codepoints::DSCINVRM => "DSCINVRM",
         codepoints::RDBUPDRM => "RDBUPDRM",
         codepoints::SQLERRRM => "SQLERRRM",
         codepoints::SYNTAXRM => "SYNTAXRM",
@@ -8017,6 +8156,7 @@ fn reply_codepoint_name(code_point: u16) -> Option<&'static str> {
         codepoints::SQLERRRM => Some("SQLERRRM"),
         codepoints::CMDCHKRM => Some("CMDCHKRM"),
         codepoints::DTAMCHRM => Some("DTAMCHRM"),
+        codepoints::DSCINVRM => Some("DSCINVRM"),
         codepoints::QRYNOPRM => Some("QRYNOPRM"),
         codepoints::OBJNSPRM => Some("OBJNSPRM"),
         codepoints::RDBNACRM => Some("RDBNACRM"),
@@ -8540,6 +8680,267 @@ mod tests {
         assert_eq!(descriptors[3].db2_type, db2_proto::types::Db2Type::BigInt);
     }
 
+    fn split_sqldta(sqldta: &[u8]) -> (Vec<(u8, u16)>, Vec<u8>) {
+        let obj = ClientInner::parse_ddm(sqldta).unwrap();
+        assert_eq!(obj.code_point, codepoints::SQLDTA);
+        let prefix_len = usize::from(u16::from_be_bytes([obj.data[0], obj.data[1]]));
+        let gda_len = usize::from(obj.data[4]);
+        let triplets = obj.data[7..4 + gda_len]
+            .chunks(3)
+            .map(|item| (item[0], u16::from_be_bytes([item[1], item[2]])))
+            .collect();
+        let fdodta = ClientInner::parse_ddm(&obj.data[prefix_len..]).unwrap();
+        assert_eq!(fdodta.code_point, codepoints::FDODTA);
+        (triplets, fdodta.data)
+    }
+
+    fn lob_placeholder(length: u64) -> Vec<u8> {
+        let mut placeholder = vec![0x00, LUW_LOB_INPUT_EXTDTA_STATUS];
+        placeholder.extend_from_slice(&length.to_be_bytes());
+        placeholder
+    }
+
+    #[tokio::test]
+    async fn luw_lob_inputs_beyond_varying_limit_use_placeholders_and_extdta() {
+        // Issue #31: LUW rejects VARCHAR/VARBINARY/VARGRAPHIC descriptors
+        // above 0x7FFF with DSCINVRM, so these inputs must be externalized.
+        let frames = vec![reply_frame(
+            input_sqldard(&[
+                (409, 32767, 1208),
+                (409, 32768, 1208),
+                (405, 1 << 20, 0),
+                (413, 32768, 1200),
+                (497, 4, 0),
+                (409, 1 << 20, 1208),
+                (405, 32768, 0),
+            ]),
+            1,
+        )];
+        let client = Client::new(Config::default());
+        let inner = client.inner.lock().await;
+        let descriptors = inner.parse_input_descriptors(&frames).unwrap();
+        assert_eq!(
+            descriptors
+                .iter()
+                .map(|descriptor| descriptor.extdta_reference_length)
+                .collect::<Vec<_>>(),
+            [None, Some(9), Some(9), Some(9), None, Some(9), Some(9)]
+        );
+
+        let small = "small";
+        let clob = "é";
+        let blob = vec![0x00, 0xFF, 0x07];
+        let dbclob = "d\u{1D11E}";
+        let id = 1i32;
+        let null_clob: Option<&str> = None;
+        let empty_blob: Vec<u8> = Vec::new();
+        // The empty BLOB precedes nonempty LOBs, which must not shift EXTDTA.
+        let params: [&dyn ToSql; 7] = [&small, &clob, &empty_blob, &dbclob, &id, &null_clob, &blob];
+        let encoded = build_sqldta(&params, &descriptors).unwrap();
+        let (triplets, fdodta) = split_sqldta(&encoded.sqldta);
+        assert_eq!(
+            triplets,
+            [
+                (0x33, 0x7FFF),
+                (0xCF, 0x8009),
+                (0xC9, 0x8009),
+                (0xCD, 0x8009),
+                (0x03, 0x0004),
+                (0xCF, 0x8009),
+                (0xC9, 0x8009),
+            ]
+        );
+
+        let mut expected = vec![NULL_LID, 0x00, 0x00, 0x05];
+        expected.extend_from_slice(b"small");
+        expected.extend(lob_placeholder(2));
+        expected.extend(lob_placeholder(0));
+        // DBCLOB lengths count UTF-16 code units: d plus a surrogate pair.
+        expected.extend(lob_placeholder(3));
+        expected.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x00]);
+        expected.push(NULL_DATA);
+        expected.extend(lob_placeholder(3));
+        assert_eq!(fdodta, expected);
+
+        let extdta = encoded
+            .extdta
+            .iter()
+            .map(|object| {
+                let object = ClientInner::parse_ddm(object).unwrap();
+                assert_eq!(object.code_point, codepoints::EXTDTA);
+                object.data
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            extdta,
+            [
+                vec![0x00, 0xC3, 0xA9],
+                vec![0x00, 0x00, 0x64, 0xD8, 0x34, 0xDD, 0x1E],
+                vec![0x00, 0x00, 0xFF, 0x07],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn luw_xml_inputs_always_use_placeholders_and_extdta() {
+        // XML has no declared input length, so values beyond 32767 bytes
+        // cannot fit a VARCHAR descriptor; LUW parses LOBCMIXED text instead.
+        let frames = vec![reply_frame(input_sqldard(&[(989, 0, 0), (497, 4, 0)]), 1)];
+        let client = Client::new(Config::default());
+        let inner = client.inner.lock().await;
+        let descriptors = inner.parse_input_descriptors(&frames).unwrap();
+        assert_eq!(descriptors[0].extdta_reference_length, Some(9));
+
+        let large = format!("<a>{}</a>", "é".repeat(20_000));
+        for (xml, id) in [(Some("<a/>"), 1i32), (Some(large.as_str()), 2), (None, 3)] {
+            let params: [&dyn ToSql; 2] = [&xml, &id];
+            let encoded = build_sqldta(&params, &descriptors).unwrap();
+            let (triplets, fdodta) = split_sqldta(&encoded.sqldta);
+            assert_eq!(triplets, [(0xCF, 0x8009), (0x03, 0x0004)]);
+
+            let mut expected = match xml {
+                Some(xml) => lob_placeholder(xml.len() as u64),
+                None => vec![NULL_DATA],
+            };
+            expected.insert(0, NULL_LID);
+            expected.push(INDICATOR_NOT_NULL);
+            expected.extend_from_slice(&id.to_le_bytes());
+            assert_eq!(fdodta, expected);
+
+            let extdta = encoded
+                .extdta
+                .iter()
+                .map(|object| ClientInner::parse_ddm(object).unwrap().data)
+                .collect::<Vec<_>>();
+            let expected = xml
+                .map(|xml| [&[0x00][..], xml.as_bytes()].concat())
+                .into_iter()
+                .collect::<Vec<_>>();
+            assert_eq!(extdta, expected);
+        }
+    }
+
+    #[test]
+    fn zos_lob_input_descriptors_are_not_externalized() {
+        let descriptor = db2_proto::fdoca::ColumnDescriptor {
+            column_index: 0,
+            drda_type: 0x33,
+            length: u16::MAX,
+            precision: 0,
+            scale: 0,
+            nullable: true,
+            ccsid: 37,
+            db2_type: db2_proto::types::Db2Type::Clob,
+            extdta_reference_length: None,
+            byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
+        };
+        let zos = ServerInfo {
+            product_name: "DB2".into(),
+            server_release: "DSN13015".into(),
+            server_class: "QDB2".into(),
+            manager_levels: Vec::new(),
+        };
+        let mut descriptors = [descriptor.clone()];
+        externalize_luw_lob_input_descriptors(&mut descriptors, Some(&zos));
+        assert_eq!(descriptors[0].drda_type, 0x33);
+        assert_eq!(descriptors[0].extdta_reference_length, None);
+
+        externalize_luw_lob_input_descriptors(&mut descriptors, None);
+        assert_eq!(descriptors[0].drda_type, 0xCF);
+        assert_eq!(descriptors[0].extdta_reference_length, Some(9));
+    }
+
+    #[test]
+    fn sqldta_chains_large_extdta_objects_with_its_correlation() {
+        let lob = |db2_type, drda_type| db2_proto::fdoca::ColumnDescriptor {
+            column_index: 0,
+            drda_type,
+            length: u16::MAX,
+            precision: 0,
+            scale: 0,
+            nullable: true,
+            ccsid: 1208,
+            db2_type,
+            extdta_reference_length: Some(LUW_LOB_INPUT_PLACEHOLDER_LEN),
+            byte_order: db2_proto::fdoca::ByteOrder::LittleEndian,
+        };
+        let descriptors = [
+            lob(db2_proto::types::Db2Type::Blob, 0xC9),
+            lob(db2_proto::types::Db2Type::Clob, 0xCF),
+        ];
+        let blob = (0..100_000).map(|index| index as u8).collect::<Vec<_>>();
+        let clob = "x".repeat(40_000);
+        let params: [&dyn ToSql; 2] = [&blob, &clob];
+        let encoded = build_sqldta(&params, &descriptors).unwrap();
+
+        let mut writer = DssWriter::new(7);
+        writer.write_request_next_same_corr(&[0, 4, 0x20, 0x0B], true);
+        encoded.write(&mut writer, true);
+        writer.write_request(&db2_proto::commands::rdbcmm::build_rdbcmm(), false);
+        let mut reader = DssReader::new(writer.finish());
+        let mut frames = Vec::new();
+        while let Some(frame) = reader.next_frame().unwrap() {
+            frames.push(frame);
+        }
+
+        let shape = frames
+            .iter()
+            .map(|frame| {
+                (
+                    frame.header.dss_type,
+                    frame.header.flags.chained,
+                    frame.header.flags.same_correlation,
+                    frame.header.correlation_id,
+                )
+            })
+            .collect::<Vec<_>>();
+        use db2_proto::dss::DssType::{Object, Request};
+        assert_eq!(
+            shape,
+            [
+                (Request, true, true, 7),
+                (Object, true, true, 7),
+                (Object, true, true, 7),
+                (Object, true, false, 7),
+                (Request, false, false, 7),
+            ]
+        );
+        assert_eq!(frames[1].payload, encoded.sqldta);
+        let blob_extdta = ClientInner::parse_ddm(&frames[2].payload).unwrap();
+        let clob_extdta = ClientInner::parse_ddm(&frames[3].payload).unwrap();
+        assert_eq!(blob_extdta.code_point, codepoints::EXTDTA);
+        assert_eq!(blob_extdta.data[0], INDICATOR_NOT_NULL);
+        assert_eq!(&blob_extdta.data[1..], blob.as_slice());
+        assert_eq!(clob_extdta.data[0], INDICATOR_NOT_NULL);
+        assert_eq!(&clob_extdta.data[1..], clob.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn invalid_description_reply_fails_execute() {
+        // DSCINVRM was previously ignored, so a rejected SQLDTA reported
+        // rowCount=0 without an error.
+        let mut payload = db2_proto::ddm::DdmBuilder::new(codepoints::DSCINVRM)
+            .add_u16(codepoints::SVRCOD, 8)
+            .build();
+        payload.extend(
+            db2_proto::ddm::DdmBuilder::new(codepoints::SQLCARD)
+                .add_raw(&[0xFF])
+                .build(),
+        );
+        let client = Client::new(Config::default());
+        let mut inner = client.inner.lock().await;
+
+        let err = inner
+            .process_execute_reply(&[reply_frame(payload, 1)])
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, Error::Protocol(message) if message.contains("execute failed with DSCINVRM")),
+            "{err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn parse_input_descriptors_reads_zos_descriptor_table() {
         let frames = vec![reply_frame(
@@ -8566,7 +8967,7 @@ mod tests {
         let state = "43";
         let reason = "2 REQ SEPARATED";
         let params: [&dyn ToSql; 4] = [&partition, &processed_date, &state, &reason];
-        let sqldta = build_sqldta(&params, &descriptors).unwrap();
+        let sqldta = build_sqldta(&params, &descriptors).unwrap().sqldta;
 
         assert_eq!(sqldta[11], db2_proto::types::DRDA_TYPE_NVARCHAR);
         assert_eq!(sqldta[14], db2_proto::types::DRDA_TYPE_NVARCHAR);

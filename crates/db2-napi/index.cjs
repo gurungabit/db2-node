@@ -276,14 +276,15 @@ function normalizeParam(value) {
     }
     return value.toISOString().replace('T', ' ').replace(/Z$/, '')
   }
-  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) {
-    return Array.from(value)
-  }
+  // Byte views reach the addon as-is; copying them into a JS array would cost
+  // one property access per byte for large BLOB parameters.
   if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(value)) {
-    return Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
+    return value instanceof Uint8Array
+      ? value
+      : new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
   }
   if (typeof ArrayBuffer !== 'undefined' && value instanceof ArrayBuffer) {
-    return Array.from(new Uint8Array(value))
+    return new Uint8Array(value)
   }
   return value
 }

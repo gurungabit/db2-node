@@ -150,10 +150,7 @@ impl JsClient {
                     .as_mut()
                     .ok_or_else(|| napi::Error::from_reason("Client is not connected"))?;
 
-                let db2_params = match &params {
-                    Some(p) => js_params_to_db2(p),
-                    None => Vec::new(),
-                };
+                let db2_params = params.map(js_params_to_db2).unwrap_or_default();
 
                 let param_refs: Vec<&dyn db2_client::ToSql> = db2_params
                     .iter()
