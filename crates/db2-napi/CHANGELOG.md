@@ -4,12 +4,14 @@ All notable changes to this package will be documented in this file.
 
 ## [1.0.27](https://github.com/gurungabit/db2-node/compare/v1.0.26...v1.0.27) (2026-10-05)
 
+db2-node 1.0.27 fixes four driver bugs found while benchmarking 1.0.26.
 
-### Bug Fixes
+- Commit `executeBatch` under autocommit. Rows from an autocommit batch previously stayed uncommitted, and invisible to other connections, until something else committed on the connection. The batch now commits once every row succeeds; if any row fails, it rolls back and throws the first error, so no partial rows are kept. Batches inside a transaction are unchanged. (PR #35)
+- Allow statements with more than 84 parameters. Parameter descriptors beyond the 84th now continue in FD:OCA CPT triplets, the layout Db2 uses for wide result sets, instead of failing with "too many parameters for SQLDTA descriptor header". (PR #35)
+- Bind whole JavaScript numbers up to `Number.MAX_SAFE_INTEGER` as integers, so values such as `606227179000` are accepted for BIGINT parameters. (PR #35)
+- Retry the padded RDBNAM when Db2 12.1 closes the socket after rejecting the trimmed form, fixing intermittent "RDB not accessed or database not found" connection failures. (PR #35)
 
-* bind safe integer numbers above 2^32 as integers ([bf2d2f3](https://github.com/gurungabit/db2-node/commit/bf2d2f367370d2f4fabd9566efc5ccbd5fffaf8a))
-* commit autocommit batches, allow &gt;84 parameters, bind large integers, retry RDBNAM on close ([1697774](https://github.com/gurungabit/db2-node/commit/169777432373c5133698e6b7d5b4f2be9e53fa13))
-* commit executeBatch under autocommit and roll back failed batches ([c4b0ead](https://github.com/gurungabit/db2-node/commit/c4b0ead602ae51b4a4a9679a7ff6aff6bfe84ee6))
+Validation covers Db2 LUW 12.1 and 11.5 and TLS on 12.1. No live z/OS server was available.
 
 ## [1.0.26](https://github.com/gurungabit/db2-node/compare/v1.0.25...v1.0.26) (2026-10-05)
 
