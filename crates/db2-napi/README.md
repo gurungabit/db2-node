@@ -4,7 +4,7 @@ Pure Rust DB2 driver for Node.js using the DRDA wire protocol directly. No IBM C
 
 ## Status
 
-`1.0.26` is the current release. It writes LOB and XML parameters larger than 32,767 bytes (#31), passes binary parameters without per-byte conversion, and completes Db2 LUW replies at the end of the DRDA reply chain instead of waiting on fixed timers. Validation covers Docker Db2 12.1 and 11.5, with verified TLS on 12.1. The package supports parameterized queries, prepared statements, transactions, connection pooling, TLS, `ibm_db` compatibility entry points, and the existing Db2 for z/OS paths. No live z/OS server was tested for this release.
+`1.0.27` is the current release. It commits autocommit `executeBatch` calls (rolling back a batch with a failed row), allows statements with more than 84 parameters, binds large whole numbers to BIGINT, and fixes intermittent connection failures on Db2 12.1. Validation covers Docker Db2 12.1 and 11.5, with verified TLS on 12.1. The package supports parameterized queries, prepared statements, transactions, connection pooling, TLS, `ibm_db` compatibility entry points, and the existing Db2 for z/OS paths. No live z/OS server was tested for this release.
 
 ## Install
 
@@ -15,10 +15,10 @@ npm install db2-node
 You can also install the npm-packed artifact from a GitHub release:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.26/db2-node-1.0.26.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.27/db2-node-1.0.27.tgz
 ```
 
-Replace `v1.0.26` and `1.0.26` with the release version you want.
+Replace `v1.0.27` and `1.0.27` with the release version you want.
 
 Prebuilt native binaries ship for supported platforms — no Rust toolchain needed:
 

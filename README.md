@@ -24,10 +24,10 @@ npm install db2-node
 Install from a GitHub release tarball:
 
 ```bash
-npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.26/db2-node-1.0.26.tgz
+npm install https://github.com/gurungabit/db2-node/releases/download/v1.0.27/db2-node-1.0.27.tgz
 ```
 
-Replace `v1.0.26` and `1.0.26` with the release version you want.
+Replace `v1.0.27` and `1.0.27` with the release version you want.
 
 ```ts
 import { Client } from "db2-node";
@@ -223,7 +223,7 @@ The deployed docs site lives at `https://db2-node.github.io/`.
 
 ## Status
 
-The `1.0.26` release writes LOB and XML parameters larger than 32,767 bytes (#31) and completes Db2 LUW replies at the end of the DRDA reply chain, so requests no longer pay fixed 25 ms and 250 ms reply waits. Validation uses Docker Db2 12.1 and 11.5:
+The `1.0.27` release commits autocommit `executeBatch` calls, allows statements with more than 84 parameters, binds large whole numbers to BIGINT, and fixes intermittent connection failures on Db2 12.1. Validation uses Docker Db2 12.1 and 11.5:
 
 - Rust and Node integration suites are green
 - TLS behavior is covered in both Rust and Node tests
