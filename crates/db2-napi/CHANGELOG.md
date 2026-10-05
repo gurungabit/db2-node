@@ -2,6 +2,15 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.27](https://github.com/gurungabit/db2-node/compare/v1.0.26...v1.0.27) (2026-10-05)
+
+
+### Bug Fixes
+
+* bind safe integer numbers above 2^32 as integers ([bf2d2f3](https://github.com/gurungabit/db2-node/commit/bf2d2f367370d2f4fabd9566efc5ccbd5fffaf8a))
+* commit autocommit batches, allow &gt;84 parameters, bind large integers, retry RDBNAM on close ([1697774](https://github.com/gurungabit/db2-node/commit/169777432373c5133698e6b7d5b4f2be9e53fa13))
+* commit executeBatch under autocommit and roll back failed batches ([c4b0ead](https://github.com/gurungabit/db2-node/commit/c4b0ead602ae51b4a4a9679a7ff6aff6bfe84ee6))
+
 ## [1.0.26](https://github.com/gurungabit/db2-node/compare/v1.0.25...v1.0.26) (2026-10-05)
 
 db2-node 1.0.26 fixes LOB parameters that were silently not written and removes the fixed reply waits that dominated request latency on Db2 LUW.
