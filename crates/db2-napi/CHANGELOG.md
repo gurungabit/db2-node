@@ -2,6 +2,20 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.0.26](https://github.com/gurungabit/db2-node/compare/v1.0.25...v1.0.26) (2026-10-05)
+
+
+### Bug Fixes
+
+* send LUW LOB parameters beyond 32767 bytes as EXTDTA ([9a94ee4](https://github.com/gurungabit/db2-node/commit/9a94ee4425fa22c52407d47652c974551dfefbb6))
+
+
+### Performance Improvements
+
+* complete LUW replies at the DRDA chain end instead of timed drains ([7233a9e](https://github.com/gurungabit/db2-node/commit/7233a9e1be942817c99d6159afead2b22e5421f1))
+* complete LUW replies at the DRDA chain end instead of timed drains ([91d6927](https://github.com/gurungabit/db2-node/commit/91d6927b426ccbf1eb5790f770d81f75941699d6))
+* pass binary parameters to the addon without per-byte arrays ([37bae9a](https://github.com/gurungabit/db2-node/commit/37bae9a1eb78543a2e2f869a6195e6d1903681b6))
+
 ## [1.0.25](https://github.com/gurungabit/db2-node/compare/v1.0.24...v1.0.25) (2026-10-04)
 
 db2-node 1.0.25 resolves seven reported issues across LOB decoding, JavaScript query APIs, bundled TLS libraries, and credential encoding.
