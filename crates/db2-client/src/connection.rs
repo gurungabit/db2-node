@@ -6583,7 +6583,7 @@ fn normalize_luw_descriptors(
     use db2_proto::types::Db2Type;
     for descriptor in descriptors {
         match descriptor.drda_type & !1 {
-            0x36 | 0x38 | 0x3A => {
+            0x36 | 0x38 | 0x3A | 0xB0 => {
                 descriptor.ccsid = 1200;
                 descriptor.byte_order = ByteOrder::LittleEndian;
             }
@@ -7536,6 +7536,9 @@ fn process_query_frames(
                             normalize_luw_descriptors(&mut descriptors, None);
                         }
                         if !descriptors.is_empty() {
+                            if let Some(sqldard) = sqldard_descriptors.as_mut() {
+                                db2_proto::fdoca::apply_qrydsc_string_layout(sqldard, &descriptors);
+                            }
                             if debug_hex_enabled() {
                                 eprintln!(
                                     "[db2-wire] parsed {} QRYDSC descriptor(s)",
