@@ -278,6 +278,11 @@ fn compact_gda_descriptor_type(
         0x0C => Db2Type::Real,
         0x36 => Db2Type::Graphic(length),
         0x38 | 0x3A => Db2Type::VarGraphic(length),
+        // Db2 LUW 12.1 sends a fixed-length CHAR or GRAPHIC declared in
+        // CODEUNITS32 as a length-prefixed value: 0xB2/0xB3 carry a UTF-8 byte
+        // count, 0xB0/0xB1 a UTF-16 code-unit count.
+        0xB0 => Db2Type::VarGraphic(length),
+        0xB2 => Db2Type::VarChar(length),
         0xCE => Db2Type::Clob,
         _ => Db2Type::from_drda_type(drda_type, length, 0, 0).0,
     };
@@ -353,6 +358,26 @@ fn parse_sda_triplet(data: &[u8], col_index: usize) -> Option<ColumnDescriptor> 
         extdta_reference_length: declared_lob_reference_length(drda_type, length),
         byte_order: ByteOrder::LittleEndian,
     })
+}
+
+/// Apply the wire layout QRYDSC declares to descriptors built from SQLDARD.
+///
+/// SQLDARD describes a CODEUNITS32 CHAR or GRAPHIC column as fixed-length
+/// (SQLTYPE 452/468), but Db2 LUW sends its values length-prefixed and says
+/// so in QRYDSC (LIDs 0xB0-0xB3). Decoding them as fixed-width shifts every
+/// later column and row.
+pub fn apply_qrydsc_string_layout(sqldard: &mut [ColumnDescriptor], qrydsc: &[ColumnDescriptor]) {
+    if sqldard.len() != qrydsc.len() {
+        return;
+    }
+    for (desc, wire) in sqldard.iter_mut().zip(qrydsc) {
+        if matches!(
+            (wire.drda_type & 0xFE, &desc.db2_type),
+            (0xB2, Db2Type::Char(_)) | (0xB0, Db2Type::Graphic(_))
+        ) {
+            desc.drda_type = wire.drda_type;
+        }
+    }
 }
 
 /// Decode a single row of data from QRYDTA bytes using column descriptors.
@@ -862,6 +887,13 @@ fn decode_column_value(data: &[u8], col: &ColumnDescriptor) -> Result<(Db2Value,
             let val = types::decode_packed_decimal(&data[..byte_len], *precision, *scale)?;
             Ok((Db2Value::Decimal(val), byte_len))
         }
+        Db2Type::Char(_) if col.drda_type & 0xFE == 0xB2 => {
+            let (bytes, total) = length_prefixed(data, 1)?;
+            Ok((
+                Db2Value::Char(decode_character_bytes(bytes, col.ccsid)),
+                total,
+            ))
+        }
         Db2Type::Char(len) => {
             let flen = *len as usize;
             if data.len() < flen {
@@ -1135,6 +1167,13 @@ fn decode_column_value(data: &[u8], col: &ColumnDescriptor) -> Result<(Db2Value,
             }
             Ok((Db2Value::RowId(format_rowid(&data[..flen])), flen))
         }
+        Db2Type::Graphic(_) if col.drda_type & 0xFE == 0xB0 => {
+            let (bytes, total) = length_prefixed(data, 2)?;
+            Ok((
+                Db2Value::Char(decode_graphic_bytes(bytes, col.ccsid)),
+                total,
+            ))
+        }
         Db2Type::Graphic(len) => {
             let flen = graphic_fixed_byte_len(col, *len);
             if data.len() < flen {
@@ -1226,6 +1265,24 @@ fn empty_lob_value(db2_type: &Db2Type) -> Db2Value {
         Db2Type::Xml => Db2Value::Xml(String::new()),
         _ => Db2Value::Clob(String::new()),
     }
+}
+
+/// A 2-byte big-endian count of `unit`-byte code units, then the value.
+fn length_prefixed(data: &[u8], unit: usize) -> Result<(&[u8], usize)> {
+    if data.len() < 2 {
+        return Err(ProtoError::BufferTooShort {
+            expected: 2,
+            actual: data.len(),
+        });
+    }
+    let total = 2 + u16::from_be_bytes([data[0], data[1]]) as usize * unit;
+    if data.len() < total {
+        return Err(ProtoError::BufferTooShort {
+            expected: total,
+            actual: data.len(),
+        });
+    }
+    Ok((&data[2..total], total))
 }
 
 fn graphic_fixed_byte_len(col: &ColumnDescriptor, len: u16) -> usize {
@@ -2082,5 +2139,86 @@ mod tests {
             values[0],
             Db2Value::Clob("LOB locator 0x020000000012345678".to_string())
         );
+    }
+
+    fn sqldard_cols(middle: Db2Type, drda: u8, ccsid: u16) -> Vec<ColumnDescriptor> {
+        let col =
+            |i, drda_type, length, precision, scale, nullable, ccsid, db2_type| ColumnDescriptor {
+                column_index: i,
+                drda_type,
+                length,
+                precision,
+                scale,
+                nullable,
+                ccsid,
+                db2_type,
+                extdta_reference_length: None,
+                byte_order: ByteOrder::LittleEndian,
+            };
+        let len = match middle {
+            Db2Type::Char(n) | Db2Type::Graphic(n) => n,
+            _ => unreachable!(),
+        };
+        vec![
+            col(0, 0x02, 4, 0, 0, false, 0, Db2Type::Integer),
+            col(1, drda, len, 0, 0, true, ccsid, middle),
+            col(
+                2,
+                0x0D,
+                4,
+                7,
+                3,
+                true,
+                0,
+                Db2Type::Decimal {
+                    precision: 7,
+                    scale: 3,
+                },
+            ),
+        ]
+    }
+
+    // Captured from Db2 12.1.0.0: SELECT ID, V, N over (ID INT NOT NULL,
+    // V CHAR(5 CODEUNITS32) or GRAPHIC(5 CODEUNITS32), N DECIMAL(7,3)).
+    #[test]
+    fn test_codeunits32_fixed_strings_are_length_prefixed_on_the_wire() {
+        let qrydsc = |lid: u8, len: u8| {
+            parse_qrydsc(&[
+                0x0C, 0x76, 0xD0, 0x02, 0x00, 0x04, lid, 0x00, len, 0x0F, 0x07, 0x03, 0x09, 0x71,
+                0xE0, 0x54, 0x00, 0x01, 0xD0, 0x00, 0x01, 0x06, 0x71, 0xF0, 0xE0, 0x00, 0x00,
+            ])
+            .unwrap()
+        };
+
+        let mut chars = sqldard_cols(Db2Type::Char(20), 0x31, 1208);
+        apply_qrydsc_string_layout(&mut chars, &qrydsc(0xB3, 0x14));
+        let data = [
+            0xFF, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, b'a', b'b', b'c', b' ', b' ',
+            0x00, 0x00, 0x01, 0x50, 0x0C, // 1, 'abc  ', 1.500
+            0xFF, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x6E, 0xC3, 0xA9, 0xE2, 0x82,
+            0xAC, b' ', b' ', 0x00, 0x00, 0x04, 0x00, 0x0C, // 4, 'n\u{e9}\u{20ac}  ', 4.000
+        ];
+        let rows = decode_rows(&data, &chars).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][1], Db2Value::Char("abc  ".into()));
+        assert_eq!(rows[0][2], Db2Value::Decimal("1.500".into()));
+        assert_eq!(rows[1][0], Db2Value::Integer(4));
+        assert_eq!(rows[1][1], Db2Value::Char("n\u{e9}\u{20ac}  ".into()));
+        assert_eq!(rows[1][2], Db2Value::Decimal("4.000".into()));
+
+        let mut graphics = sqldard_cols(Db2Type::Graphic(10), 0x3D, 1200);
+        apply_qrydsc_string_layout(&mut graphics, &qrydsc(0xB1, 0x0A));
+        let data = [
+            0xFF, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, b'a', 0x00, b'b', 0x00,
+            b'c', 0x00, b' ', 0x00, b' ', 0x00, 0x00, 0x01, 0x50, 0x0C, 0xFF, 0x00, 0x04, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x6E, 0x00, 0xE9, 0x20, 0xAC, 0x00, b' ', 0x00,
+            b' ', 0x00, 0x00, 0x04, 0x00, 0x0C,
+        ];
+        let rows = decode_rows(&data, &graphics).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][1], Db2Value::Char("abc  ".into()));
+        assert_eq!(rows[0][2], Db2Value::Decimal("1.500".into()));
+        assert_eq!(rows[1][1], Db2Value::Char("n\u{e9}\u{20ac}  ".into()));
+        assert_eq!(rows[1][2], Db2Value::Decimal("4.000".into()));
     }
 }

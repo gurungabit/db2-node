@@ -6583,7 +6583,7 @@ fn normalize_luw_descriptors(
     use db2_proto::types::Db2Type;
     for descriptor in descriptors {
         match descriptor.drda_type & !1 {
-            0x36 | 0x38 | 0x3A => {
+            0x36 | 0x38 | 0x3A | 0xB0 => {
                 descriptor.ccsid = 1200;
                 descriptor.byte_order = ByteOrder::LittleEndian;
             }
@@ -7536,6 +7536,9 @@ fn process_query_frames(
                             normalize_luw_descriptors(&mut descriptors, None);
                         }
                         if !descriptors.is_empty() {
+                            if let Some(sqldard) = sqldard_descriptors.as_mut() {
+                                db2_proto::fdoca::apply_qrydsc_string_layout(sqldard, &descriptors);
+                            }
                             if debug_hex_enabled() {
                                 eprintln!(
                                     "[db2-wire] parsed {} QRYDSC descriptor(s)",
@@ -7683,8 +7686,11 @@ fn process_query_frames(
                             format_hex_preview(&obj.data, 192)
                         );
                     }
-                    let descriptors = parse_sqldard_descriptors(&obj);
+                    let mut descriptors = parse_sqldard_descriptors(&obj);
                     if !descriptors.is_empty() {
+                        if let Some(qrydsc) = qrydsc_descriptors.as_ref() {
+                            db2_proto::fdoca::apply_qrydsc_string_layout(&mut descriptors, qrydsc);
+                        }
                         if debug_hex_enabled() {
                             eprintln!(
                                 "[db2-wire] parsed {} SQLDARD descriptor(s) in query reply",
@@ -10567,6 +10573,187 @@ mod tests {
             &params,
             &err,
         ));
+    }
+
+    // Db2 LUW SQLDARD with little-endian SQLTYPE and payload fields.
+    fn luw_sqldard(cols: &[(u16, u64, u16, u16, u16)]) -> Vec<u8> {
+        let mut data = vec![0x00];
+        data.extend_from_slice(&0i32.to_be_bytes());
+        data.extend_from_slice(b"00000");
+        data.extend_from_slice(b"SQLPROC1");
+        data.extend_from_slice(&[0xFF, 0xFF]);
+        data.extend_from_slice(&(cols.len() as u16).to_le_bytes());
+        for (sql_type, length, precision, scale, ccsid) in cols {
+            data.extend_from_slice(&precision.to_le_bytes());
+            data.extend_from_slice(&scale.to_le_bytes());
+            data.extend_from_slice(&length.to_le_bytes());
+            data.extend_from_slice(&sql_type.to_le_bytes());
+            data.extend_from_slice(&ccsid.to_le_bytes());
+            data.push(0xFF);
+        }
+        db2_proto::ddm::DdmBuilder::new(codepoints::SQLDARD)
+            .add_raw(&data)
+            .build()
+    }
+
+    fn codeunits32_qrydsc(lid: u8, len: u8) -> Vec<u8> {
+        db2_proto::ddm::DdmBuilder::new(codepoints::QRYDSC)
+            .add_raw(&[
+                0x0C, 0x76, 0xD0, 0x02, 0x00, 0x04, lid, 0x00, len, 0x0F, 0x07, 0x03, 0x09, 0x71,
+                0xE0, 0x54, 0x00, 0x01, 0xD0, 0x00, 0x01, 0x06, 0x71, 0xF0, 0xE0, 0x00, 0x00,
+            ])
+            .build()
+    }
+
+    fn run_query_objects(
+        objects: Vec<Vec<u8>>,
+        prefer_sqldard_descriptors: bool,
+    ) -> (Vec<Row>, bool, Vec<u8>) {
+        let frame = reply_frame(objects.concat(), 1);
+        let column_info = ["ID", "V", "N"]
+            .map(|name| ColumnInfo::new(name.to_string(), "Unknown".to_string(), true))
+            .to_vec();
+        let mut rows = Vec::new();
+        let mut sqldard_descriptors = None;
+        let mut qrydsc_descriptors = None;
+        let mut query_instance_id = None;
+        let mut pending_row_bytes = Vec::new();
+        let mut extdta_payloads = Vec::new();
+        let mut end_of_query = false;
+        let mut diagnostics = Vec::new();
+        process_query_frames(
+            &[frame],
+            false,
+            &column_info,
+            &mut rows,
+            &mut sqldard_descriptors,
+            &mut qrydsc_descriptors,
+            prefer_sqldard_descriptors,
+            &mut query_instance_id,
+            &mut pending_row_bytes,
+            &mut extdta_payloads,
+            &mut end_of_query,
+            false,
+            &mut diagnostics,
+        )
+        .unwrap();
+        (rows, end_of_query, pending_row_bytes)
+    }
+
+    // Captured from Db2 12.1.0.0: SELECT ID, V, N over (ID INT NOT NULL,
+    // V CHAR(5 CODEUNITS32) or GRAPHIC(5 CODEUNITS32), N DECIMAL(7,3)).
+    const CODEUNITS32_CHAR_ROWS: [u8; 41] = [
+        0xFF, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, b'a', b'b', b'c', b' ', b' ', 0x00,
+        0x00, 0x01, 0x50, 0x0C, 0xFF, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x6E, 0xC3,
+        0xA9, 0xE2, 0x82, 0xAC, b' ', b' ', 0x00, 0x00, 0x04, 0x00, 0x0C,
+    ];
+    const CODEUNITS32_GRAPHIC_ROWS: [u8; 48] = [
+        0xFF, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, b'a', 0x00, b'b', 0x00, b'c',
+        0x00, b' ', 0x00, b' ', 0x00, 0x00, 0x01, 0x50, 0x0C, 0xFF, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x05, 0x00, 0x6E, 0x00, 0xE9, 0x20, 0xAC, 0x00, b' ', 0x00, b' ', 0x00, 0x00,
+        0x04, 0x00, 0x0C,
+    ];
+
+    fn qrydta(rows: &[u8]) -> Vec<u8> {
+        db2_proto::ddm::DdmBuilder::new(codepoints::QRYDTA)
+            .add_raw(rows)
+            .build()
+    }
+
+    fn endqryrm() -> Vec<u8> {
+        db2_proto::ddm::DdmBuilder::new(codepoints::ENDQRYRM).build()
+    }
+
+    #[test]
+    fn query_frames_decode_codeunits32_fixed_strings_in_either_descriptor_order() {
+        let cases = [
+            (
+                (453, 20, 1208),
+                codeunits32_qrydsc(0xB3, 0x14),
+                &CODEUNITS32_CHAR_ROWS[..],
+            ),
+            (
+                (469, 10, 1200),
+                codeunits32_qrydsc(0xB1, 0x0A),
+                &CODEUNITS32_GRAPHIC_ROWS[..],
+            ),
+        ];
+        for ((sql_type, length, ccsid), qrydsc, data) in cases {
+            let sqldard = luw_sqldard(&[
+                (496, 4, 0, 0, 0),
+                (sql_type, length, 0, 0, ccsid),
+                (485, 7, 7, 3, 0),
+            ]);
+            for sqldard_first in [true, false] {
+                let objects = if sqldard_first {
+                    vec![sqldard.clone(), qrydsc.clone(), qrydta(data), endqryrm()]
+                } else {
+                    vec![qrydsc.clone(), sqldard.clone(), qrydta(data), endqryrm()]
+                };
+                let (rows, end_of_query, pending) = run_query_objects(objects, true);
+                let case = format!("sqltype {sql_type}, sqldard_first {sqldard_first}");
+                assert!(end_of_query, "{case}");
+                assert!(pending.is_empty(), "{case}");
+                assert_eq!(rows.len(), 2, "{case}");
+                assert_eq!(
+                    rows[0].values(),
+                    &[
+                        Db2Value::Integer(1),
+                        Db2Value::Char("abc  ".into()),
+                        Db2Value::Decimal("1.500".into()),
+                    ]
+                );
+                assert_eq!(
+                    rows[1].values(),
+                    &[
+                        Db2Value::Integer(4),
+                        Db2Value::Char("n\u{e9}\u{20ac}  ".into()),
+                        Db2Value::Decimal("4.000".into()),
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn query_frames_decode_codeunits32_fixed_strings_from_qrydsc_alone() {
+        let cases = [
+            (
+                codeunits32_qrydsc(0xB3, 0x14),
+                &CODEUNITS32_CHAR_ROWS[..],
+                Db2Value::VarChar("abc  ".into()),
+                Db2Value::VarChar("n\u{e9}\u{20ac}  ".into()),
+            ),
+            (
+                codeunits32_qrydsc(0xB1, 0x0A),
+                &CODEUNITS32_GRAPHIC_ROWS[..],
+                Db2Value::VarChar("abc  ".into()),
+                Db2Value::VarChar("n\u{e9}\u{20ac}  ".into()),
+            ),
+        ];
+        for (qrydsc, data, first, second) in cases {
+            let (rows, end_of_query, pending) =
+                run_query_objects(vec![qrydsc, qrydta(data), endqryrm()], false);
+            assert!(end_of_query);
+            assert!(pending.is_empty());
+            assert_eq!(rows.len(), 2);
+            assert_eq!(
+                rows[0].values(),
+                &[
+                    Db2Value::Integer(1),
+                    first,
+                    Db2Value::Decimal("1.500".into()),
+                ]
+            );
+            assert_eq!(
+                rows[1].values(),
+                &[
+                    Db2Value::Integer(4),
+                    second,
+                    Db2Value::Decimal("4.000".into()),
+                ]
+            );
+        }
     }
 }
 
